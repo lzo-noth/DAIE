@@ -43,7 +43,7 @@ python -m dai_detect single "https://example.com/episode.mp3" --report timeline.
 }
 ```
 
-训练（需要人工标注；按 feed 分组做留一验证）：
+训练（至少需要两个独立节目；交叉验证为按 feed 的留一验证）：
 
 ```bash
 python scripts/train_single_episode.py \
@@ -111,7 +111,7 @@ python scripts/snapshot_audio.py \
 
 - `scripts/train_single_episode.py` 默认拒绝缺少 `source_sha256`/`audio_id` 的标注；字节或 PCM 不匹配直接中止训练。调试时才用 `--allow-unverified-audio` / `--allow-audio-mismatch`。
 - `scripts/collect_labels.py` 会把报告里的 `audio_id`、`audio_id_kind`、`source_sha256` 一起写入 `feedback/labels.jsonl`。弱监督训练按 `audio_id` 分组，旧的无身份标签会被跳过，避免把不同变体的标签混用。
-- `scripts/blind_test.py` 在生成时间轴后才校验真值中的身份；不匹配时返回 exit 3，不评分。
+- `scripts/blind_test.py` 在生成时间轴后才校验真值中的身份；真值缺少 `audio_id`/`audio_id_kind`（本地音频还缺 `source_sha256`）时同样拒绝评分并返回 exit 3。`--allow-audio-mismatch` 只覆盖“身份不一致”，不能覆盖“身份缺失”；后者只能用 `--allow-unverified-ground-truth` 在调试时显式跳过。
 - 单集时间轴和检测报告都会输出 `audio.id` / `audio.source_sha256`。
 - 旧版 `platforms` 循环是流式分析 URL，没有归档被标注的那一份音频；因此它产出的 LLM 标签没有可验证的音频身份，不能直接用于新模型。要使用弱监督，必须先用 `snapshot_audio.py` 归档音频，再在该快照上产生标签。
 

@@ -41,6 +41,7 @@ from dai_detect.boundary_model import (
     heuristic_boundary_scores,
 )
 from dai_detect.evaluation import evaluate_events
+from dai_detect.metrics import best_f1_threshold, roc_auc
 from dai_detect.refinement import refine_events
 from dai_detect.single_episode import extract_features
 from dai_detect.single_features import WINDOW_FEATURES, build_windows, window_labels
@@ -199,40 +200,6 @@ def _identity_problems(entry: dict, audio: str, mono: dict, allow_unverified: bo
     return problems
 
 
-def _auc(labels: np.ndarray, scores: np.ndarray) -> float:
-    positives = int(labels.sum())
-    negatives = len(labels) - positives
-    if positives == 0 or negatives == 0:
-        return 0.0
-    order = np.argsort(scores)
-    ranks = np.empty(len(scores), dtype=np.float64)
-    _, inverse = np.unique(scores, return_inverse=True)
-    cumulative = np.bincount(inverse, weights=np.arange(1, len(scores) + 1))
-    counts = np.bincount(inverse)
-    average = cumulative / np.maximum(counts, 1)
-    ranks[order] = average[inverse]
-    return float((ranks[labels == 1].sum() - positives * (positives + 1) / 2.0) / (positives * negatives))
-
-
-def _best_threshold(labels: np.ndarray, scores: np.ndarray) -> tuple[float, dict]:
-    best = (0.5, 0.0, 0.0, 0.0)
-    for threshold in np.linspace(0.05, 0.95, 91):
-        predicted = scores >= threshold
-        tp = int(np.sum(predicted & (labels == 1)))
-        fp = int(np.sum(predicted & (labels == 0)))
-        fn = int(np.sum(~predicted & (labels == 1)))
-        precision = tp / (tp + fp) if tp + fp else 0.0
-        recall = tp / (tp + fn) if tp + fn else 0.0
-        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
-        # Prefer the threshold closest to 0.5 when several thresholds tie on
-        # F1; otherwise a perfectly separable training set selects 0.05.
-        if f1 > best[3] + 1e-9 or (
-            abs(f1 - best[3]) <= 1e-9 and abs(threshold - 0.5) < abs(best[0] - 0.5)
-        ):
-            best = (float(threshold), precision, recall, f1)
-    return best[0], {"precision": round(best[1], 4), "recall": round(best[2], 4), "f1": round(best[3], 4)}
-
-
 def _fit_logistic(X: np.ndarray, y: np.ndarray, l2: float = 1.0, max_iter: int = 20) -> dict:
     mean = X.mean(axis=0)
     scale = X.std(axis=0)
@@ -287,13 +254,22 @@ def _balance(X: np.ndarray, y: np.ndarray, ratio: int = 4, seed: int = 13) -> tu
 
 
 def _group_folds(groups: list[str]) -> list[list[int]]:
+    """Leave-one-feed-out folds: each fold returns the held-out indices.
+
+    The caller marks exactly these indices as test rows. Returning the
+    complement here would train on the held-out feed and test on everything
+    else, which is the reverse of grouped cross-validation.
+    """
     unique = sorted(set(groups))
-    if len(unique) >= 2:
-        return [[index for index, group in enumerate(groups) if group != held] for held in unique]
-    count = len(groups)
-    splits = min(5, count)
-    assignment = np.arange(count) % max(1, splits)
-    return [[index for index in range(count) if assignment[index] != fold] for fold in range(splits)]
+    if len(unique) < 2:
+        raise ValueError(
+            "至少需要两个独立节目（feed）才能做分组交叉验证；"
+            "同一节目内部高度相似，单节目评测会过于乐观"
+        )
+    return [
+        [index for index, group in enumerate(groups) if group == held]
+        for held in unique
+    ]
 
 
 def _event_metrics(
@@ -310,7 +286,13 @@ def _event_metrics(
         sample = samples[index]
         if sample.ads is None:
             continue
-        probability = probabilities[index]
+        probability = np.asarray(probabilities[index])
+        expected = len(sample.windows["times"])
+        if len(probability) != expected:
+            raise ValueError(
+                f"事件评估概率长度 {len(probability)} 与完整窗口数 {expected} 不一致；"
+                "必须用该折模型对全部窗口重新预测"
+            )
         events = decode_windows(
             sample.windows["times"],
             probability,
@@ -486,14 +468,18 @@ def main() -> int:
     print(f"[data] {len(samples)} 集, {int(y_all.sum())} 正窗口, {int(len(y_all) - y_all.sum())} 负窗口")
 
     # Out-of-fold probabilities for threshold selection and honest metrics.
-    oof = np.zeros(len(y_all), dtype=np.float64)
-    folds = _group_folds(groups)
+    try:
+        folds = _group_folds(groups)
+    except ValueError as exc:
+        print(f"[error] {exc}")
+        return 1
     offset = 0
     per_episode_offset: dict[int, tuple[int, int]] = {}
     for sample in samples:
         per_episode_offset[id(sample)] = (offset, offset + len(sample.labels))
         offset += len(sample.labels)
-    fold_reports = []
+    oof = np.zeros(len(y_all), dtype=np.float64)
+    full_oof: dict[int, np.ndarray] = {}
     for fold_index, held in enumerate(folds):
         held_rows = np.zeros(len(y_all), dtype=bool)
         for index in held:
@@ -502,25 +488,23 @@ def main() -> int:
         train_X, train_y = _balance(X_all[~held_rows], y_all[~held_rows], ratio=4, seed=fold_index + 1)
         model = _fit_logistic(train_X, train_y)
         oof[held_rows] = _predict(model, X_all[held_rows])
-        held_episodes = [index for index in held]
-        probabilities = {}
-        for index in held_episodes:
-            begin, end = per_episode_offset[id(samples[index])]
-            probabilities[index] = oof[begin:end]
-        events = _event_metrics(samples, held_episodes, probabilities, threshold=0.5, refine=True)
-        fold_reports.append({"fold": fold_index, "held": held, "events": events})
-        print(f"[fold {fold_index + 1}/{len(folds)}] 留出 {len(held)} 集, events={events}", flush=True)
+        # Event evaluation needs one probability per full-episode window; the
+        # labelled subset is shorter and would misalign the decoder timeline.
+        for index in held:
+            full_oof[index] = _predict(model, samples[index].windows["features"])
+        print(f"[fold {fold_index + 1}/{len(folds)}] 训练完成，留出 {len(held)} 集", flush=True)
 
-    threshold, window_metrics = _best_threshold(y_all, oof)
-    window_metrics["auc"] = round(_auc(y_all, oof), 4)
+    threshold, window_metrics = best_f1_threshold(y_all, oof)
+    window_metrics["auc"] = round(roc_auc(y_all, oof), 4)
     final_model = _fit_logistic(*_balance(X_all, y_all, ratio=4, seed=101))
-    oof_probabilities = {
-        index: oof[per_episode_offset[id(sample)][0]: per_episode_offset[id(sample)][1]]
-        for index, sample in enumerate(samples)
-    }
     event_metrics = _event_metrics(
-        samples, list(range(len(samples))), oof_probabilities, threshold=threshold, refine=True
+        samples, list(range(len(samples))), full_oof, threshold=threshold, refine=True
     )
+    fold_reports = []
+    for fold_index, held in enumerate(folds):
+        events = _event_metrics(samples, held, full_oof, threshold=threshold, refine=True)
+        fold_reports.append({"fold": fold_index, "held": held, "events": events})
+        print(f"[fold {fold_index + 1}/{len(folds)}] 留出评测: {events}", flush=True)
 
     payload = {
         "version": 1,
@@ -550,40 +534,51 @@ def main() -> int:
         X_boundary = np.vstack(boundary_X).astype(np.float32)
         y_boundary = np.concatenate(boundary_y)
         if len(np.unique(y_boundary)) >= 2:
-            boundary_oof = np.zeros(len(y_boundary), dtype=np.float64)
-            boundary_folds = _group_folds(boundary_groups)
-            # Boundary sample order follows episodes, so reuse the episode group
-            # boundaries through per-episode sample counts.
-            counts = [len(y) for y in boundary_y]
-            starts = np.cumsum([0] + counts[:-1])
-            for fold_index, held in enumerate(boundary_folds):
-                held_rows = np.zeros(len(y_boundary), dtype=bool)
-                for index in held:
-                    if index < len(starts):
-                        held_rows[starts[index]: starts[index] + counts[index]] = True
-                train_X, train_y = _balance(X_boundary[~held_rows], y_boundary[~held_rows], ratio=6, seed=fold_index + 11)
-                boundary_model = _fit_logistic(train_X, train_y)
-                boundary_oof[held_rows] = _predict(boundary_model, X_boundary[held_rows])
-            boundary_threshold, boundary_metrics = _best_threshold(y_boundary, boundary_oof)
-            boundary_metrics["auc"] = round(_auc(y_boundary, boundary_oof), 4)
-            final_boundary = _fit_logistic(*_balance(X_boundary, y_boundary, ratio=6, seed=707))
-            boundary_payload = {
-                "version": 1,
-                "kind": "logistic",
-                "features": list(BOUNDARY_FEATURES),
-                **final_boundary,
-                "threshold": round(boundary_threshold, 4),
-                "trained_at": payload["trained_at"],
-                "metrics": {
-                    "samples": int(len(y_boundary)),
-                    "positives": int(y_boundary.sum()),
-                    "frame": boundary_metrics,
-                },
-            }
-            args.boundary_out.parent.mkdir(parents=True, exist_ok=True)
-            args.boundary_out.write_text(json.dumps(boundary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            print(f"[boundary] {args.boundary_out}")
-            print(json.dumps(boundary_metrics, ensure_ascii=False))
+            try:
+                boundary_folds = _group_folds(boundary_groups)
+            except ValueError as exc:
+                print(f"[boundary] 跳过: {exc}")
+                boundary_folds = []
+            if not boundary_folds:
+                print("[boundary] 跳过：没有可用的节目分组折")
+            else:
+                boundary_oof = np.zeros(len(y_boundary), dtype=np.float64)
+                # Boundary sample order follows episodes, so reuse the episode
+                # group boundaries through per-episode sample counts.
+                counts = [len(y) for y in boundary_y]
+                starts = np.cumsum([0] + counts[:-1])
+                for fold_index, held in enumerate(boundary_folds):
+                    held_rows = np.zeros(len(y_boundary), dtype=bool)
+                    for index in held:
+                        if index < len(starts):
+                            held_rows[starts[index]: starts[index] + counts[index]] = True
+                    train_X, train_y = _balance(
+                        X_boundary[~held_rows], y_boundary[~held_rows], ratio=6, seed=fold_index + 11
+                    )
+                    boundary_model = _fit_logistic(train_X, train_y)
+                    boundary_oof[held_rows] = _predict(boundary_model, X_boundary[held_rows])
+                boundary_threshold, boundary_metrics = best_f1_threshold(y_boundary, boundary_oof)
+                boundary_metrics["auc"] = round(roc_auc(y_boundary, boundary_oof), 4)
+                final_boundary = _fit_logistic(*_balance(X_boundary, y_boundary, ratio=6, seed=707))
+                boundary_payload = {
+                    "version": 1,
+                    "kind": "logistic",
+                    "features": list(BOUNDARY_FEATURES),
+                    **final_boundary,
+                    "threshold": round(boundary_threshold, 4),
+                    "trained_at": payload["trained_at"],
+                    "metrics": {
+                        "samples": int(len(y_boundary)),
+                        "positives": int(y_boundary.sum()),
+                        "frame": boundary_metrics,
+                    },
+                }
+                args.boundary_out.parent.mkdir(parents=True, exist_ok=True)
+                args.boundary_out.write_text(
+                    json.dumps(boundary_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                print(f"[boundary] {args.boundary_out}")
+                print(json.dumps(boundary_metrics, ensure_ascii=False))
     return 0
 
 

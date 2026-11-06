@@ -34,10 +34,15 @@ def _load_ground_truth(path: Path) -> tuple[list[dict], float | None, dict]:
     else:
         ads = payload.get("ads") or []
         duration = payload.get("duration_s")
+        audio_meta = payload.get("audio") or {}
         identity = {
-            "source_sha256": str(payload.get("source_sha256") or ""),
-            "audio_id": str(payload.get("audio_id") or ""),
-            "audio_id_kind": str(payload.get("audio_id_kind") or ""),
+            "source_sha256": str(
+                payload.get("source_sha256") or audio_meta.get("source_sha256") or ""
+            ),
+            "audio_id": str(payload.get("audio_id") or audio_meta.get("id") or ""),
+            "audio_id_kind": str(
+                payload.get("audio_id_kind") or audio_meta.get("id_kind") or ""
+            ),
         }
     rows = []
     for ad in ads:
@@ -50,22 +55,51 @@ def _load_ground_truth(path: Path) -> tuple[list[dict], float | None, dict]:
     return rows, float(duration) if duration else None, identity
 
 
-def _identity_mismatches(timeline_audio: dict, ground_truth: dict) -> list[str]:
-    problems: list[str] = []
-    if ground_truth.get("source_sha256"):
-        if timeline_audio.get("source_sha256") and timeline_audio["source_sha256"] != ground_truth["source_sha256"]:
-            problems.append("source_sha256 不匹配：输入音频与标注音频不是同一份")
-        elif not timeline_audio.get("source_sha256") and not ground_truth.get("audio_id"):
-            problems.append("输入音频不是本地文件且真值没有 audio_id，无法校验是否为同一份")
-    if ground_truth.get("audio_id"):
-        if not timeline_audio.get("id"):
-            problems.append("真值有 audio_id，但检测时间轴缺少音频内容指纹")
-        elif timeline_audio["id"] != ground_truth["audio_id"]:
-            problems.append("audio_id 不匹配：输入音频是另一个 DAI 变体")
-        kind = ground_truth.get("audio_id_kind") or ""
-        if kind and timeline_audio.get("id_kind") and kind != timeline_audio["id_kind"]:
-            problems.append(f"audio_id_kind 不一致（真值 {kind}, 输入 {timeline_audio['id_kind']}）")
-    return problems
+def _identity_checks(
+    timeline_audio: dict,
+    ground_truth: dict,
+    input_is_local: bool,
+) -> tuple[list[str], list[str]]:
+    """Return ``(missing_fields, value_mismatches)``.
+
+    Missing identity is a different failure from a mismatched identity: the
+    former means the label cannot be proven to belong to any audio, the latter
+    means it belongs to a different one. Neither is silently accepted.
+    """
+    missing: list[str] = []
+    mismatches: list[str] = []
+    has_identity = bool(ground_truth.get("source_sha256") or ground_truth.get("audio_id"))
+    if not has_identity:
+        required = "audio_id 与 audio_id_kind"
+        if input_is_local:
+            required += "，以及 source_sha256"
+        missing.append(f"真值缺少音频身份：必须提供 {required}")
+        return missing, mismatches
+
+    if not ground_truth.get("audio_id"):
+        missing.append("真值缺少 audio_id（解码 PCM 内容指纹）")
+    if not ground_truth.get("audio_id_kind"):
+        missing.append("真值缺少 audio_id_kind")
+    if input_is_local and not ground_truth.get("source_sha256"):
+        missing.append("本地输入音频的真值缺少 source_sha256")
+
+    gt_source = ground_truth.get("source_sha256") or ""
+    input_source = timeline_audio.get("source_sha256") or ""
+    if gt_source and input_source and gt_source != input_source:
+        mismatches.append("source_sha256 不匹配：输入音频与标注音频不是同一份")
+
+    gt_audio_id = ground_truth.get("audio_id") or ""
+    input_audio_id = timeline_audio.get("id") or ""
+    if gt_audio_id:
+        if not input_audio_id:
+            mismatches.append("时间轴缺少 audio_id，无法校验音频内容")
+        elif gt_audio_id != input_audio_id:
+            mismatches.append("audio_id 不匹配：输入音频是另一个 DAI 变体")
+    gt_kind = ground_truth.get("audio_id_kind") or ""
+    input_kind = timeline_audio.get("id_kind") or ""
+    if gt_kind and input_kind and gt_kind != input_kind:
+        mismatches.append(f"audio_id_kind 不一致（真值 {gt_kind}, 输入 {input_kind}）")
+    return missing, mismatches
 
 
 def main() -> int:
@@ -82,6 +116,11 @@ def main() -> int:
         "--allow-audio-mismatch",
         action="store_true",
         help="真值音频身份不匹配时仍评分（默认拒绝，避免评测另一个 DAI 变体）",
+    )
+    parser.add_argument(
+        "--allow-unverified-ground-truth",
+        action="store_true",
+        help="真值缺少音频身份字段时仍评分（默认拒绝，仅用于调试）",
     )
     parser.add_argument("--proxy")
     parser.add_argument("--quiet", action="store_true")
@@ -106,18 +145,29 @@ def main() -> int:
 
     # Ground truth is read only after the timeline above is fixed.
     ground_truth, gt_duration, gt_identity = _load_ground_truth(args.ground_truth)
-    if gt_identity:
-        problems = _identity_mismatches(timeline.get("audio") or {}, gt_identity)
-        if problems:
-            for problem in problems:
-                print(f"[identity] {problem}", file=sys.stderr)
-            if not args.allow_audio_mismatch:
-                print(
-                    "[identity] 拒绝评分：真值与输入音频不是同一份；"
-                    "确认无误可用 --allow-audio-mismatch 覆盖",
-                    file=sys.stderr,
-                )
-                return 3
+    timeline_audio = timeline.get("audio") or {}
+    input_is_local = bool(timeline_audio.get("source_sha256"))
+    missing, mismatches = _identity_checks(timeline_audio, gt_identity, input_is_local)
+    if missing:
+        for problem in missing:
+            print(f"[identity] {problem}", file=sys.stderr)
+        if not args.allow_unverified_ground_truth:
+            print(
+                "[identity] 拒绝评分：真值必须携带可校验的音频身份；"
+                "仅调试时可用 --allow-unverified-ground-truth",
+                file=sys.stderr,
+            )
+            return 3
+    if mismatches:
+        for problem in mismatches:
+            print(f"[identity] {problem}", file=sys.stderr)
+        if not args.allow_audio_mismatch:
+            print(
+                "[identity] 拒绝评分：真值与输入音频不是同一份；"
+                "确认无误可用 --allow-audio-mismatch 覆盖",
+                file=sys.stderr,
+            )
+            return 3
     metrics = evaluate_events(
         timeline["ads"],
         ground_truth,

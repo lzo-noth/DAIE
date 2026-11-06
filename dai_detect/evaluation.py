@@ -105,7 +105,7 @@ def evaluate_events(
             predictions[index] for index in result["unmatched_predictions"]
         ],
         "unmatched_ground_truth": [
-            {"start_s": truths[index][0][0], "end_s": truths[index][0][1]}
+            {"start_s": _bounds(truths[index])[0], "end_s": _bounds(truths[index])[1]}
             for index in result["unmatched_ground_truth"]
         ],
     }
