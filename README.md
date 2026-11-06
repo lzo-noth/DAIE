@@ -54,11 +54,24 @@ python scripts/train_single_episode.py \
   --boundary-out models/boundary_model.json
 ```
 
-训练输出广告分类模型和 onset/offset 双头边界模型。阈值在每折训练集内部再做分组交叉验证选择，留出节目只参与最终评估；内层测试折可以是全正、全负或混合，不会被跳过。阈值优化目标默认是**内层留出集解码后的事件 F1**（同时参考每小时误报），只有没有事件标注时才回退到窗口 F1。事件 F1 按 episode 独立匹配后汇总 TP/FP/FN，绝不把不同剧集的时间轴放进同一个匹配器。分类阈值与 onset/offset 阈值交替校准：每轮先用当前边界阈值选分类阈值，再用该分类阈值解码出的片段重选边界阈值，直到变化不超过 0.01 或达到 5 轮，历史写入 `calibration.history`。未收敛时会用最终边界阈值再校准一次分类阈值，并重跑完整链路生成 `final_calibration_metrics`，不会把最后一轮的中间结果直接当作部署参数。边界阈值按最终边界误差 P95 校准，但只在满足相对覆盖率（最优候选的 80%）、绝对最低事件召回（默认 0.80，可用 `--min-boundary-event-recall` 调整）和每小时误报上限（默认 15，可用 `--max-boundary-fp-per-hour` 调整，`<=0` 关闭）的候选里比较 P95；没有候选达标时标记 `boundary_calibration_valid=false`，不会把该 P95 当作有效校准。部署结果还给出组合级 `calibration_process_valid`、`converged`、`event_threshold_valid`、`onset_threshold_valid`、`offset_threshold_valid` 和 `final_pipeline_valid`；未收敛或任一项不达标时 `valid=false`，模型仍可写出，但不能宣称已通过校准验收。`performance_targets_met` 在训练阶段固定为 `null`，只能由独立盲测写入，避免把校准过程有效误当成产品指标达标。候选阈值先粗搜（0.2–0.8，步长 0.1）再在最优点附近细搜（步长 0.01）。窗口和边界头的 P/R/F1 使用各外层折自己的阈值；AUC 同时报告 fold-wise 宏平均和 pooled 值，主 AUC 没有有效混合折时为 null；最终部署阈值和对应校准结果单独放在 `deployment_calibration`。没有广告的留出集仍输出误报数和每小时误报；边界校准会同时记录 `positive_boundary_episodes` 和 `negative_control_episodes`，无广告集参与完整流水线覆盖和误报检查，但不进入边界 P95 分母。需要边界模型时，外层每折的学习型边界头会绑定到该折所有留出集（包括确认无广告的集）；无广告集产生误报时也使用学习型精修，不允许回退启发式。每折分别统计分类器、onset、offset 和完整流水线的有效折数；只有 3 个及以上独立 feed 且所有内层流水线折都完成（分类器与学习型边界头均训练并产生预测）时，`cv_quality` 才会标记为 `strict_nested_grouped_cv`，否则为 `limited_nested_cv`。
+训练输出广告分类模型和 onset/offset 双头边界模型。阈值在每折训练集内部再做分组交叉验证选择，留出节目只参与最终评估；内层测试折可以是全正、全负或混合，不会被跳过。阈值优化目标默认是**内层留出集解码后的事件 F1**（同时参考每小时误报），只有没有事件标注时才回退到窗口 F1。事件 F1 按 episode 独立匹配后汇总 TP/FP/FN，绝不把不同剧集的时间轴放进同一个匹配器。分类阈值与 onset/offset 阈值交替校准：每轮先用当前边界阈值选分类阈值，再用该分类阈值解码出的片段重选边界阈值，直到变化不超过 0.01 或达到 5 轮，历史写入 `calibration.history`。未收敛时会用最终边界阈值再校准一次分类阈值，并重跑完整链路生成 `final_calibration_metrics`，不会把最后一轮的中间结果直接当作部署参数。边界阈值按最终边界误差 P95 校准，但只在满足相对覆盖率（最优候选的 80%）、绝对最低事件召回（默认 0.80，可用 `--min-boundary-event-recall` 调整）和每小时误报上限（默认 15，可用 `--max-boundary-fp-per-hour` 调整，`<=0` 关闭）的候选里比较 P95；没有候选达标时标记 `boundary_calibration_valid=false`，不会把该 P95 当作有效校准。部署结果还给出组合级 `calibration_process_valid`、`deployment_eligible`、`cv_quality`、`converged`、`event_threshold_valid`、`event_false_positive_rate_valid`、`onset_threshold_valid`、`offset_threshold_valid` 和 `final_pipeline_valid`；未收敛、CV 不是严格分组、最终 OOF 覆盖不完整或任一项不达标时 `valid=false`，模型仍可写出，但不能宣称已通过校准验收。`performance_targets_met` 在训练阶段固定为 `null`，只能由独立盲测写入，避免把校准过程有效误当成产品指标达标。候选阈值先粗搜（0.2–0.8，步长 0.1）再在最优点附近细搜（步长 0.01）。窗口和边界头的 P/R/F1 使用各外层折自己的阈值；AUC 同时报告 fold-wise 宏平均和 pooled 值，主 AUC 没有有效混合折时为 null；最终部署阈值和对应校准结果单独放在 `deployment_calibration`。没有广告的留出集仍输出误报数和每小时误报；边界校准会同时记录 `positive_boundary_episodes` 和 `negative_control_episodes`，无广告集参与完整流水线覆盖和误报检查，但不进入边界 P95 分母。需要边界模型时，外层每折的学习型边界头会绑定到该折所有留出集（包括确认无广告的集）；无广告集产生误报时也使用学习型精修，不允许回退启发式。每折分别统计分类器、onset、offset 和完整流水线的有效折数；只有 3 个及以上独立 feed 且所有内层流水线折都完成（分类器与学习型边界头均训练并产生预测）时，`cv_quality` 才会标记为 `strict_nested_grouped_cv`，否则为 `limited_nested_cv`。
 
 训练要求边界模型时，如果最终没有写出 `boundary_model.json`，脚本返回非零退出码；只有显式 `--skip-boundary` 或弱监督模式允许跳过边界模型。训练结束会打印 `artifacts` 摘要。
 
-训练评估与实际推理共用 [decode_config.py](dai_detect/decode_config.py) 的 enter/exit 阈值规则。阈值选择在内层留出集上运行完整的 decode → refine → evaluate 流程；onset/offset 阈值按最终边界误差 P95 校准，而不是帧级 F1。训练模式下 workflow 强制要求分类模型和边界模型都成功下载；任一缺失都会让 job 失败，不会静默回退到启发式。`--require-models` 还要求两个模型都有非空 `data_version` 且完全一致。`--require-calibrated-models`（训练 workflow 默认启用）进一步要求两个模型的 `deployment_calibration.calibration_process_valid`/`final_pipeline_valid` 为 true、校准已收敛，且 onset/offset 阈值一致；调试时可用 workflow 输入 `allow_uncalibrated_models=true` 显式放行，但程序仍会打印校准无效警告。时间轴同时记录分类器和边界模型的 `version`、`data_version`、`git_commit`。
+训练评估与实际推理共用 [decode_config.py](dai_detect/decode_config.py) 的 enter/exit 阈值规则。阈值选择在内层留出集上运行完整的 decode → refine → evaluate 流程；onset/offset 阈值按最终边界误差 P95 校准，而不是帧级 F1。最终三阈值确定后会再跑一次完整的 OOF `decode → refine → evaluate`，`final_calibration_metrics` 和部署验收只使用这次结果。训练模式下 workflow 强制要求分类模型和边界模型都成功下载；任一缺失都会让 job 失败，不会静默回退到启发式。`--require-models` 还要求两个模型都有非空 `data_version` 且完全一致。`--require-calibrated-models`（训练 workflow 默认启用）进一步要求两个模型的 `calibration_process_valid`/`deployment_eligible`/`final_pipeline_valid` 为 true、`cv_quality=strict_nested_grouped_cv`、校准已收敛，且 onset/offset 阈值一致；调试时可用 workflow 输入 `allow_uncalibrated_models=true` 显式放行，但程序仍会打印校准无效警告。时间轴同时记录分类器和边界模型的 `version`、`data_version`、`git_commit`。
+
+模型文件额外保存 `training_identity`（训练用过的 `audio_ids`、`source_sha256`、`feeds`）。盲测使用 `--feed` 检查输入音频和节目是否出现在训练集：audio_id/source_sha256 重合或 feed 重合时默认拒绝独立验收；只有未见过 feed 且音频未参与训练时 `performance_targets_met` 才可能为 true。训练端会拒绝同一 audio_id/source_sha256 跨 feed、重复 feed/episode 标识、越界/重叠/零长度广告区间；需要调试覆盖时可显式使用 `--allow-cross-feed-duplicates` 或 `--allow-invalid-annotations`。
+
+批量盲测：
+
+```
+python scripts/blind_test_batch.py --manifest blind.jsonl \
+  --model models/ad_segment_model.json --boundary-model models/boundary_model.json \
+  --require-models --require-calibrated-models --require-independent-test \
+  --min-events 10 --min-feeds 3 --out out/blind_summary.json
+```
+
+清单每行包含 `audio`、`feed`、`episode`、`ground_truth`；报告输出全局和逐 feed 的 event P/R、FP/hour、边界 P50/P90/P95，以及 precision/recall 的 Wilson 95% 区间。
 
 标注 JSONL 每行一集：
 

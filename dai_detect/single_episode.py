@@ -92,6 +92,10 @@ def _calibration_problems(
             problems.append(f"{label}的 calibration_process_valid 不为 true")
         if calibration.get("final_pipeline_valid") is not True:
             problems.append(f"{label}的 final_pipeline_valid 不为 true")
+        if calibration.get("deployment_eligible") is not True:
+            problems.append(f"{label}的 deployment_eligible 不为 true")
+        if calibration.get("cv_quality") != "strict_nested_grouped_cv":
+            problems.append(f"{label}的 cv_quality 不是 strict_nested_grouped_cv")
         if calibration.get("converged") is not True:
             problems.append(f"{label}的阈值校准未收敛")
     for key in ("onset_threshold", "offset_threshold"):
@@ -246,6 +250,15 @@ def analyze_single(
             "threshold": threshold,
             "enter_threshold": round(enter, 3),
             "exit_threshold": round(exit_threshold, 3),
+            "training_identity": getattr(model, "training_identity", {}) or {},
+            "deployment_calibration": {
+                "valid": (getattr(model, "deployment_calibration", {}) or {}).get(
+                    "calibration_process_valid"
+                ),
+                "deployment_eligible": (
+                    getattr(model, "deployment_calibration", {}) or {}
+                ).get("deployment_eligible"),
+            },
             "boundary": {
                 "source": getattr(boundary_model, "source", ""),
                 "version": getattr(boundary_model, "version", ""),

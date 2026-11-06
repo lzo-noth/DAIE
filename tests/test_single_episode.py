@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from dai_detect.single_episode import SingleConfig, _calibration_problems, analyze_single
 from dai_detect.single_features import WINDOW_FEATURES, window_labels
 from dai_detect.temporal_decoder import decode_windows
+from scripts.blind_test import _independence_check
 from tests import synth
 
 SR48 = 48000
@@ -288,6 +289,8 @@ class SingleEpisodeTest(unittest.TestCase):
         return {
             "calibration_process_valid": True,
             "final_pipeline_valid": True,
+            "deployment_eligible": True,
+            "cv_quality": "strict_nested_grouped_cv",
             "converged": True,
             "onset_threshold": 0.5,
             "offset_threshold": 0.5,
@@ -398,6 +401,8 @@ class StrictCalibrationDeploymentTest(unittest.TestCase):
         calibration = {
             "calibration_process_valid": True,
             "final_pipeline_valid": True,
+            "deployment_eligible": True,
+            "cv_quality": "strict_nested_grouped_cv",
             "converged": True,
             "onset_threshold": 0.5,
             "offset_threshold": 0.5,
@@ -431,6 +436,16 @@ class StrictCalibrationDeploymentTest(unittest.TestCase):
         problems = _calibration_problems(model, boundary)
         self.assertTrue(any("未收敛" in problem for problem in problems))
 
+    def test_rejects_limited_cv_even_if_calibration_valid(self) -> None:
+        model, boundary = self._models(
+            classifier=self._calibration(
+                cv_quality="limited_nested_cv", deployment_eligible=False
+            )
+        )
+        problems = _calibration_problems(model, boundary)
+        self.assertTrue(any("cv_quality" in problem for problem in problems))
+        self.assertTrue(any("deployment_eligible" in problem for problem in problems))
+
     def test_rejects_threshold_mismatch(self) -> None:
         model, boundary = self._models(
             boundary=self._calibration(onset_threshold=0.6)
@@ -442,6 +457,54 @@ class StrictCalibrationDeploymentTest(unittest.TestCase):
         model = SimpleNamespace(deployment_calibration=self._calibration())
         problems = _calibration_problems(model, None)
         self.assertTrue(any("边界模型缺失" in problem for problem in problems))
+
+
+class BlindIndependenceTest(unittest.TestCase):
+    def _model(self) -> dict:
+        return {
+            "training_identity": {
+                "audio_ids": ["a" * 64],
+                "source_sha256": ["s" * 64],
+                "feeds": ["Show A"],
+            }
+        }
+
+    def test_seen_audio_is_rejected_as_independent(self) -> None:
+        independence, problems = _independence_check(
+            {"id": "a" * 64, "source_sha256": "x" * 64},
+            self._model(),
+            "Show B",
+        )
+        self.assertTrue(independence["audio_id_seen_in_training"])
+        self.assertFalse(independence["independent"])
+        self.assertTrue(problems)
+
+    def test_seen_feed_is_not_unseen_feed_blind_test(self) -> None:
+        independence, problems = _independence_check(
+            {"id": "b" * 64, "source_sha256": "y" * 64},
+            self._model(),
+            "Show A",
+        )
+        self.assertEqual(independence["scope"], "same_feed_holdout")
+        self.assertFalse(independence["independent"])
+        self.assertTrue(any("feed" in problem for problem in problems))
+
+    def test_unseen_audio_and_feed_is_independent(self) -> None:
+        independence, problems = _independence_check(
+            {"id": "b" * 64, "source_sha256": "y" * 64},
+            self._model(),
+            "Show B",
+        )
+        self.assertEqual(independence["scope"], "unseen_feed_blind_test")
+        self.assertTrue(independence["independent"])
+        self.assertEqual(problems, [])
+
+    def test_missing_training_identity_cannot_be_independent(self) -> None:
+        independence, problems = _independence_check(
+            {"id": "b" * 64, "source_sha256": "y" * 64}, {}, "Show B"
+        )
+        self.assertFalse(independence["independent"])
+        self.assertTrue(any("training_identity" in problem for problem in problems))
 
 
 if __name__ == "__main__":

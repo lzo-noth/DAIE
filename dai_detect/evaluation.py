@@ -160,6 +160,15 @@ def evaluate_events(
     errors = [error for match in result["matches"] for error in (match["start_error"], match["end_error"])]
     boundary_p95 = float(np.percentile(errors, 95)) if errors else None
     boundary_mean = float(np.mean(errors)) if errors else None
+    start_errors = [float(match["start_error"]) for match in result["matches"]]
+    end_errors = [float(match["end_error"]) for match in result["matches"]]
+    max_errors = [
+        max(float(match["start_error"]), float(match["end_error"]))
+        for match in result["matches"]
+    ]
+    boundary_start_p95 = float(np.percentile(start_errors, 95)) if start_errors else None
+    boundary_end_p95 = float(np.percentile(end_errors, 95)) if end_errors else None
+    boundary_max_p95 = float(np.percentile(max_errors, 95)) if max_errors else None
 
     false_positives = len(result["unmatched_predictions"])
     false_negatives = len(result["unmatched_ground_truth"])
@@ -178,6 +187,15 @@ def evaluate_events(
         "false_negatives": false_negatives,
         "boundary_p95_s": round(boundary_p95, 3) if boundary_p95 is not None else None,
         "boundary_mean_s": round(boundary_mean, 3) if boundary_mean is not None else None,
+        "boundary_start_p95_s": (
+            round(boundary_start_p95, 3) if boundary_start_p95 is not None else None
+        ),
+        "boundary_end_p95_s": (
+            round(boundary_end_p95, 3) if boundary_end_p95 is not None else None
+        ),
+        "boundary_max_p95_s": (
+            round(boundary_max_p95, 3) if boundary_max_p95 is not None else None
+        ),
         "false_positives_per_hour": fp_per_hour,
         "iou_threshold": iou_threshold,
         "matches": result["matches"],

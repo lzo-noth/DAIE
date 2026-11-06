@@ -59,6 +59,7 @@ from dai_detect.temporal_decoder import decode_windows
 
 MIN_BOUNDARY_EVENT_RECALL = 0.80
 MAX_BOUNDARY_FALSE_POSITIVES_PER_HOUR = 15.0
+MAX_EVENT_FALSE_POSITIVES_PER_HOUR = 15.0
 MAX_CALIBRATION_ROUNDS = 5
 THRESHOLD_TOLERANCE = 0.01
 
@@ -127,15 +128,37 @@ def _sample_boundary_heads(
         "offset_X": np.zeros((0, len(BOUNDARY_FEATURES)), dtype=np.float32),
         "offset_y": np.zeros(0),
     }
-    if len(times) == 0 or len(features) == 0 or not ads:
+    if len(times) == 0 or len(features) == 0:
         return empty
+    rng = np.random.default_rng(seed)
+    if not ads:
+        # Confirmed no-ad episodes contribute natural production changes as
+        # negative boundary examples. This teaches the heads that ordinary
+        # cuts, transitions and music changes are not ad boundaries.
+        strength = np.mean(np.abs(features), axis=1)
+        cutoff = float(np.percentile(strength, 90)) if len(strength) else 0.0
+        candidates = np.where(strength >= cutoff)[0]
+        budget = max(1, min(len(features), 128))
+        if len(candidates) > budget:
+            candidates = rng.choice(candidates, size=budget, replace=False)
+        chosen = np.unique(candidates)
+        if len(chosen) == 0:
+            return empty
+        X = features[chosen].astype(np.float32)
+        y = np.zeros(len(chosen))
+        return {
+            "onset_X": X,
+            "onset_y": y,
+            "offset_X": X.copy(),
+            "offset_y": y.copy(),
+        }
+
     starts = [float(ad["start_s"]) for ad in ads]
     ends = [float(ad["end_s"]) for ad in ads]
     edges = starts + ends
     onset_positive = _positive_frames(times, starts)
     offset_positive = _positive_frames(times, ends)
 
-    rng = np.random.default_rng(seed)
     wanted = min(
         len(times),
         max(1, max(len(onset_positive), len(offset_positive)) * negative_ratio),
@@ -234,18 +257,97 @@ def _identity_problems(entry: dict, audio: str, mono: dict, allow_unverified: bo
             problems.append(
                 f"source_sha256 不匹配（标注 {source_hash[:12]}…, 文件 {actual[:12] or 'unreadable'}…）"
             )
+    kind = str(entry.get("audio_id_kind") or "")
     if audio_id:
         actual_id = str(mono.get("audio_id") or "")
         if actual_id != audio_id:
-            problems.append(f"audio_id 不匹配（标注 {audio_id[:12]}…, 解码 {actual_id[:12] or 'empty'}…）")
-        kind = str(entry.get("audio_id_kind") or "")
+            problems.append(
+                f"audio_id 不匹配（标注 {audio_id[:12]}…, 解码 {actual_id[:12] or 'empty'}…）"
+            )
         actual_kind = str(mono.get("audio_id_kind") or "")
-        if kind and actual_kind and kind != actual_kind:
+        if not kind:
+            problems.append("标注缺少 audio_id_kind（必须标明 PCM 指纹的生成方式）")
+        elif not actual_kind:
+            problems.append("解码结果缺少 audio_id_kind，无法校验音频身份")
+        elif kind != actual_kind:
             problems.append(f"audio_id_kind 不一致（标注 {kind}, 解码 {actual_kind}）")
+    elif not allow_unverified:
+        problems.append("标注缺少 audio_id（解码 PCM 内容指纹）")
+    if not remote and not source_hash and not allow_unverified:
+        problems.append("本地音频标注缺少 source_sha256，无法证明标注用的原始字节")
     if remote and source_hash and not audio_id:
         problems.append("远程音频只有 source_sha256，无法校验字节；请先用 scripts/snapshot_audio.py 归档")
-    if not source_hash and not audio_id and not allow_unverified:
-        problems.append("缺少 source_sha256/audio_id，无法证明标注与训练音频是同一份")
+    return problems
+
+
+def _duplicate_identity_problems(entries: list[dict]) -> list[str]:
+    """Reject the same audio (or source bytes) appearing under multiple feeds."""
+    by_audio_id: dict[str, set[str]] = {}
+    by_source: dict[str, set[str]] = {}
+    episodes: dict[tuple[str, str], str] = {}
+    problems: list[str] = []
+    for entry in entries:
+        feed = str(entry.get("feed") or "")
+        episode = str(entry.get("episode") or "")
+        audio_id = str(entry.get("audio_id") or "")
+        source_hash = str(entry.get("source_sha256") or "")
+        if audio_id:
+            by_audio_id.setdefault(audio_id, set()).add(feed)
+        if source_hash:
+            by_source.setdefault(source_hash, set()).add(feed)
+        key = (feed, episode)
+        audio = str(entry.get("audio") or "")
+        if episode and key in episodes and episodes[key] != audio:
+            problems.append(
+                f"重复的 feed/episode 标识 {feed!r}/{episode!r} 对应不同音频"
+            )
+        episodes[key] = audio
+    for audio_id, feeds in by_audio_id.items():
+        if len(feeds) > 1:
+            problems.append(
+                f"audio_id {audio_id[:12]}… 同时出现在多个 feed: {sorted(feeds)}"
+            )
+    for source_hash, feeds in by_source.items():
+        if len(feeds) > 1:
+            problems.append(
+                f"source_sha256 {source_hash[:12]}… 同时出现在多个 feed: {sorted(feeds)}"
+            )
+    return problems
+
+
+def _annotation_problems(
+    ads: list[dict], duration_s: float, require_ad_type: bool = False
+) -> list[str]:
+    """Structural checks for full-supervision ad intervals."""
+    problems: list[str] = []
+    ordered: list[dict] = []
+    for index, ad in enumerate(ads):
+        try:
+            start = float(ad["start_s"])
+            end = float(ad["end_s"])
+        except (KeyError, TypeError, ValueError):
+            problems.append(f"广告区间 #{index + 1} 缺少有效的 start_s/end_s")
+            continue
+        ad_type = str(ad.get("type") or ad.get("ad_type") or "")
+        if require_ad_type and ad_type != "third_party_inserted":
+            problems.append(
+                f"广告区间 #{index + 1} 的 type 必须是 third_party_inserted"
+            )
+        if start < 0:
+            problems.append(f"广告区间 #{index + 1} 的 start_s 小于 0")
+        if end <= start:
+            problems.append(f"广告区间 #{index + 1} 的 end_s 不大于 start_s")
+        if duration_s > 0 and end > duration_s + 0.5:
+            problems.append(
+                f"广告区间 #{index + 1} 的 end_s 超出音频时长 {duration_s:.1f}s"
+            )
+        ordered.append({"start_s": start, "end_s": end, "index": index + 1})
+    ordered.sort(key=lambda item: item["start_s"])
+    for previous, current in zip(ordered, ordered[1:]):
+        if current["start_s"] < previous["end_s"] - 1e-6:
+            problems.append(
+                f"广告区间 #{previous['index']} 与 #{current['index']} 重叠"
+            )
     return problems
 
 
@@ -363,16 +465,21 @@ def _cv_quality(
 
 def _calibration_validity(
     event_metrics: dict,
+    final_metrics: dict,
     onset_selection: dict,
     offset_selection: dict,
     boundary_expected: bool,
     converged: bool,
+    cv_quality_level: str,
+    max_false_positives_per_hour: Optional[float] = MAX_EVENT_FALSE_POSITIVES_PER_HOUR,
 ) -> dict:
     """Final acceptance flags for the deployed threshold combination.
 
-    Per-threshold validity is not enough: the returned classifier and boundary
-    thresholds must have been checked together, and a non-converged
-    coordinate-descent run has not jointly validated them.
+    Selection validity and final-combination validity are separate:
+    ``event_metrics`` describes the search result, while ``final_metrics`` is a
+    fresh decode/refine/evaluate pass with the exact returned thresholds. Only
+    the latter can make a model deployment-eligible, and only with strict
+    nested grouped CV.
     """
     attempted = int(event_metrics.get("folds_attempted") or 0)
     event_ok = bool(
@@ -380,24 +487,45 @@ def _calibration_validity(
         and attempted > 0
         and int(event_metrics.get("pipeline_folds_completed") or 0) == attempted
     )
+    final_attempted = int(final_metrics.get("folds_attempted") or 0)
+    final_coverage_ok = bool(
+        final_attempted > 0
+        and int(final_metrics.get("pipeline_folds_completed") or 0) == final_attempted
+    )
+    fp_rate = final_metrics.get("false_positives_per_hour")
+    fp_ok = (
+        None
+        if max_false_positives_per_hour is None or max_false_positives_per_hour <= 0
+        else bool(fp_rate is not None and fp_rate <= max_false_positives_per_hour)
+    )
     if boundary_expected:
         onset_ok = bool((onset_selection or {}).get("boundary_calibration_valid"))
         offset_ok = bool((offset_selection or {}).get("boundary_calibration_valid"))
     else:
         onset_ok = offset_ok = None
-    final_ok = bool(
+    process_valid = bool(
         event_ok
         and (onset_ok and offset_ok if boundary_expected else True)
         and converged
     )
+    deployment_eligible = bool(
+        process_valid
+        and final_coverage_ok
+        and (fp_ok if fp_ok is not None else True)
+        and cv_quality_level == "strict_nested_grouped_cv"
+    )
     return {
-        "valid": final_ok,
-        "calibration_process_valid": final_ok,
+        "valid": deployment_eligible,
+        "calibration_process_valid": process_valid,
+        "deployment_eligible": deployment_eligible,
+        "cv_quality": cv_quality_level,
         "converged": bool(converged),
         "event_threshold_valid": event_ok,
+        "event_false_positive_rate_valid": fp_ok,
+        "final_coverage_valid": final_coverage_ok,
         "onset_threshold_valid": onset_ok,
         "offset_threshold_valid": offset_ok,
-        "final_pipeline_valid": final_ok,
+        "final_pipeline_valid": deployment_eligible,
     }
 
 
@@ -456,6 +584,7 @@ def _choose_event_threshold(
     boundary_offset_y: list[np.ndarray] | None = None,
     boundary_episode_indices: list[int] | None = None,
     boundary_thresholds: tuple[float, float] = (0.5, 0.5),
+    max_false_positives_per_hour: Optional[float] = MAX_EVENT_FALSE_POSITIVES_PER_HOUR,
 ) -> tuple[float, dict]:
     """Select the threshold by decoded event F1 on inner held-out episodes.
 
@@ -519,7 +648,8 @@ def _choose_event_threshold(
     folds_completed = pipeline_completed if pipeline_required else classifier_completed
 
     if inner_full and has_events:
-        best: tuple[tuple[float, float, float], float, dict] | None = None
+        limit = max_false_positives_per_hour
+        candidates: list[tuple[float, dict, float]] = []
         for candidate in np.linspace(0.10, 0.70, 31):
             metrics = _event_metrics(
                 samples,
@@ -531,19 +661,31 @@ def _choose_event_threshold(
             )
             if not metrics:
                 continue
-            f1 = metrics.get("event_f1")
-            score = (
-                float(f1) if f1 is not None else 0.0,
-                -float(metrics.get("false_positives_per_hour") or 0.0),
-                -abs(float(candidate) - 0.5),
+            fp_rate = float(metrics.get("false_positives_per_hour") or 0.0)
+            candidates.append((float(candidate), metrics, fp_rate))
+        if candidates:
+            if limit is not None and limit > 0:
+                eligible = [item for item in candidates if item[2] <= limit]
+                fp_valid = bool(eligible)
+            else:
+                eligible = candidates
+                fp_valid = None
+            if not eligible:
+                eligible = candidates
+            best = max(
+                eligible,
+                key=lambda item: (
+                    float(item[1].get("event_f1") or 0.0),
+                    -item[2],
+                    -abs(item[0] - 0.5),
+                ),
             )
-            if best is None or score > best[0]:
-                best = (score, float(candidate), metrics)
-        if best is not None:
-            return best[1], {
+            return best[0], {
                 "source": f"{fold_kind}_event_f1",
                 "objective": "event_f1",
-                "event": best[2],
+                "event": best[1],
+                "max_false_positives_per_hour": limit,
+                "false_positive_rate_valid": fp_valid,
                 "folds_attempted": folds_attempted,
                 "folds_completed": folds_completed,
                 "folds_skipped": folds_attempted - folds_completed,
@@ -557,6 +699,8 @@ def _choose_event_threshold(
         train_indices, samples, X_all, y_all, offsets, seed
     )
     metrics["objective"] = "window_f1_fallback"
+    metrics["max_false_positives_per_hour"] = max_false_positives_per_hour
+    metrics["false_positive_rate_valid"] = None
     metrics["folds_attempted"] = folds_attempted
     metrics["folds_completed"] = folds_completed
     metrics["folds_skipped"] = folds_attempted - folds_completed
@@ -953,63 +1097,81 @@ def _choose_boundary_thresholds(
         onset_threshold, onset_result = search("onset", offset_threshold)
         offset_threshold, offset_result = search("offset", onset_threshold)
 
-    onset_metrics = {
-        "source": f"{fold_kind}_boundary_error",
-        "objective": "boundary_p95",
-        "boundary_calibration_valid": bool(
-            onset_result.get("recall_valid")
-            and onset_result.get("false_positive_rate_valid")
-        ),
-        "recall_valid": bool(onset_result.get("recall_valid")),
-        "false_positive_rate_valid": bool(
-            onset_result.get("false_positive_rate_valid")
-        ),
+    # Coordinate descent evaluates onset with the previous offset and offset
+    # with the new onset. Re-run the final pair once so the reported P95,
+    # recall and FP/hour all describe the thresholds that are actually
+    # returned, not two independently measured halves.
+    final_start_errors, final_end_errors, final_matched, final_false_positives = evaluate(
+        onset_threshold, offset_threshold
+    )
+    final_fp_rate = (
+        round(final_false_positives / (total_duration / 3600.0), 3)
+        if total_duration > 0
+        else None
+    )
+    final_recall = (
+        float(final_matched) / ground_truth_events if ground_truth_events else None
+    )
+    final_recall_valid = bool(
+        ground_truth_events
+        and final_recall is not None
+        and final_recall >= min_event_recall
+    )
+    final_fp_valid = bool(
+        max_false_positives_per_hour is None
+        or max_false_positives_per_hour <= 0
+        or (final_fp_rate is not None and final_fp_rate <= max_false_positives_per_hour)
+    )
+    final_valid = final_recall_valid and final_fp_valid
+    final_joint = {
+        "thresholds": {
+            "onset": round(float(onset_threshold), 4),
+            "offset": round(float(offset_threshold), 4),
+        },
+        "matched_events": int(final_matched),
+        "false_positives": int(final_false_positives),
+        "false_positives_per_hour": final_fp_rate,
+        "event_recall": round(final_recall, 4) if final_recall is not None else None,
+        "recall_valid": final_recall_valid,
+        "false_positive_rate_valid": final_fp_valid,
+        "boundary_calibration_valid": final_valid,
         "boundary_start_p95_s": (
-            round(float(onset_result["p95"]), 3) if onset_result["p95"] is not None else None
-        ),
-        "matched_events": int(onset_result["matched"]),
-        "false_positives": int(onset_result.get("false_positives") or 0),
-        "false_positives_per_hour": onset_result.get("false_positives_per_hour"),
-        "max_false_positives_per_hour": max_false_positives_per_hour,
-        "ground_truth_events": ground_truth_events,
-        "event_recall": (
-            round(float(onset_result["matched"]) / ground_truth_events, 4)
-            if ground_truth_events
+            round(float(np.percentile(final_start_errors, 95)), 3)
+            if final_start_errors
             else None
         ),
+        "boundary_end_p95_s": (
+            round(float(np.percentile(final_end_errors, 95)), 3)
+            if final_end_errors
+            else None
+        ),
+    }
+    common = {
+        "source": f"{fold_kind}_boundary_error",
+        "objective": "boundary_p95",
+        "final_joint": True,
+        "final_joint_metrics": final_joint,
+        "boundary_calibration_valid": final_valid,
+        "recall_valid": final_recall_valid,
+        "false_positive_rate_valid": final_fp_valid,
+        "matched_events": int(final_matched),
+        "false_positives": int(final_false_positives),
+        "false_positives_per_hour": final_fp_rate,
+        "max_false_positives_per_hour": max_false_positives_per_hour,
+        "ground_truth_events": ground_truth_events,
+        "event_recall": round(final_recall, 4) if final_recall is not None else None,
         "min_recall_ratio": min_recall_ratio,
         "min_event_recall": min_event_recall,
         "provisional_classifier_threshold": round(float(provisional_threshold), 4),
         "coverage": coverage,
     }
+    onset_metrics = {
+        **common,
+        "boundary_start_p95_s": final_joint["boundary_start_p95_s"],
+    }
     offset_metrics = {
-        "source": f"{fold_kind}_boundary_error",
-        "objective": "boundary_p95",
-        "boundary_calibration_valid": bool(
-            offset_result.get("recall_valid")
-            and offset_result.get("false_positive_rate_valid")
-        ),
-        "recall_valid": bool(offset_result.get("recall_valid")),
-        "false_positive_rate_valid": bool(
-            offset_result.get("false_positive_rate_valid")
-        ),
-        "boundary_end_p95_s": (
-            round(float(offset_result["p95"]), 3) if offset_result["p95"] is not None else None
-        ),
-        "matched_events": int(offset_result["matched"]),
-        "false_positives": int(offset_result.get("false_positives") or 0),
-        "false_positives_per_hour": offset_result.get("false_positives_per_hour"),
-        "max_false_positives_per_hour": max_false_positives_per_hour,
-        "ground_truth_events": ground_truth_events,
-        "event_recall": (
-            round(float(offset_result["matched"]) / ground_truth_events, 4)
-            if ground_truth_events
-            else None
-        ),
-        "min_recall_ratio": min_recall_ratio,
-        "min_event_recall": min_event_recall,
-        "provisional_classifier_threshold": round(float(provisional_threshold), 4),
-        "coverage": coverage,
+        **common,
+        "boundary_end_p95_s": final_joint["boundary_end_p95_s"],
     }
     return onset_threshold, offset_threshold, onset_metrics, offset_metrics
 
@@ -1030,6 +1192,7 @@ def _calibrate_thresholds(
     min_recall_ratio: float = 0.8,
     min_event_recall: float = MIN_BOUNDARY_EVENT_RECALL,
     max_false_positives_per_hour: Optional[float] = MAX_BOUNDARY_FALSE_POSITIVES_PER_HOUR,
+    max_event_false_positives_per_hour: Optional[float] = MAX_EVENT_FALSE_POSITIVES_PER_HOUR,
 ) -> tuple[float, float, float, dict, dict, dict]:
     """Coordinate descent over classifier, onset and offset thresholds.
 
@@ -1065,6 +1228,7 @@ def _calibrate_thresholds(
             boundary_offset_y=boundary_offset_y,
             boundary_episode_indices=boundary_episode_indices,
             boundary_thresholds=(onset_threshold, offset_threshold),
+            max_false_positives_per_hour=max_event_false_positives_per_hour,
         )
         if initial_event_threshold is None:
             initial_event_threshold = event_threshold
@@ -1150,6 +1314,7 @@ def _calibrate_thresholds(
             boundary_offset_y=boundary_offset_y,
             boundary_episode_indices=boundary_episode_indices,
             boundary_thresholds=(onset_threshold, offset_threshold),
+            max_false_positives_per_hour=max_event_false_positives_per_hour,
         )
         event_metrics["calibration"] = {
             "rounds": rounds,
@@ -1165,23 +1330,26 @@ def _calibrate_thresholds(
         }
 
     calibration = event_metrics["calibration"]
-    event_block = event_metrics.get("event") or {}
-    event_metrics["final_calibration_metrics"] = {
-        "objective": event_metrics.get("objective"),
-        "event_precision": event_block.get(
-            "event_precision", event_metrics.get("event_precision")
-        ),
-        "event_recall": event_block.get(
-            "event_recall", event_metrics.get("event_recall")
-        ),
-        "event_f1": event_block.get("event_f1", event_metrics.get("event_f1")),
-        "boundary_p95_s": event_block.get(
-            "boundary_p95_s", event_metrics.get("boundary_p95_s")
-        ),
-        "folds_attempted": event_metrics.get("folds_attempted"),
-        "pipeline_folds_completed": event_metrics.get("pipeline_folds_completed"),
-        "final_recalibrated": calibration.get("final_recalibrated", False),
-    }
+    event_metrics["final_calibration_metrics"] = _final_joint_metrics(
+        train_indices,
+        samples,
+        X_all,
+        y_all,
+        offsets,
+        boundary_onset_X,
+        boundary_onset_y,
+        boundary_offset_X,
+        boundary_offset_y,
+        boundary_episode_indices,
+        seed=event_seed,
+        classifier_threshold=event_threshold,
+        onset_threshold=onset_threshold,
+        offset_threshold=offset_threshold,
+        max_false_positives_per_hour=max_event_false_positives_per_hour,
+    )
+    calibration["final_thresholds"] = event_metrics["final_calibration_metrics"].get(
+        "final_thresholds"
+    )
     return event_threshold, onset_threshold, offset_threshold, event_metrics, onset_metrics, offset_metrics
 
 
@@ -1400,6 +1568,110 @@ def _event_metrics(
     }
 
 
+def _final_joint_metrics(
+    train_indices: list[int],
+    samples: list[EpisodeSample],
+    X_all: np.ndarray,
+    y_all: np.ndarray,
+    offsets: dict[int, tuple[int, int]],
+    boundary_onset_X: list[np.ndarray],
+    boundary_onset_y: list[np.ndarray],
+    boundary_offset_X: list[np.ndarray],
+    boundary_offset_y: list[np.ndarray],
+    boundary_episode_indices: list[int],
+    seed: int,
+    classifier_threshold: float,
+    onset_threshold: float,
+    offset_threshold: float,
+    max_false_positives_per_hour: Optional[float] = MAX_EVENT_FALSE_POSITIVES_PER_HOUR,
+) -> dict:
+    """Re-run the full inner OOF pipeline with the final threshold triplet.
+
+    The thresholds are fixed before decoding; this function does not search.
+    It exists so the reported precision/recall/P95/FP-hour and coverage all
+    describe the exact combination that will be deployed.
+    """
+    folds, fold_kind = _inner_folds(train_indices, samples)
+    probabilities: dict[int, np.ndarray] = {}
+    heads: dict[int, tuple[dict, dict, float, float]] = {}
+    folds_attempted = len(folds)
+    classifier_completed = 0
+    pipeline_completed = 0
+    pipeline_required = bool(boundary_episode_indices)
+    for fold_index, held in enumerate(folds):
+        inner_train = [index for index in train_indices if index not in set(held)]
+        train_rows = _window_rows(inner_train, samples, offsets, len(y_all))
+        if len(np.unique(y_all[train_rows])) < 2:
+            continue
+        model = _fit_logistic(
+            *_balance(X_all[train_rows], y_all[train_rows], ratio=4, seed=seed + fold_index)
+        )
+        classifier_completed += 1
+        if pipeline_required:
+            inner_set = set(inner_train)
+            onset_X, onset_y = _gather_boundary(
+                boundary_onset_X, boundary_onset_y, boundary_episode_indices, inner_set
+            )
+            offset_X, offset_y = _gather_boundary(
+                boundary_offset_X, boundary_offset_y, boundary_episode_indices, inner_set
+            )
+            onset_head = offset_head = None
+            if len(onset_y) and len(np.unique(onset_y)) >= 2:
+                onset_head = _fit_logistic(
+                    *_balance(onset_X, onset_y, ratio=6, seed=seed + 11 + fold_index)
+                )
+            if len(offset_y) and len(np.unique(offset_y)) >= 2:
+                offset_head = _fit_logistic(
+                    *_balance(offset_X, offset_y, ratio=6, seed=seed + 21 + fold_index)
+                )
+            if onset_head is None or offset_head is None:
+                continue
+            for index in held:
+                heads[index] = (
+                    onset_head,
+                    offset_head,
+                    onset_threshold,
+                    offset_threshold,
+                )
+        pipeline_completed += 1
+        for index in held:
+            probabilities[index] = _predict(model, samples[index].windows["features"])
+
+    metrics = _event_metrics(
+        samples,
+        sorted(probabilities),
+        probabilities,
+        thresholds=classifier_threshold,
+        refine=True,
+        boundary_heads=heads,
+        require_boundary=pipeline_required,
+    )
+    fp_rate = metrics.get("false_positives_per_hour")
+    fp_valid = (
+        None
+        if max_false_positives_per_hour is None or max_false_positives_per_hour <= 0
+        else bool(fp_rate is not None and fp_rate <= max_false_positives_per_hour)
+    )
+    metrics.update(
+        {
+            "source": f"{fold_kind}_final_joint",
+            "objective": "final_joint",
+            "final_thresholds": {
+                "classifier": round(float(classifier_threshold), 4),
+                "onset": round(float(onset_threshold), 4),
+                "offset": round(float(offset_threshold), 4),
+            },
+            "folds_attempted": folds_attempted,
+            "classifier_folds_completed": classifier_completed,
+            "pipeline_folds_completed": pipeline_completed,
+            "pipeline_required": pipeline_required,
+            "max_false_positives_per_hour": max_false_positives_per_hour,
+            "false_positive_rate_valid": fp_valid,
+        }
+    )
+    return metrics
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--annotations", type=Path, help="完全监督标注 JSONL")
@@ -1431,6 +1703,27 @@ def main() -> int:
         type=float,
         default=MAX_BOUNDARY_FALSE_POSITIVES_PER_HOUR,
         help="边界阈值候选允许的最大每小时误报数；<=0 表示不约束",
+    )
+    parser.add_argument(
+        "--max-event-fp-per-hour",
+        type=float,
+        default=MAX_EVENT_FALSE_POSITIVES_PER_HOUR,
+        help="分类阈值和最终流水线允许的最大每小时误报数；<=0 表示不约束",
+    )
+    parser.add_argument(
+        "--allow-cross-feed-duplicates",
+        action="store_true",
+        help="允许同一 audio_id/source_sha256 出现在多个 feed（默认拒绝，防止数据泄漏）",
+    )
+    parser.add_argument(
+        "--allow-invalid-annotations",
+        action="store_true",
+        help="广告区间结构校验失败时仍继续（默认中止）",
+    )
+    parser.add_argument(
+        "--require-ad-type",
+        action="store_true",
+        help="要求每个广告区间显式标注 type=third_party_inserted",
     )
     args = parser.parse_args()
 
@@ -1466,6 +1759,18 @@ def main() -> int:
     if args.max_episodes and len(entries) > args.max_episodes:
         entries = entries[: args.max_episodes]
 
+    duplicates = _duplicate_identity_problems(entries)
+    if duplicates:
+        for problem in duplicates:
+            print(f"[data] {problem}", flush=True)
+        if not args.allow_cross_feed_duplicates:
+            print(
+                "[data] 中止训练：同一音频/字节出现在多个 feed，或 feed/episode 标识重复；"
+                "确认无误可用 --allow-cross-feed-duplicates",
+                flush=True,
+            )
+            return 1
+
     samples: list[EpisodeSample] = []
     boundary_onset_X: list[np.ndarray] = []
     boundary_onset_y: list[np.ndarray] = []
@@ -1478,6 +1783,13 @@ def main() -> int:
         audio = _resolve_audio(str(entry["audio"]), base)
         feed = str(entry.get("feed") or "unknown")
         name = str(entry.get("episode") or Path(audio).name)
+        if not weak_mode and (
+            not str(entry.get("feed") or "").strip()
+            or not str(entry.get("episode") or "").strip()
+        ):
+            print(f"[data] {name}: feed 或 episode 标识为空", flush=True)
+            if not args.allow_invalid_annotations:
+                return 1
         print(f"[extract] {feed} / {name}", flush=True)
         mono, forensic = extract_features(audio, proxy=args.proxy)
         identity = _identity_problems(entry, audio, mono, args.allow_unverified_audio)
@@ -1491,9 +1803,22 @@ def main() -> int:
         duration = float(windows["duration_s"])
         if not weak_mode:
             ads = [
-                {"start_s": float(item["start_s"]), "end_s": float(item["end_s"])}
+                {
+                    **item,
+                    "start_s": float(item["start_s"]),
+                    "end_s": float(item["end_s"]),
+                }
                 for item in (entry.get("ads") or [])
             ]
+            annotation = _annotation_problems(
+                ads, duration, require_ad_type=args.require_ad_type
+            )
+            if annotation:
+                for problem in annotation:
+                    print(f"[data] {name}: {problem}", flush=True)
+                if not args.allow_invalid_annotations:
+                    print("[data] 中止训练；确认标注后可修正，或用 --allow-invalid-annotations 覆盖")
+                    return 1
             indices, labels = window_labels(windows, ads)
         else:
             key = (
@@ -1509,7 +1834,7 @@ def main() -> int:
             continue
         change = boundary_change_matrix(mono, forensic)
         scores = heuristic_boundary_scores(change["features"])
-        if not weak_mode and not args.skip_boundary and ads:
+        if not weak_mode and not args.skip_boundary and ads is not None:
             heads = _sample_boundary_heads(change, ads, seed=audio_index + 7)
             if len(heads["onset_y"]) or len(heads["offset_y"]):
                 episode_index = len(samples)
@@ -1619,6 +1944,7 @@ def main() -> int:
             boundary_seed=fold_index + 31,
             min_event_recall=args.min_boundary_event_recall,
             max_false_positives_per_hour=args.max_boundary_fp_per_hour,
+            max_event_false_positives_per_hour=args.max_event_fp_per_hour,
         )
         if not boundary_episode_indices:
             onset_X = onset_y = offset_X = offset_y = None
@@ -1712,6 +2038,11 @@ def main() -> int:
     window_metrics["auc"] = window_metrics["auc_macro"]
     window_metrics["auc_pooled_is_diagnostic"] = True
 
+    cv_quality = _cv_quality(
+        groups,
+        fold_reports,
+        boundary_expected=bool(boundary_episode_indices),
+    )
     (
         deployment_threshold,
         deployment_onset_threshold,
@@ -1734,6 +2065,7 @@ def main() -> int:
         boundary_seed=909,
         min_event_recall=args.min_boundary_event_recall,
         max_false_positives_per_hour=args.max_boundary_fp_per_hour,
+        max_event_false_positives_per_hour=args.max_event_fp_per_hour,
     )
     deployment_calibration = {
         "threshold": round(deployment_threshold, 4),
@@ -1746,10 +2078,13 @@ def main() -> int:
     deployment_calibration.update(
         _calibration_validity(
             deployment_threshold_metrics,
+            deployment_threshold_metrics.get("final_calibration_metrics") or {},
             deployment_onset_selection,
             deployment_offset_selection,
             boundary_expected=bool(boundary_episode_indices),
             converged=bool(deployment_calibration_meta.get("converged")),
+            cv_quality_level=cv_quality["level"],
+            max_false_positives_per_hour=args.max_event_fp_per_hour,
         )
     )
     deployment_calibration["final_recalibrated"] = bool(
@@ -1768,11 +2103,6 @@ def main() -> int:
             "但不能报告为已完成校准验收",
             flush=True,
         )
-    cv_quality = _cv_quality(
-        groups,
-        fold_reports,
-        boundary_expected=bool(boundary_episode_indices),
-    )
     final_model = _fit_logistic(*_balance(X_all, y_all, ratio=4, seed=101))
     event_metrics = _event_metrics(
         samples,
@@ -1800,6 +2130,23 @@ def main() -> int:
         json.dumps(identity_rows, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()
     model_version = f"ad-{trained_at.replace('-', '').replace(':', '').replace('+', '')}-{data_version[:8]}"
+    training_identity = {
+        "audio_ids": sorted(
+            {
+                str(entry.get("audio_id") or "")
+                for entry in entries
+                if entry.get("audio_id")
+            }
+        ),
+        "source_sha256": sorted(
+            {
+                str(entry.get("source_sha256") or "")
+                for entry in entries
+                if entry.get("source_sha256")
+            }
+        ),
+        "feeds": sorted({str(entry.get("feed") or "unknown") for entry in entries}),
+    }
 
     payload = {
         "version": 1,
@@ -1811,6 +2158,7 @@ def main() -> int:
         "data_version": data_version,
         "git_commit": os.environ.get("GITHUB_SHA", ""),
         "trained_at": trained_at,
+        "training_identity": training_identity,
         "metrics": {
             "episodes": len(samples),
             "feeds": len(set(groups)),

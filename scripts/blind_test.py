@@ -22,6 +22,7 @@ ACCEPTANCE = {
     "event_precision": 0.90,
     "event_recall": 0.90,
     "boundary_p95_s": 0.50,
+    "false_positives_per_hour": 15.0,
 }
 
 
@@ -102,6 +103,56 @@ def _identity_checks(
     return missing, mismatches
 
 
+def _independence_check(
+    timeline_audio: dict,
+    model_meta: dict,
+    feed: str,
+) -> tuple[dict, list[str]]:
+    """Verify the input was not part of the training set.
+
+    ``data_version`` only proves that the model is a particular training batch;
+    it cannot answer whether this exact audio or feed was seen during training.
+    Models therefore carry an explicit training identity list.
+    """
+    training = model_meta.get("training_identity") or {}
+    training_ids = set(training.get("audio_ids") or [])
+    training_hashes = set(training.get("source_sha256") or [])
+    training_feeds = set(training.get("feeds") or [])
+    audio_id = str(timeline_audio.get("id") or "")
+    source_hash = str(timeline_audio.get("source_sha256") or "")
+    problems: list[str] = []
+    if not training_ids and not training_hashes and not training_feeds:
+        problems.append("模型缺少 training_identity，无法证明盲测音频未参与训练")
+    audio_seen = bool(
+        (audio_id and audio_id in training_ids)
+        or (source_hash and source_hash in training_hashes)
+    )
+    if audio_seen:
+        problems.append("输入音频的 audio_id/source_sha256 出现在训练集")
+    feed_seen = bool(feed and feed in training_feeds)
+    if feed_seen:
+        problems.append(f"输入 feed {feed!r} 出现在训练集")
+    if feed:
+        scope = "same_feed_holdout" if feed_seen else "unseen_feed_blind_test"
+    else:
+        scope = "unknown_feed"
+    independent = bool(
+        (training_ids or training_hashes or training_feeds)
+        and not audio_seen
+        and scope == "unseen_feed_blind_test"
+    )
+    return (
+        {
+            "audio_id_seen_in_training": audio_seen,
+            "feed": feed,
+            "feed_seen_in_training": feed_seen,
+            "scope": scope,
+            "independent": independent,
+        },
+        problems,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--audio", required=True, help="唯一输入：一集完整音频")
@@ -132,6 +183,27 @@ def main() -> int:
         action="store_true",
         help="要求两个模型都通过 deployment_calibration 校准验收",
     )
+    parser.add_argument(
+        "--feed",
+        default="",
+        help="输入音频所属节目；用于检查该 feed 是否参与训练",
+    )
+    parser.add_argument(
+        "--require-independent-test",
+        action="store_true",
+        help="要求输入音频和 feed 都未出现在训练集，否则拒绝验收",
+    )
+    parser.add_argument(
+        "--allow-training-overlap",
+        action="store_true",
+        help="允许训练集音频/feed 参与评分（调试用，结果不算独立盲测）",
+    )
+    parser.add_argument(
+        "--max-fp-per-hour",
+        type=float,
+        default=ACCEPTANCE["false_positives_per_hour"],
+        help="盲测允许的最大每小时误报数；<=0 表示不检查",
+    )
     parser.add_argument("--proxy")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
@@ -152,12 +224,41 @@ def main() -> int:
 
     print(json.dumps({"blind_detection": {"duration_s": timeline["duration_s"], "ads": timeline["ads"]}}, ensure_ascii=False))
 
+    timeline_audio = timeline.get("audio") or {}
+    independence, independence_problems = _independence_check(
+        timeline_audio, timeline.get("model") or {}, args.feed
+    )
+    if independence_problems:
+        for problem in independence_problems:
+            print(f"[independence] {problem}", file=sys.stderr)
+        overlap = bool(
+            independence["audio_id_seen_in_training"]
+            or independence["feed_seen_in_training"]
+        )
+        if not args.allow_training_overlap and (
+            overlap or args.require_independent_test
+        ):
+            print(
+                "[independence] 拒绝独立验收；调试可用 --allow-training-overlap",
+                file=sys.stderr,
+            )
+            return 3
+    if (
+        args.require_independent_test
+        and not independence["independent"]
+        and not args.allow_training_overlap
+    ):
+        print(
+            "[independence] 拒绝独立验收：必须提供未见过的 feed 且音频不在训练集",
+            file=sys.stderr,
+        )
+        return 3
+
     if not args.ground_truth:
         return 0
 
     # Ground truth is read only after the timeline above is fixed.
     ground_truth, gt_duration, gt_identity = _load_ground_truth(args.ground_truth)
-    timeline_audio = timeline.get("audio") or {}
     input_is_local = bool(timeline_audio.get("source_sha256"))
     missing, mismatches = _identity_checks(timeline_audio, gt_identity, input_is_local)
     if missing:
@@ -185,23 +286,35 @@ def main() -> int:
         ground_truth,
         duration_s=timeline["duration_s"] or gt_duration,
     )
+    acceptance = {
+        **ACCEPTANCE,
+        "false_positives_per_hour": args.max_fp_per_hour,
+    }
     checks = {
         "event_precision": (
             metrics["event_precision"] is not None
-            and metrics["event_precision"] >= ACCEPTANCE["event_precision"]
+            and metrics["event_precision"] >= acceptance["event_precision"]
         ),
         "event_recall": (
             metrics["event_recall"] is not None
-            and metrics["event_recall"] >= ACCEPTANCE["event_recall"]
+            and metrics["event_recall"] >= acceptance["event_recall"]
         ),
         "boundary_p95_s": (
             metrics["boundary_p95_s"] is not None
-            and metrics["boundary_p95_s"] <= ACCEPTANCE["boundary_p95_s"]
+            and metrics["boundary_p95_s"] <= acceptance["boundary_p95_s"]
+        ),
+        "false_positives_per_hour": (
+            args.max_fp_per_hour <= 0
+            or (
+                metrics["false_positives_per_hour"] is not None
+                and metrics["false_positives_per_hour"] <= args.max_fp_per_hour
+            )
         ),
     }
     passed = all(checks.values())
     report = {
         "audio": args.audio,
+        "duration_s": timeline["duration_s"],
         "model": timeline["model"],
         "metrics": {key: metrics[key] for key in (
             "event_precision",
@@ -209,17 +322,27 @@ def main() -> int:
             "event_f1",
             "boundary_p95_s",
             "boundary_mean_s",
+            "boundary_start_p95_s",
+            "boundary_end_p95_s",
+            "boundary_max_p95_s",
             "false_positives_per_hour",
             "matched",
             "false_positives",
             "false_negatives",
+            "predicted_events",
+            "ground_truth_events",
             "iou_threshold",
         )},
-        "acceptance": ACCEPTANCE,
+        "acceptance": acceptance,
         "checks": checks,
         "passed": passed,
-        "performance_targets_met": passed,
-        "performance_targets_source": "independent_blind_test",
+        "independence": independence,
+        "performance_targets_met": passed if independence["independent"] else None,
+        "performance_targets_source": (
+            "independent_blind_test"
+            if independence["independent"]
+            else "not_independent"
+        ),
         "matches": metrics["matches"],
         "unmatched_predictions": metrics["unmatched_predictions"],
         "unmatched_ground_truth": metrics["unmatched_ground_truth"],

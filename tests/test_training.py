@@ -12,6 +12,7 @@ from scripts.train_single_episode import (
     EpisodeSample,
     _aggregate_fold_window_metrics,
     _aggregate_head_groups,
+    _annotation_problems,
     _boundary_candidates,
     _calibrate_thresholds,
     _calibration_validity,
@@ -19,6 +20,7 @@ from scripts.train_single_episode import (
     _choose_classifier_threshold,
     _choose_event_threshold,
     _cv_quality,
+    _duplicate_identity_problems,
     _event_metrics,
     _group_folds,
     _identity_problems,
@@ -512,7 +514,16 @@ class BoundaryThresholdCalibrationTest(unittest.TestCase):
         ), mock.patch(
             "scripts.train_single_episode._choose_boundary_thresholds",
             side_effect=fake_boundary,
-        ):
+        ), mock.patch(
+            "scripts.train_single_episode._final_joint_metrics",
+            return_value={
+                "event_f1": 1.0,
+                "boundary_p95_s": 0.1,
+                "folds_attempted": 2,
+                "pipeline_folds_completed": 2,
+                "false_positives_per_hour": 0.0,
+            },
+        ) as final_joint:
             event, onset, offset, event_metrics, _, _ = _calibrate_thresholds(
                 [0, 1, 2],
                 self.samples,
@@ -539,10 +550,13 @@ class BoundaryThresholdCalibrationTest(unittest.TestCase):
             event_calls[-1]["boundary_thresholds"],
             boundary_values[-1],
         )
+        final_call = final_joint.call_args.kwargs
+        self.assertEqual(final_call["classifier_threshold"], event_values[-1])
+        self.assertEqual(final_call["onset_threshold"], boundary_values[-1][0])
+        self.assertEqual(final_call["offset_threshold"], boundary_values[-1][1])
         final_metrics = event_metrics["final_calibration_metrics"]
         self.assertEqual(final_metrics["event_f1"], 1.0)
         self.assertEqual(final_metrics["boundary_p95_s"], 0.1)
-        self.assertTrue(final_metrics["final_recalibrated"])
 
     def test_calibration_validity_requires_convergence_and_joint_coverage(self) -> None:
         event = {
@@ -550,13 +564,23 @@ class BoundaryThresholdCalibrationTest(unittest.TestCase):
             "folds_attempted": 3,
             "pipeline_folds_completed": 3,
         }
+        final = {
+            "folds_attempted": 3,
+            "pipeline_folds_completed": 3,
+            "false_positives_per_hour": 0.0,
+        }
         onset = {"boundary_calibration_valid": True}
         offset = {"boundary_calibration_valid": True}
-        good = _calibration_validity(event, onset, offset, True, True)
+        good = _calibration_validity(
+            event, final, onset, offset, True, True, "strict_nested_grouped_cv"
+        )
         self.assertTrue(good["valid"])
         self.assertTrue(good["final_pipeline_valid"])
+        self.assertTrue(good["deployment_eligible"])
 
-        not_converged = _calibration_validity(event, onset, offset, True, False)
+        not_converged = _calibration_validity(
+            event, final, onset, offset, True, False, "strict_nested_grouped_cv"
+        )
         self.assertFalse(not_converged["valid"])
         self.assertFalse(not_converged["final_pipeline_valid"])
         self.assertFalse(not_converged["converged"])
@@ -564,22 +588,63 @@ class BoundaryThresholdCalibrationTest(unittest.TestCase):
         fallback = _calibration_validity(
             {"objective": "window_f1_fallback", "folds_attempted": 3,
              "pipeline_folds_completed": 3},
+            final,
             onset,
             offset,
             True,
             True,
+            "strict_nested_grouped_cv",
         )
         self.assertFalse(fallback["event_threshold_valid"])
 
         bad_offset = _calibration_validity(
-            event, onset, {"boundary_calibration_valid": False}, True, True
+            event,
+            final,
+            onset,
+            {"boundary_calibration_valid": False},
+            True,
+            True,
+            "strict_nested_grouped_cv",
         )
         self.assertFalse(bad_offset["valid"])
         self.assertFalse(bad_offset["offset_threshold_valid"])
 
-        no_boundary = _calibration_validity(event, {}, {}, False, True)
+        no_boundary = _calibration_validity(
+            event, final, {}, {}, False, True, "strict_nested_grouped_cv"
+        )
         self.assertTrue(no_boundary["valid"])
         self.assertIsNone(no_boundary["onset_threshold_valid"])
+
+        limited_cv = _calibration_validity(
+            event, final, onset, offset, True, True, "limited_nested_cv"
+        )
+        self.assertFalse(limited_cv["valid"])
+        self.assertFalse(limited_cv["deployment_eligible"])
+
+        too_many_fp = _calibration_validity(
+            event,
+            {**final, "false_positives_per_hour": 30.0},
+            onset,
+            offset,
+            True,
+            True,
+            "strict_nested_grouped_cv",
+            max_false_positives_per_hour=15.0,
+        )
+        self.assertFalse(too_many_fp["valid"])
+        self.assertFalse(too_many_fp["event_false_positive_rate_valid"])
+
+        final_coverage_gap = _calibration_validity(
+            event,
+            {**final, "pipeline_folds_completed": 2},
+            onset,
+            offset,
+            True,
+            True,
+            "strict_nested_grouped_cv",
+        )
+        self.assertFalse(final_coverage_gap["valid"])
+        self.assertFalse(final_coverage_gap["final_coverage_valid"])
 
     def test_no_ad_false_positive_requires_learned_boundary_head(self) -> None:
         sample = _boundary_episode("A")
@@ -802,6 +867,53 @@ class AudioIdentityTest(unittest.TestCase):
         mono = {"audio_id": "b" * 64, "audio_id_kind": "downmix_48k_to_16k"}
         problems = _identity_problems(entry, "episode.wav", mono, allow_unverified=False)
         self.assertTrue(any("audio_id" in problem for problem in problems))
+
+    def test_training_rejects_local_audio_without_source_hash(self) -> None:
+        entry = {"audio_id": "a" * 64, "audio_id_kind": "k"}
+        mono = {"audio_id": "a" * 64, "audio_id_kind": "k"}
+        problems = _identity_problems(entry, "episode.wav", mono, allow_unverified=False)
+        self.assertTrue(any("source_sha256" in problem for problem in problems))
+
+    def test_training_rejects_missing_audio_kind(self) -> None:
+        entry = {"audio_id": "a" * 64, "source_sha256": "s" * 64}
+        mono = {"audio_id": "a" * 64, "audio_id_kind": "downmix_48k_to_16k"}
+        problems = _identity_problems(entry, "episode.wav", mono, allow_unverified=False)
+        self.assertTrue(any("audio_id_kind" in problem for problem in problems))
+
+    def test_annotation_structure_validation(self) -> None:
+        problems = _annotation_problems(
+            [
+                {"start_s": 10.0, "end_s": 12.0},
+                {"start_s": 11.0, "end_s": 15.0},
+                {"start_s": 50.0, "end_s": 60.0},
+            ],
+            40.0,
+        )
+        self.assertTrue(any("重叠" in problem for problem in problems))
+        self.assertTrue(any("超出" in problem for problem in problems))
+        self.assertEqual(
+            _annotation_problems([{"start_s": 10.0, "end_s": 12.0}], 60.0),
+            [],
+        )
+        self.assertTrue(
+            _annotation_problems(
+                [{"start_s": 10.0, "end_s": 12.0}],
+                60.0,
+                require_ad_type=True,
+            )
+        )
+
+    def test_duplicate_identity_across_feeds_is_rejected(self) -> None:
+        entries = [
+            {"feed": "A", "episode": "1", "audio": "a.wav", "audio_id": "x" * 64},
+            {"feed": "B", "episode": "2", "audio": "b.wav", "audio_id": "x" * 64},
+        ]
+        problems = _duplicate_identity_problems(entries)
+        self.assertTrue(any("audio_id" in problem for problem in problems))
+        self.assertEqual(
+            _duplicate_identity_problems([entries[0]]),
+            [],
+        )
 
     def test_ground_truth_requires_identity(self) -> None:
         missing, mismatches = _identity_checks({}, {}, input_is_local=True)
