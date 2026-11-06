@@ -147,6 +147,29 @@ def apply_classifications(
                 and not result.get("host_read")
                 and result.get("ad_type") == "third_party_ad"
             )
+            report_labels = report.setdefault("llm_labels", [])
+            report_labels.append(
+                {
+                    "episode": episode.get("title"),
+                    "id": f"{episode_index}:{candidate_index}",
+                    "tier": candidate.get("tier"),
+                    "start_s": candidate.get("start_s"),
+                    "end_s": candidate.get("end_s"),
+                    "score_before_llm": candidate.get("score"),
+                    "heuristic_score": evidence.get("heuristic_score"),
+                    "features": {
+                        "musicness": float(evidence.get("musicness") or 0.0),
+                        "loudness_dev_db": float(evidence.get("loudness_dev_db") or 0.0),
+                        "boundary_strength": float(evidence.get("boundary_strength") or 0.0),
+                        "timbre_min": float(evidence.get("timbre_min") or 0.0),
+                        "position": float(evidence.get("position") or 0.0),
+                        "duration_s": float(candidate.get("end_s", 0.0)) - float(candidate.get("start_s", 0.0)),
+                        "slot_matches": int(evidence.get("slot_matches") or 0),
+                    },
+                    "llm": result,
+                    "is_ad": is_target,
+                }
+            )
             evidence["llm_verified"] = is_target
             if result.get("host_read"):
                 host_read += 1

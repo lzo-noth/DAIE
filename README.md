@@ -79,6 +79,15 @@ Actions 配置了 `GEMINI_API_KEY`（或 `OPENAI_API_KEY`）后，会对候选 A
 
 LLM 标注也会反馈到检测器：当前样本里 slot 命中主要出现在正片（21/27），timbre 在正片反而更高，因此 slot 只对已有音乐/响度证据的候选小幅加分，timbre 不再作为广告正证据。`scripts/calibrate.py` 可从带 `llm` 字段的报告重算这些统计，输出 `calibration.json`；声学门控 precision 约 0.23，LLM 仍是主要判别层。
 
+### LLM 反馈闭环
+
+1. 每次 LLM 分类会把**所有候选（包括被删除的负例）**写入 `report.llm_labels`，包含声学特征与 LLM 判定。
+2. 离线运行 `python scripts/fit_calibration.py <报告目录>`：按 feed 做留一交叉验证，拟合 8 维 logistic 候选评分器；只有 CV 指标优于启发式评分时才写 `enabled: true` 的 `calibration.json`。
+3. 检测器运行时自动读取仓库根目录的 `calibration.json`，对 `inserted` 候选计算 `learned_ad_score`，低于阈值的候选直接过滤；`repeated` 候选保留。
+4. 循环：矩阵 run → 下载报告 → fit_calibration → 提交 calibration.json → 再跑一轮验证。
+
+没有可用 calibration 或未启用时，检测器保持原有的启发式评分。
+
 ## GitHub Actions
 
 仓库内置两个工作流：

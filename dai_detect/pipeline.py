@@ -13,6 +13,7 @@ import numpy as np
 
 from .audio import iter_pcm, load_cache, save_cache, source_key
 from .boundaries import segment_evidence
+from .calibration import Calibration, apply_calibration
 from .features import Decimator, FeatureExtractor
 from .fingerprint import FPS, FingerprintExtractor
 from .insertion import fine_boundaries, insertion_candidates, refine_bounds
@@ -358,6 +359,12 @@ def run(
             results[result_index].candidates = _merge_candidates(repeated, inserted)
 
         _apply_slot_consistency(results, feature_result_indices)
+        calibration = Calibration.load()
+        if calibration is not None:
+            for result_index in feature_result_indices:
+                results[result_index].candidates = apply_calibration(
+                    results[result_index].candidates, calibration
+                )
         for result_index in feature_result_indices:
             results[result_index].candidates = [
                 candidate for candidate in results[result_index].candidates if candidate.score >= min_score
