@@ -73,6 +73,37 @@ class LlmTest(unittest.TestCase):
         self.assertEqual(len(report["episodes"][0]["candidates"]), 1)
         self.assertFalse(report["episodes"][0]["candidates"][0]["evidence"]["llm_verified"])
 
+    def test_repeated_content_dropped_only_at_high_confidence(self) -> None:
+        report = {
+            "episodes": [
+                {
+                    "candidates": [
+                        _candidate("repeated", "intro chatter", 0.7),
+                        _candidate("repeated", "sponsored by Acme", 0.7),
+                        _candidate("repeated", "ambiguous chatter", 0.7),
+                    ]
+                }
+            ]
+        }
+        results = {
+            "0:0": {"is_ad": False, "ad_type": "content", "host_read": False, "confidence": 0.95, "brand": "", "reason": "intro"},
+            "0:1": {"is_ad": True, "ad_type": "third_party_ad", "host_read": False, "confidence": 0.95, "brand": "Acme", "reason": "ad"},
+            "0:2": {"is_ad": False, "ad_type": "content", "host_read": False, "confidence": 0.6, "brand": "", "reason": "unclear"},
+        }
+        apply_classifications(report, results)
+        candidates = report["episodes"][0]["candidates"]
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(candidates[0]["evidence"]["llm"]["brand"], "Acme")
+        self.assertTrue(candidates[0]["evidence"]["llm_verified"])
+        self.assertGreaterEqual(candidates[0]["score"], 0.82)
+        self.assertEqual(report["llm"]["dropped_repeated_content"], 1)
+
+    def test_keep_repeated_content_flag(self) -> None:
+        report = {"episodes": [{"candidates": [_candidate("repeated", "intro chatter")]}]}
+        results = {"0:0": {"is_ad": False, "ad_type": "content", "host_read": False, "confidence": 0.95, "brand": "", "reason": "intro"}}
+        apply_classifications(report, results, keep_repeated_content=True)
+        self.assertEqual(len(report["episodes"][0]["candidates"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

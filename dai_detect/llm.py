@@ -127,10 +127,12 @@ def apply_classifications(
     results: dict[str, dict[str, Any]],
     drop_content: bool = True,
     drop_host_read: bool = True,
+    keep_repeated_content: bool = False,
 ) -> dict:
     verified = 0
     non_ad = 0
     host_read = 0
+    dropped_repeated_content = 0
     for episode_index, episode in enumerate(report.get("episodes", [])):
         kept = []
         for candidate_index, candidate in enumerate(episode.get("candidates", [])):
@@ -152,11 +154,27 @@ def apply_classifications(
                 verified += 1
             else:
                 non_ad += 1
-            score = float(candidate.get("score", 0.0)) + (0.08 if is_target else -0.08)
+            score = float(candidate.get("score", 0.0))
+            confidence = float(result.get("confidence", 0.0))
+            if is_target:
+                score = max(score + 0.08, 0.82 + 0.15 * confidence)
+            else:
+                score -= 0.08
             candidate["score"] = round(min(0.99, max(0.0, score)), 3)
             if drop_host_read and result.get("host_read"):
                 continue
             if drop_content and not is_target and candidate.get("tier") == "inserted":
+                continue
+            if (
+                drop_content
+                and not is_target
+                and candidate.get("tier") == "repeated"
+                and not keep_repeated_content
+                and confidence >= 0.8
+                and result.get("ad_type") in {"content", "self_promo"}
+                and not evidence.get("ad_language")
+            ):
+                dropped_repeated_content += 1
                 continue
             kept.append(candidate)
         episode["candidates"] = sorted(
@@ -167,5 +185,6 @@ def apply_classifications(
         "verified_third_party_ads": verified,
         "non_ads": non_ad,
         "host_read": host_read,
+        "dropped_repeated_content": dropped_repeated_content,
     }
     return report

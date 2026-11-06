@@ -75,7 +75,7 @@ python -m dai_detect verify platforms.json --report feed_verification.json
 
 `inserted` 只覆盖预录音频插入的广告；主播口播广告不会被刻意检出。跨集广告位一致（`slot_matches`）用于识别“同一广告位、不同 creative”。
 
-Actions 配置了 `GEMINI_API_KEY`（或 `OPENAI_API_KEY`）后，会对候选 ASR 文本做 LLM 分类：第三方广告加权并标记 `llm_verified`，正片、自宣和主播口播默认从报告中移除。未配置 key 时只保留重复指纹、slot 和关键词证据。
+Actions 配置了 `GEMINI_API_KEY`（或 `OPENAI_API_KEY`）后，会对候选 ASR 文本做 LLM 分类：第三方广告加权并标记 `llm_verified`，正片、自宣和主播口播默认从报告中移除；重复候选若被 LLM 高置信判为正片也会删除（保留可用 `--keep-repeated-content`）。每集最多生成 40 个试听片段，确保候选都能进入 ASR/LLM。未配置 key 时只保留重复指纹、slot 和关键词证据。
 
 ## GitHub Actions
 

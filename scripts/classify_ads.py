@@ -21,6 +21,7 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--keep-weak", action="store_true", help="保留 LLM 未确认且无 slot 的插入候选")
     parser.add_argument("--keep-host-read", action="store_true", help="保留主播口播广告")
+    parser.add_argument("--keep-repeated-content", action="store_true", help="保留 LLM 判为正片的重复候选")
     args = parser.parse_args()
 
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -53,6 +54,7 @@ def main() -> int:
             results,
             drop_content=not args.keep_weak,
             drop_host_read=not args.keep_host_read,
+            keep_repeated_content=args.keep_repeated_content,
         )
         report.setdefault("llm", {})["model"] = model
         report.setdefault("llm", {})["classified"] = len(results)
