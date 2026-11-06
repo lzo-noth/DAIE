@@ -11,14 +11,72 @@ from scripts.train_single_episode import (
     EpisodeSample,
     _aggregate_fold_window_metrics,
     _aggregate_head_groups,
+    _boundary_candidates,
+    _calibrate_thresholds,
+    _choose_boundary_thresholds,
     _choose_classifier_threshold,
     _choose_event_threshold,
+    _cv_quality,
     _event_metrics,
     _group_folds,
     _identity_problems,
     _inner_folds,
+    _select_boundary_candidate,
     _training_artifacts_complete,
 )
+
+
+def _boundary_episode(feed: str) -> EpisodeSample:
+    duration = 40.0
+    times = np.arange(0.5, duration, 0.5)
+    labels = ((times >= 11.0) & (times <= 19.0)).astype(np.float64)
+    features = np.zeros((len(times), len(WINDOW_FEATURES)), dtype=np.float32)
+    features[:, 0] = labels * 2.0 - 1.0
+    grid = 0.02
+    count = int(duration / grid)
+    boundary = np.zeros((count, len(BOUNDARY_FEATURES)), dtype=np.float16)
+    positions = np.arange(count) * grid
+    boundary[:, 0] = np.where(np.abs(positions - 10.0) <= 0.1, 2.0, 0.0)
+    boundary[:, 1] = np.where(np.abs(positions - 20.0) <= 0.1, 2.0, 0.0)
+    return EpisodeSample(
+        feed=feed,
+        episode=feed,
+        audio="",
+        windows={
+            "times": times,
+            "hop_s": 0.5,
+            "span_s": 1.0,
+            "features": features,
+        },
+        indices=np.arange(len(times)),
+        labels=labels,
+        ads=[{"start_s": 10.0, "end_s": 20.0}],
+        duration_s=duration,
+        change_scores=np.zeros(len(times)),
+        change_grid_s=grid,
+        boundary_features=boundary,
+    )
+
+
+def _boundary_rows(sample: EpisodeSample) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Onset/offset matrices with positives at the real boundaries."""
+    features = sample.boundary_features.astype(np.float32)
+    positions = np.arange(len(features)) * sample.change_grid_s
+    negatives = [
+        index
+        for index in range(0, len(features), 37)
+        if min(abs(positions[index] - 10.0), abs(positions[index] - 20.0)) >= 5.0
+    ]
+
+    def build(edge: float) -> tuple[np.ndarray, np.ndarray]:
+        positives = [index for index in range(len(features)) if abs(positions[index] - edge) <= 0.1]
+        X = np.vstack([features[positives], features[negatives]]) if negatives else features[positives]
+        y = np.concatenate([np.ones(len(positives)), np.zeros(len(negatives))])
+        return X.astype(np.float32), y
+
+    onset_X, onset_y = build(10.0)
+    offset_X, offset_y = build(20.0)
+    return onset_X, onset_y, offset_X, offset_y
 
 
 def _sample(feed: str, labels: list[int]) -> EpisodeSample:
@@ -205,6 +263,158 @@ class GroupedCrossValidationTest(unittest.TestCase):
         self.assertTrue(_training_artifacts_complete(False, weak_mode=True, skip_boundary=False))
         self.assertTrue(_training_artifacts_complete(False, weak_mode=False, skip_boundary=True))
         self.assertTrue(_training_artifacts_complete(True, weak_mode=False, skip_boundary=False))
+
+
+class BoundaryThresholdCalibrationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.samples = [_boundary_episode(feed) for feed in ("A", "B", "C")]
+        self.X = np.vstack([sample.windows["features"] for sample in self.samples])
+        self.y = np.concatenate([sample.labels for sample in self.samples])
+        self.offsets = {
+            id(sample): (index * 80, (index + 1) * 80)
+            for index, sample in enumerate(self.samples)
+        }
+        rows = [_boundary_rows(sample) for sample in self.samples]
+        self.onset_X = [row[0] for row in rows]
+        self.onset_y = [row[1] for row in rows]
+        self.offset_X = [row[2] for row in rows]
+        self.offset_y = [row[3] for row in rows]
+
+    def test_boundary_thresholds_use_decoded_events_and_report_coverage(self) -> None:
+        onset, offset, onset_metrics, offset_metrics = _choose_boundary_thresholds(
+            [0, 1, 2],
+            self.samples,
+            self.onset_X,
+            self.onset_y,
+            self.offset_X,
+            self.offset_y,
+            [0, 1, 2],
+            self.X,
+            self.y,
+            self.offsets,
+            seed=3,
+            provisional_threshold=0.5,
+        )
+        self.assertGreaterEqual(onset, 0.2)
+        self.assertLessEqual(onset, 0.8)
+        self.assertGreaterEqual(offset, 0.2)
+        self.assertLessEqual(offset, 0.8)
+        self.assertEqual(onset_metrics["objective"], "boundary_p95")
+        coverage = onset_metrics["coverage"]
+        self.assertEqual(coverage["folds_attempted"], 3)
+        self.assertEqual(coverage["classifier_folds_completed"], 3)
+        self.assertEqual(coverage["onset_folds_completed"], 3)
+        self.assertEqual(coverage["offset_folds_completed"], 3)
+        self.assertEqual(coverage["pipeline_folds_completed"], 3)
+        self.assertEqual(onset_metrics["ground_truth_events"], 3)
+        self.assertEqual(onset_metrics["matched_events"], 3)
+        self.assertEqual(onset_metrics["event_recall"], 1.0)
+        self.assertEqual(offset_metrics["matched_events"], 3)
+
+    def test_missing_boundary_heads_are_reported_not_pretended(self) -> None:
+        onset_y = [np.zeros_like(values) for values in self.onset_y]
+        onset, _, onset_metrics, _ = _choose_boundary_thresholds(
+            [0, 1, 2],
+            self.samples,
+            self.onset_X,
+            onset_y,
+            self.offset_X,
+            self.offset_y,
+            [0, 1, 2],
+            self.X,
+            self.y,
+            self.offsets,
+            seed=3,
+        )
+        coverage = onset_metrics["coverage"]
+        self.assertEqual(coverage["classifier_folds_completed"], 3)
+        self.assertEqual(coverage["onset_folds_completed"], 0)
+        self.assertEqual(coverage["pipeline_folds_completed"], 0)
+        self.assertEqual(onset_metrics["matched_events"], 0)
+        self.assertEqual(onset_metrics["event_recall"], 0.0)
+        self.assertEqual(onset, 0.5)
+
+    def test_p95_does_not_beat_event_coverage(self) -> None:
+        results = [
+            {"threshold": 0.4, "matched": 2, "p95": 0.12},
+            {"threshold": 0.6, "matched": 15, "p95": 0.25},
+        ]
+        best = _select_boundary_candidate(results, min_recall_ratio=0.8)
+        self.assertEqual(best["threshold"], 0.6)
+
+    def test_boundary_search_has_fine_candidates(self) -> None:
+        coarse, _ = _boundary_candidates(center=0.5)
+        self.assertEqual(coarse[0], 0.2)
+        self.assertEqual(coarse[-1], 0.8)
+        _, fine = _boundary_candidates(center=0.45)
+        self.assertTrue(fine)
+        self.assertAlmostEqual(min(fine), 0.35)
+        self.assertAlmostEqual(max(fine), 0.55)
+        self.assertTrue(all(abs(value - round(value, 2)) < 1e-9 for value in fine))
+
+    def test_calibration_alternates_classifier_and_boundary(self) -> None:
+        event, onset, offset, event_metrics, onset_metrics, _ = _calibrate_thresholds(
+            [0, 1, 2],
+            self.samples,
+            self.X,
+            self.y,
+            self.offsets,
+            self.onset_X,
+            self.onset_y,
+            self.offset_X,
+            self.offset_y,
+            [0, 1, 2],
+            event_seed=1,
+            boundary_seed=2,
+        )
+        self.assertEqual(event_metrics["calibration"]["rounds"], 2)
+        initial = event_metrics["calibration"]["initial_classifier_threshold"]
+        self.assertEqual(onset_metrics["provisional_classifier_threshold"], initial)
+        self.assertEqual(
+            event_metrics["calibration"]["final_classifier_threshold"], round(event, 4)
+        )
+        self.assertGreaterEqual(onset, 0.2)
+        self.assertLessEqual(onset, 0.8)
+        self.assertGreaterEqual(offset, 0.2)
+        self.assertLessEqual(offset, 0.8)
+
+    def test_event_metrics_rejects_heuristic_fallback_when_boundary_required(self) -> None:
+        sample = self.samples[0]
+        probabilities = np.full(len(sample.windows["times"]), 0.9)
+        with self.assertRaises(ValueError):
+            _event_metrics(
+                [sample],
+                [0],
+                {0: probabilities},
+                thresholds=0.5,
+                refine=True,
+                boundary_heads={},
+                require_boundary=True,
+            )
+
+    def test_cv_quality_requires_complete_pipeline(self) -> None:
+        report = {
+            "fold": 0,
+            "threshold_metrics": {
+                "source": "inner_grouped_cv_event_f1",
+                "folds_attempted": 2,
+                "pipeline_folds_completed": 2,
+            },
+            "boundary_threshold_selection": {
+                "onset": {"coverage": {"folds_attempted": 2, "pipeline_folds_completed": 2}},
+                "offset": {"coverage": {"folds_attempted": 2, "pipeline_folds_completed": 2}},
+            },
+        }
+        strict = _cv_quality(["A", "B", "C"], [report], boundary_expected=True)
+        self.assertEqual(strict["level"], "strict_nested_grouped_cv")
+        report["boundary_threshold_selection"]["onset"]["coverage"][
+            "pipeline_folds_completed"
+        ] = 1
+        limited = _cv_quality(["A", "B", "C"], [report], boundary_expected=True)
+        self.assertEqual(limited["level"], "limited_nested_cv")
+        self.assertFalse(limited["folds"][0]["boundary_pipeline_complete"])
+        two_feeds = _cv_quality(["A", "B"], [report], boundary_expected=True)
+        self.assertEqual(two_feeds["level"], "limited_nested_cv")
 
 
 class EventEvaluationAlignmentTest(unittest.TestCase):

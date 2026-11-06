@@ -80,9 +80,10 @@
 - 数据划分必须按节目（feed）分组，禁止同一节目跨训练/测试集。分组交叉验证为留一节目：每折的测试集是该节目的全部剧集，训练集是其余节目；不足两个节目时训练直接拒绝，避免过于乐观的单节目评测。
 - 阈值选择采用嵌套分组交叉验证：外层留出节目只参与最终评估，阈值只用外层训练集内部的内层折选择；内层训练折必须同时包含正负样本，但内层测试折允许全正、全负或混合。外层训练集只有一个 feed 时退化为按剧集拆分，并标记为 `within_feed_fallback`，不报告成严格分组验证。
 - 阈值优化目标为内层留出剧集**完整 decode → refine → evaluate** 后的事件 F1（并参考每小时误报），而不是窗口 F1；onset/offset 阈值按最终边界误差 P95 校准，帧级 F1 只作辅助诊断。没有事件标注时才回退窗口 F1。
+- 分类阈值与边界阈值必须交替校准，不能各自独立选择：先用默认边界阈值选分类阈值，再用该分类阈值解码出的片段选 onset/offset 阈值，最后用新边界阈值重选分类阈值。边界搜索先粗后细；P95 只在事件匹配覆盖率不低于最优候选 `min_recall_ratio`（默认 0.8）的候选之间比较，避免牺牲召回换取漂亮边界。解码不出事件的留出集仍计入真值事件分母。
 - 训练评估和实际推理共用同一 enter/exit 阈值函数。交叉验证的窗口与边界 P/R/F1 使用各外层折自己的阈值；AUC 同时报告 fold-wise 宏平均与 pooled 值；主 AUC 使用宏平均，没有有效混合折时为 null，pooled 仅作诊断。最终部署阈值及对应校准结果单独记录为 `deployment_calibration`，不得用于回算交叉验证指标。
-- 校准覆盖信息必须记录 `folds_attempted`、`folds_completed`、`folds_skipped` 和 `held_out_episodes`；跳过折不能算作已完成折。
-- 训练数据少于 3 个独立 feed 时，结果等级标记为 `limited_nested_cv`；只有 3 个及以上 feed 且内层折全部有效才可报告 `strict_nested_grouped_cv`。
+- 校准覆盖信息必须分别记录 `classifier_folds_completed`、`onset_folds_completed`、`offset_folds_completed`、`pipeline_folds_completed` 与 `folds_attempted`；跳过折不能算作已完成折。需要边界模型时，学习型边界头缺失不得静默回退启发式精修，该折不计入完整流水线覆盖。
+- 训练数据少于 3 个独立 feed，或任一内层折的完整流水线未完成时，结果等级标记为 `limited_nested_cv`；只有 3 个及以上 feed 且内层分类器、onset、offset 全部有效才可报告 `strict_nested_grouped_cv`。
 - 要求训练边界模型时，未生成边界模型必须返回非零退出码；只有 `--skip-boundary` 或弱监督模式允许缺少边界模型。
 - 每个外层训练折必须同时包含正负窗口，否则中止训练；边界 onset/offset 训练折同样独立检查类别。
 - 事件级评估必须使用该折模型对**完整窗口序列**的预测，不能把筛选后的窗口概率与完整时间轴混用。没有广告的留出集仍统计误报和每小时误报，recall 记为未定义。
