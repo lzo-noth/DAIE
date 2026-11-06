@@ -1,6 +1,10 @@
 name: platforms
 
 on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/platforms.yml"
   schedule:
     # 每天一轮：检测 -> ASR/LLM 标注 -> 拟合校准 -> 提交，下一轮自动生效。
     - cron: "0 6 * * *"
