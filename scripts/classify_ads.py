@@ -32,7 +32,7 @@ def main() -> int:
     if gemini_key:
         api_key = gemini_key
         base_url = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
-        model = args.model or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        model = args.model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
     else:
         api_key = openai_key
         base_url = os.environ.get("OPENAI_BASE_URL") or None

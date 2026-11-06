@@ -124,6 +124,7 @@ jobs:
           MIN_RUN: ${{ inputs.min_run }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_MODEL: gemini-3.5-flash-lite
         run: |
           mkdir -p "out/${{ matrix.slug }}"
           set -o pipefail

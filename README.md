@@ -89,7 +89,7 @@ Actions 配置了 `GEMINI_API_KEY`（或 `OPENAI_API_KEY`）后，会对候选 A
 
 矩阵任务会在候选片段上跑 `faster-whisper`（`base.en`），把“sponsored by / use code / 优惠码”等话术写入 `evidence.asr_text` 与 `evidence.ad_language`；若配置了 `GEMINI_API_KEY` 或 `OPENAI_API_KEY`，再用 `scripts/classify_ads.py` 调用 LLM 做广告/正片分类，默认丢弃被判定为正片、自宣或主播口播的插入候选。
 
-启用 LLM：GitHub 仓库 Settings → Secrets and variables → Actions → New repository secret，添加 `GEMINI_API_KEY`（默认使用 Gemini 的 OpenAI 兼容端点与 `gemini-2.5-flash`，可用 `GEMINI_MODEL` 覆盖）。没有 key 时矩阵照常运行，只是不做 LLM 分类。
+启用 LLM：GitHub 仓库 Settings → Secrets and variables → Actions → New repository secret，添加 `GEMINI_API_KEY`（默认使用 Gemini 的 OpenAI 兼容端点与 `gemini-3.5-flash-lite`，可用 `GEMINI_MODEL` 覆盖）。没有 key 时矩阵照常运行，只是不做 LLM 分类。
 
 用法：Actions → platforms → Run workflow，可填 `platform` 只跑某个平台。所有联网验证都在 runner 上完成；本机网络结果不作数。
 
