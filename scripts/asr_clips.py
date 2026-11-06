@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Transcribe candidate clips and flag ad-like language.
-
-Runs after dai-detect in Actions; never used during audio analysis.
-"""
+"""Transcribe candidate clips and flag ad-like language."""
 
 from __future__ import annotations
 
@@ -74,19 +71,7 @@ def load_audio(path: Path) -> np.ndarray:
     return np.frombuffer(result.stdout, dtype="<i2").astype(np.float32) / 32768.0
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--report", required=True, type=Path)
-    parser.add_argument("--clips-dir", required=True, type=Path)
-    parser.add_argument("--model", default="base.en")
-    parser.add_argument("--language", default="en")
-    parser.add_argument("--compute-type", default="int8")
-    args = parser.parse_args()
-
-    from faster_whisper import WhisperModel
-
-    report = json.loads(args.report.read_text(encoding="utf-8"))
-    model = WhisperModel(args.model, device="cpu", compute_type=args.compute_type)
+def process_report(report: dict, clips_dir: Path, model, language: str) -> tuple[int, int]:
     total = 0
     confirmed = 0
     for episode in report.get("episodes", []):
@@ -95,14 +80,14 @@ def main() -> int:
             clip_name = evidence.get("clip")
             if not clip_name:
                 continue
-            clip_path = args.clips_dir / clip_name
+            clip_path = clips_dir / clip_name
             if not clip_path.exists():
                 continue
             try:
                 audio = load_audio(clip_path)
                 segments, _ = model.transcribe(
                     audio,
-                    language=args.language,
+                    language=language,
                     beam_size=1,
                     condition_on_previous_text=False,
                     vad_filter=False,
@@ -119,9 +104,44 @@ def main() -> int:
                 candidate["score"] = round(min(0.99, float(candidate.get("score", 0.0)) + 0.06), 3)
                 confirmed += 1
             total += 1
-    report["asr"] = {"model": args.model, "language": args.language, "clips": total, "ad_language": confirmed}
-    args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"ASR clips={total} ad_language={confirmed}")
+    report["asr"] = {"model": getattr(model, "model_size_or_path", ""), "language": language, "clips": total, "ad_language": confirmed}
+    return total, confirmed
+
+
+def _targets(report: Path | None, root: Path | None, clips_dir: Path | None) -> list[tuple[Path, Path]]:
+    if root is not None:
+        return [(path, path.parent / "clips") for path in sorted(root.rglob("report.json"))]
+    if report is not None:
+        return [(report, clips_dir or report.parent / "clips")]
+    return []
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--report", type=Path)
+    parser.add_argument("--reports-root", type=Path)
+    parser.add_argument("--clips-dir", type=Path)
+    parser.add_argument("--model", default="base.en")
+    parser.add_argument("--language", default="en")
+    parser.add_argument("--compute-type", default="int8")
+    args = parser.parse_args()
+    targets = _targets(args.report, args.reports_root, args.clips_dir)
+    if not targets:
+        print("no report targets")
+        return 0
+
+    from faster_whisper import WhisperModel
+
+    model = WhisperModel(args.model, device="cpu", compute_type=args.compute_type)
+    for report_path, clips_dir in targets:
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"{report_path}: read failed {exc}")
+            continue
+        total, confirmed = process_report(report, clips_dir, model, args.language)
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"{report_path.parent.name}: clips={total} ad_language={confirmed}")
     return 0
 
 

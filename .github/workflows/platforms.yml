@@ -28,7 +28,7 @@ on:
         required: false
         default: ""
       max_parallel:
-        description: "并发 job 数（LLM 限流时建议 4）"
+        description: "analyze 并发 job 数"
         required: false
         default: "16"
 
@@ -38,7 +38,7 @@ permissions:
 jobs:
   setup:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
@@ -47,22 +47,15 @@ jobs:
         with:
           python-version: "3.12"
       - uses: actions/cache@v4
-        id: venv
+        id: analysis-venv
         with:
-          path: |
-            .venv
-            ~/.cache/huggingface
-          key: dai-venv-py312-v3
-      - name: Prepare ASR dependencies and model
-        if: steps.venv.outputs.cache-hit != 'true'
+          path: .venv-analysis
+          key: dai-analysis-venv-v1
+      - name: Prepare analysis venv
+        if: steps.analysis-venv.outputs.cache-hit != 'true'
         run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install --quiet --upgrade pip
-          .venv/bin/python -m pip install --quiet numpy faster-whisper openai
-          .venv/bin/python - <<'PY'
-          from faster_whisper import WhisperModel
-          WhisperModel("base.en", device="cpu", compute_type="int8")
-          PY
+          python -m venv .venv-analysis
+          .venv-analysis/bin/python -m pip install --quiet numpy
       - id: matrix
         env:
           PLATFORM_FILTER: ${{ inputs.platform }}
@@ -119,7 +112,7 @@ jobs:
   analyze:
     needs: setup
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJSON(inputs.max_parallel) }}
@@ -131,15 +124,13 @@ jobs:
           python-version: "3.12"
       - uses: actions/cache@v4
         with:
-          path: |
-            .venv
-            ~/.cache/huggingface
-          key: dai-venv-py312-v3
-      - name: Ensure dependencies
+          path: .venv-analysis
+          key: dai-analysis-venv-v1
+      - name: Ensure analysis environment
         run: |
-          if [ ! -x .venv/bin/python ]; then
-            python -m venv .venv
-            .venv/bin/python -m pip install --quiet numpy faster-whisper openai
+          if [ ! -x .venv-analysis/bin/python ]; then
+            python -m venv .venv-analysis
+            .venv-analysis/bin/python -m pip install --quiet numpy
           fi
           if ! command -v ffmpeg >/dev/null 2>&1; then
             sudo apt-get update -qq
@@ -150,13 +141,10 @@ jobs:
           EPISODES: ${{ inputs.episodes }}
           MIN_SCORE: ${{ inputs.min_score }}
           MIN_RUN: ${{ inputs.min_run }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GEMINI_MODEL: gemini-3.5-flash-lite
         run: |
           mkdir -p "out/${{ matrix.slug }}"
           set -o pipefail
-          .venv/bin/python -m dai_detect feed "${{ matrix.url }}" \
+          .venv-analysis/bin/python -m dai_detect feed "${{ matrix.url }}" \
             -n "$EPISODES" \
             --min-score "$MIN_SCORE" \
             --min-run "$MIN_RUN" \
@@ -164,17 +152,7 @@ jobs:
             --cache-dir "$RUNNER_TEMP/dai-cache" \
             --clips-dir "out/${{ matrix.slug }}/clips" \
             --report "out/${{ matrix.slug }}/report.json" 2>&1 | tee "out/${{ matrix.slug }}/run.log"
-          .venv/bin/python scripts/asr_clips.py \
-            --report "out/${{ matrix.slug }}/report.json" \
-            --clips-dir "out/${{ matrix.slug }}/clips" \
-            --model base.en \
-            --language en
-          if [ -n "$GEMINI_API_KEY" ] || [ -n "$OPENAI_API_KEY" ]; then
-            .venv/bin/python scripts/classify_ads.py --report "out/${{ matrix.slug }}/report.json"
-          else
-            echo "No GEMINI_API_KEY/OPENAI_API_KEY secret; skipping LLM ad classification"
-          fi
-      - name: Upload result
+      - name: Upload analysis
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -183,8 +161,72 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  asr-llm:
+    needs: analyze
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        id: venv
+        with:
+          path: |
+            .venv
+            ~/.cache/huggingface
+          key: dai-venv-py312-v3
+      - name: Prepare ASR/LLM environment
+        if: steps.venv.outputs.cache-hit != 'true'
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --quiet --upgrade pip
+          .venv/bin/python -m pip install --quiet numpy faster-whisper openai
+          .venv/bin/python - <<'PY'
+          from faster_whisper import WhisperModel
+          WhisperModel("base.en", device="cpu", compute_type="int8")
+          PY
+      - name: Ensure ffmpeg
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ffmpeg
+          fi
+      - name: Download analysis artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          path: analysis
+          pattern: dai-*
+          merge-multiple: false
+      - name: Transcribe and classify
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_MODEL: gemini-3.5-flash-lite
+        run: |
+          if [ -d analysis ]; then
+            set -o pipefail
+            .venv/bin/python scripts/asr_clips.py --reports-root analysis --model base.en --language en
+            if [ -n "$GEMINI_API_KEY" ] || [ -n "$OPENAI_API_KEY" ]; then
+              .venv/bin/python scripts/classify_ads.py --reports-root analysis
+            fi
+          else
+            echo "No analysis artifacts to enrich"
+          fi
+      - name: Upload enriched reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asr-results
+          path: analysis/
+          if-no-files-found: warn
+          retention-days: 30
+
   summary:
-    needs: [analyze, verify]
+    needs: [analyze, verify, asr-llm]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -192,7 +234,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Download results
+      - name: Download enriched results
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: asr-results
+          path: enriched
+      - name: Download analysis fallback
         uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -214,8 +262,10 @@ jobs:
               for platform in platforms
               for feed in platform.get("feeds", [])
           }
+          enriched = pathlib.Path("enriched")
+          root = enriched if any(enriched.glob("dai-*")) else pathlib.Path("artifacts")
           feeds = []
-          for directory in sorted(pathlib.Path("artifacts").glob("dai-*")):
+          for directory in sorted(root.glob("dai-*")):
               slug = directory.name[len("dai-"):]
               platform, feed = meta.get(slug, (slug, ""))
               entry = {"slug": slug, "platform": platform, "feed": feed}
@@ -235,11 +285,11 @@ jobs:
                           1 for c in candidates
                           if c.get("tier") == "inserted" and c.get("evidence", {}).get("slot_matches")
                       ),
-                      "llm_ads": sum(
-                          1 for c in candidates if c.get("evidence", {}).get("llm_verified")
-                      ),
                       "ad_language": sum(
                           1 for c in candidates if c.get("evidence", {}).get("ad_language")
+                      ),
+                      "llm_ads": sum(
+                          1 for c in candidates if c.get("evidence", {}).get("llm_verified")
                       ),
                       "top": [
                           {
@@ -254,6 +304,7 @@ jobs:
                               "ad_terms": c.get("evidence", {}).get("ad_terms"),
                               "llm_verified": c.get("evidence", {}).get("llm_verified"),
                               "llm_brand": (c.get("evidence", {}).get("llm") or {}).get("brand"),
+                              "learned_ad_score": c.get("evidence", {}).get("learned_ad_score"),
                           }
                           for episode in episodes
                           for c in episode.get("candidates", [])
