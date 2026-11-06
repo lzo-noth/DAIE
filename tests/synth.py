@@ -70,6 +70,37 @@ def make_episode(path: Path, parts: list[np.ndarray]) -> None:
     write_wav(path, np.concatenate(parts))
 
 
+def extract_features(samples: np.ndarray):
+    from dai_detect.features import Decimator, FeatureExtractor
+    from dai_detect.fingerprint import FPS, FingerprintExtractor
+    from dai_detect.models import EpisodeFeatures
+
+    extractor = FeatureExtractor()
+    decimator = Decimator()
+    fingerprinter = FingerprintExtractor()
+    for start in range(0, len(samples), SR):
+        chunk = samples[start:start + SR]
+        extractor.push(chunk)
+        fingerprinter.push(decimator.push(chunk))
+    data = extractor.finish()
+    hashes, frames = fingerprinter.finish()
+    return EpisodeFeatures(
+        duration_s=data["duration_s"],
+        grid_s=data["grid_s"],
+        loudness_db=data["loudness_db"],
+        flatness=data["flatness"],
+        flux=data["flux"],
+        mfcc=data["mfcc"],
+        fine_loudness_db=data["fine_loudness_db"],
+        fine_flux=data["fine_flux"],
+        fine_mfcc=data["fine_mfcc"],
+        fine_grid_s=data["fine_grid_s"],
+        hashes=hashes,
+        hash_frames=frames,
+        fingerprint_fps=FPS,
+    )
+
+
 def make_standard_episodes(directory: Path) -> tuple[Path, Path, Path, float, float]:
     jingle = ad(20.0)
     first = directory / "episode1.wav"

@@ -80,7 +80,7 @@ def print_summary(feed_title: str, results: list[EpisodeResult]) -> None:
             print("    未发现候选区间")
             continue
         for candidate in result.candidates:
-            label = "重复指纹" if candidate.tier == "repeated" else "声学候选(未复核)"
+            label = "重复指纹" if candidate.tier == "repeated" else "插入段(未复核)"
             line = (
                 f"    * {hms(candidate.start_s)} - {hms(candidate.end_s)}"
                 f"  {candidate.duration_s:5.1f}s  score {candidate.score:.2f}  [{label}]"

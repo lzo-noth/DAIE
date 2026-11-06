@@ -1,0 +1,202 @@
+[
+  {
+    "platform": "Simplecast",
+    "owner": "AdsWizz / SiriusXM",
+    "delivery": "rss_stitched",
+    "notes": "AdsWizz insertion suite; SmartLess is our reference feed.",
+    "feeds": [
+      {
+        "name": "SmartLess",
+        "slug": "simplecast-smartless",
+        "url": "https://feeds.simplecast.com/hNaFxXpO"
+      },
+      {
+        "name": "99% Invisible",
+        "slug": "simplecast-99pi",
+        "url": "https://feeds.simplecast.com/BqbsxVfO"
+      }
+    ]
+  },
+  {
+    "platform": "Megaphone",
+    "owner": "Spotify",
+    "delivery": "rss_stitched",
+    "notes": "AdLocator cuepoints, server-side stitching.",
+    "feeds": [
+      {
+        "name": "The Rest Is History",
+        "slug": "megaphone-restishistory",
+        "url": "https://feeds.megaphone.fm/GLT4787413333"
+      }
+    ]
+  },
+  {
+    "platform": "Acast",
+    "owner": "Acast",
+    "delivery": "rss_stitched",
+    "notes": "Ad markers/slots, server-side insertion at download or stream.",
+    "feeds": [
+      {
+        "name": "The Adam Buxton Podcast",
+        "slug": "acast-buxton",
+        "url": "https://feeds.acast.com/public/shows/18dcd5db-f898-42c6-ab31-3a1853c1a645"
+      },
+      {
+        "name": "WTF with Marc Maron",
+        "slug": "acast-wtf",
+        "url": "https://feeds.acast.com/public/shows/62a222737c02140013aa4c03"
+      }
+    ]
+  },
+  {
+    "platform": "ART19",
+    "owner": "Amazon",
+    "delivery": "rss_stitched",
+    "notes": "WarpFeed dynamic ad insertion; Amazon Podcast Audience Network.",
+    "feeds": [
+      {
+        "name": "The Dollop",
+        "slug": "art19-dollop",
+        "url": "https://rss.art19.com/dollop"
+      }
+    ]
+  },
+  {
+    "platform": "Omny Studio",
+    "owner": "Triton Digital",
+    "delivery": "rss_stitched",
+    "notes": "Ad markers, insertion at download or stream.",
+    "feeds": [
+      {
+        "name": "Australian Financial Review: Tech Zero",
+        "slug": "omny-afr",
+        "url": "https://www.omnycontent.com/d/playlist/88b564ea-a9a6-4751-910a-a5d800019396/2f793617-f686-467c-af79-ae9f005cd5a4/d784902e-c17c-4f15-a2a0-ae9f005e7efa/podcast.rss"
+      }
+    ]
+  },
+  {
+    "platform": "Amperwave",
+    "owner": "Amperwave",
+    "delivery": "rss_stitched",
+    "notes": "Audacy network hosting and stitching.",
+    "feeds": [
+      {
+        "name": "Office Ladies",
+        "slug": "amperwave-officeladies",
+        "url": "https://rss.amperwave.net/v2/feed/audacynetwork/office-ladies"
+      }
+    ]
+  },
+  {
+    "platform": "DAX",
+    "owner": "Global",
+    "delivery": "rss_stitched",
+    "notes": "Dynamic audio advertising; TWiT is a DAX US partner.",
+    "feeds": [
+      {
+        "name": "This Week in Tech",
+        "slug": "dax-twit",
+        "url": "https://feeds.twit.tv/twit.xml"
+      }
+    ]
+  },
+  {
+    "platform": "Libsyn",
+    "owner": "Libsyn",
+    "delivery": "rss_stitched",
+    "notes": "Automatic Podcast Ads / programmatic insertion.",
+    "feeds": [
+      {
+        "name": "Kadavy (sample Libsyn feed)",
+        "slug": "libsyn-kadavy",
+        "url": "https://kadavy.libsyn.com/rss"
+      }
+    ]
+  },
+  {
+    "platform": "RedCircle",
+    "owner": "RedCircle",
+    "delivery": "rss_stitched",
+    "notes": "Indie hosting with dynamic ad insertion.",
+    "feeds": [
+      {
+        "name": "Now You Know Podcasts",
+        "slug": "redcircle-nowyouknow",
+        "url": "https://feeds.redcircle.com/436b0746-3864-4e28-9c87-ede036f21e36"
+      }
+    ]
+  },
+  {
+    "platform": "Captivate",
+    "owner": "Captivate",
+    "delivery": "rss_stitched",
+    "notes": "Dynamic ads powered by DAX.",
+    "feeds": [
+      {
+        "name": "Stillness in the Storms",
+        "slug": "captivate-stillness",
+        "url": "https://feeds.captivate.fm/stillness-in-the-storms/"
+      }
+    ]
+  },
+  {
+    "platform": "Substack",
+    "owner": "Substack",
+    "delivery": "rss_stitched",
+    "notes": "Substack podcast hosting; ad behavior varies by publisher.",
+    "feeds": [
+      {
+        "name": "The Pragmatic Engineer",
+        "slug": "substack-pragmatic",
+        "url": "https://api.substack.com/feed/podcast/spotify/bd775e35-7384-4fc4-bf47-ae24ae58d79b/458709.rss"
+      }
+    ]
+  },
+  {
+    "platform": "Buzzsprout",
+    "owner": "Buzzsprout",
+    "delivery": "rss_stitched",
+    "notes": "Dynamic content and ad insert options vary by plan.",
+    "feeds": [
+      {
+        "name": "Algorithms + Data Structures = Programs",
+        "slug": "buzzsprout-algorithms",
+        "url": "https://rss.buzzsprout.com/1501960.rss"
+      }
+    ]
+  },
+  {
+    "platform": "Feedburner",
+    "owner": "Google",
+    "delivery": "rss_proxy",
+    "notes": "Legacy feed proxy; actual insertion depends on the origin host.",
+    "feeds": [
+      {
+        "name": "Programming Throwdown",
+        "slug": "feedburner-throwdown",
+        "url": "https://feeds.feedburner.com/ProgrammingThrowdown"
+      }
+    ]
+  },
+  {
+    "platform": "AdsWizz",
+    "owner": "SiriusXM",
+    "delivery": "ad_server",
+    "notes": "Ad Insertion Suite used by Simplecast; no separate RSS feed.",
+    "feeds": []
+  },
+  {
+    "platform": "Triton Digital",
+    "owner": "Triton Digital",
+    "delivery": "ad_server",
+    "notes": "Triton Ad Platform used by Omny; no separate RSS feed.",
+    "feeds": []
+  },
+  {
+    "platform": "Spotify SAI",
+    "owner": "Spotify",
+    "delivery": "app_only",
+    "notes": "Inserted during Spotify playback; not in the RSS/downloaded audio, so feed analysis cannot see it.",
+    "feeds": []
+  }
+]

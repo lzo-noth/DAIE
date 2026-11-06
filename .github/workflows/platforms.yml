@@ -1,0 +1,208 @@
+name: platforms
+
+on:
+  workflow_dispatch:
+    inputs:
+      episodes:
+        description: "每个 feed 分析最新几集（重复广告需要至少 2 集）"
+        required: false
+        default: "2"
+      min_score:
+        description: "最低候选分数"
+        required: false
+        default: "0.5"
+      min_run:
+        description: "重复区间最短秒数"
+        required: false
+        default: "8"
+      platform:
+        description: "只跑名称包含该子串的平台（可选）"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: matrix
+        env:
+          PLATFORM_FILTER: ${{ inputs.platform }}
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          data = json.load(open("platforms.json", encoding="utf-8"))
+          needle = (os.environ.get("PLATFORM_FILTER") or "").strip().lower()
+          entries = []
+          for platform in data:
+              if needle and needle not in (platform.get("platform") or "").lower():
+                  continue
+              for feed in platform.get("feeds", []):
+                  entries.append({
+                      "platform": platform["platform"],
+                      "feed": feed["name"],
+                      "slug": feed["slug"],
+                      "url": feed["url"],
+                  })
+          print("matrix=" + json.dumps({"include": entries}))
+          PY
+
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install --quiet numpy
+      - name: Verify feeds
+        run: |
+          mkdir -p out
+          python -m dai_detect verify platforms.json --report out/feed_verification.json | tee out/verify.log
+      - name: Upload verification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: feed-verification
+          path: out/
+          if-no-files-found: warn
+
+  analyze:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          python -m pip install --quiet numpy
+      - name: Analyze ${{ matrix.platform }} / ${{ matrix.feed }}
+        env:
+          EPISODES: ${{ inputs.episodes }}
+          MIN_SCORE: ${{ inputs.min_score }}
+          MIN_RUN: ${{ inputs.min_run }}
+        run: |
+          mkdir -p "out/${{ matrix.slug }}"
+          set -o pipefail
+          python -m dai_detect feed "${{ matrix.url }}" \
+            -n "$EPISODES" \
+            --min-score "$MIN_SCORE" \
+            --min-run "$MIN_RUN" \
+            --fresh \
+            --cache-dir "$RUNNER_TEMP/dai-cache" \
+            --report "out/${{ matrix.slug }}/report.json" 2>&1 | tee "out/${{ matrix.slug }}/run.log"
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dai-${{ matrix.slug }}
+          path: out/${{ matrix.slug }}/
+          if-no-files-found: warn
+          retention-days: 30
+
+  summary:
+    needs: [analyze, verify]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: dai-*
+          merge-multiple: false
+      - name: Download feed verification
+        uses: actions/download-artifact@v4
+        with:
+          name: feed-verification
+          path: artifacts/feed-verification
+      - name: Build summary
+        run: |
+          mkdir -p out/summary
+          python - <<'PY'
+          import json, pathlib
+          platforms = json.load(open("platforms.json", encoding="utf-8"))
+          meta = {
+              feed["slug"]: (platform["platform"], feed["name"])
+              for platform in platforms
+              for feed in platform.get("feeds", [])
+          }
+          feeds = []
+          for directory in sorted(pathlib.Path("artifacts").glob("dai-*")):
+              slug = directory.name[len("dai-"):]
+              platform, feed = meta.get(slug, (slug, ""))
+              entry = {"slug": slug, "platform": platform, "feed": feed}
+              report_path = directory / "report.json"
+              if report_path.exists():
+                  report = json.loads(report_path.read_text(encoding="utf-8"))
+                  episodes = report.get("episodes", [])
+                  candidates = [c for episode in episodes for c in episode.get("candidates", [])]
+                  entry.update({
+                      "title": report.get("feed", {}).get("title"),
+                      "episodes": len(episodes),
+                      "failed": sum(1 for episode in episodes if episode.get("error")),
+                      "candidates": len(candidates),
+                      "repeated": sum(1 for c in candidates if c.get("tier") == "repeated"),
+                      "inserted": sum(1 for c in candidates if c.get("tier") == "inserted"),
+                      "top": [
+                          {
+                              "episode": episode.get("title"),
+                              "start": c.get("start"),
+                              "end": c.get("end"),
+                              "tier": c.get("tier"),
+                              "score": c.get("score"),
+                          }
+                          for episode in episodes
+                          for c in episode.get("candidates", [])
+                      ][:8],
+                  })
+              else:
+                  entry["error"] = "missing report.json"
+              feeds.append(entry)
+          verification = None
+          verification_path = pathlib.Path("artifacts/feed-verification/feed_verification.json")
+          if verification_path.exists():
+              verification = json.loads(verification_path.read_text(encoding="utf-8"))
+          summary = {"feeds": feeds, "verification": verification}
+          pathlib.Path("out/summary/summary.json").write_text(
+              json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+          )
+          lines = ["# DAI platform matrix", "", "| Platform | Feed | Episodes | Repeated | Inserted | Failed | Top |",
+                   "|---|---|---:|---:|---:|---:|---|"]
+          for entry in feeds:
+              top = entry.get("top", [{}])[0] if entry.get("top") else {}
+              top_text = f"{top.get('start')}–{top.get('end')} ({top.get('tier')}, {top.get('score')})" if top else "-"
+              lines.append(
+                  f"| {entry.get('platform')} | {entry.get('feed')} | {entry.get('episodes', 0)} | "
+                  f"{entry.get('repeated', 0)} | {entry.get('inserted', 0)} | {entry.get('failed', 0)} | {top_text} |"
+              )
+          pathlib.Path("out/summary/summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+          cat out/summary/summary.md
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dai-matrix-summary
+          path: out/summary/
+          if-no-files-found: warn

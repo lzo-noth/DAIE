@@ -7,13 +7,14 @@ from typing import Callable, Optional
 import numpy as np
 
 from .audio import iter_pcm, load_cache, save_cache, source_key
-from .boundaries import acoustic_candidates, segment_evidence
+from .boundaries import segment_evidence
 from .features import Decimator, FeatureExtractor
 from .fingerprint import FPS, FingerprintExtractor
+from .insertion import fine_boundaries, insertion_candidates, refine_bounds
 from .matching import find_repetitions
 from .models import Candidate, Config, Episode, EpisodeFeatures, EpisodeResult, MatchRef
 
-FEATURE_VERSION = "features-v1"
+FEATURE_VERSION = "features-v2"
 
 
 def _cache_path(cache_dir: Path, episode: Episode) -> Path:
@@ -32,6 +33,10 @@ def _from_cache(payload: dict) -> Optional[EpisodeFeatures]:
             flatness=payload["flatness"],
             flux=payload["flux"],
             mfcc=payload["mfcc"],
+            fine_loudness_db=payload["fine_loudness_db"],
+            fine_flux=payload["fine_flux"],
+            fine_mfcc=payload["fine_mfcc"],
+            fine_grid_s=float(payload["fine_grid_s"]),
             hashes=payload["hashes"],
             hash_frames=payload["hash_frames"],
             fingerprint_fps=float(payload["fingerprint_fps"]),
@@ -78,6 +83,10 @@ def analyze_episode(
         flatness=extracted["flatness"],
         flux=extracted["flux"],
         mfcc=extracted["mfcc"],
+        fine_loudness_db=extracted["fine_loudness_db"],
+        fine_flux=extracted["fine_flux"],
+        fine_mfcc=extracted["fine_mfcc"],
+        fine_grid_s=float(extracted["fine_grid_s"]),
         hashes=hashes,
         hash_frames=hash_frames,
         fingerprint_fps=FPS,
@@ -93,6 +102,10 @@ def analyze_episode(
                 "flatness": features.flatness,
                 "flux": features.flux,
                 "mfcc": features.mfcc,
+                "fine_loudness_db": features.fine_loudness_db,
+                "fine_flux": features.fine_flux,
+                "fine_mfcc": features.fine_mfcc,
+                "fine_grid_s": np.float64(features.fine_grid_s),
                 "hashes": features.hashes,
                 "hash_frames": features.hash_frames,
                 "fingerprint_fps": np.float64(features.fingerprint_fps),
@@ -112,11 +125,17 @@ def _repetition_candidate(
     features: EpisodeFeatures,
     feature_episodes: list[Episode],
     feature_durations: list[float],
+    boundaries,
     cfg: Config,
 ) -> Candidate:
     pad = cfg.match_pad_s
     start = max(0.0, repetition.start_frame / FPS - pad)
     end = min(features.duration_s, (repetition.end_frame + 1) / FPS + pad)
+    refined_start, refined_end, refine_strength = refine_bounds(start, end, boundaries)
+    refined = False
+    if refine_strength >= 0.5 and refined_end - refined_start >= 5.0:
+        start, end = refined_start, refined_end
+        refined = True
     evidence = segment_evidence(features, start, end)
     ratio_strength = min(repetition.match_ratio / 0.15, 1.0)
     support = min(len(repetition.refs) / 2.0, 1.0)
@@ -139,7 +158,13 @@ def _repetition_candidate(
                 match_ratio=round(ref.match_ratio, 3),
             )
         )
-    evidence = {**evidence, "matched_episodes": len(repetition.refs), "votes": repetition.votes}
+    evidence = {
+        **evidence,
+        "matched_episodes": len(repetition.refs),
+        "votes": repetition.votes,
+        "refined": refined,
+        "refine_strength": round(refine_strength, 3),
+    }
     return Candidate(
         start_s=round(start, 2),
         end_s=round(end, 2),
@@ -152,15 +177,21 @@ def _repetition_candidate(
 
 def _merge_candidates(
     repeated: list[Candidate],
-    acoustic: list[Candidate],
+    inserted: list[Candidate],
     min_score: float,
 ) -> list[Candidate]:
-    kept_acoustic = [
+    for candidate in repeated:
+        overlaps = [other for other in inserted if _overlap_ratio(candidate, other) >= 0.5]
+        if overlaps:
+            best = max(overlaps, key=lambda other: other.score)
+            candidate.evidence["insertion_score"] = best.score
+            candidate.evidence["insertion_kind"] = best.evidence.get("kind")
+    kept_inserted = [
         candidate
-        for candidate in acoustic
+        for candidate in inserted
         if not any(_overlap_ratio(candidate, other) >= 0.5 for other in repeated)
     ]
-    combined = [*repeated, *kept_acoustic]
+    combined = [*repeated, *kept_inserted]
     combined = [candidate for candidate in combined if candidate.score >= min_score]
     combined.sort(key=lambda item: (-item.score, item.start_s))
     return combined
@@ -194,6 +225,7 @@ def run(
 
     repetitions = find_repetitions(features, cfg)
     feature_durations = [feature.duration_s for feature in features]
+    boundaries = [fine_boundaries(feature) for feature in features]
     for feature_index, result_index in enumerate(feature_result_indices):
         extracted = features[feature_index]
         repeated = [
@@ -202,12 +234,13 @@ def run(
                 extracted,
                 feature_episodes,
                 feature_durations,
+                boundaries[feature_index],
                 cfg,
             )
             for repetition in repetitions[feature_index]
         ]
-        acoustic = acoustic_candidates(extracted, cfg)
-        results[result_index].candidates = _merge_candidates(repeated, acoustic, min_score)
+        inserted = insertion_candidates(extracted, cfg, boundaries[feature_index])
+        results[result_index].candidates = _merge_candidates(repeated, inserted, min_score)
     return results
 
 

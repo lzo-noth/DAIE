@@ -65,6 +65,25 @@ class PipelineTest(unittest.TestCase):
         np.testing.assert_array_equal(first.hashes, second.hashes)
         self.assertAlmostEqual(first.duration_s, second.duration_s, delta=1e-6)
 
+    def test_single_episode_inserted_ad_flagged(self) -> None:
+        path = self.directory / "single.wav"
+        synth.make_episode(
+            path,
+            [synth.speech(20.0, 51), synth.ad(20.0), synth.speech(20.0, 52)],
+        )
+        results = run(
+            [make_episode_from_path(str(path))],
+            Config(cache=False),
+            self.directory / "cache-single",
+            min_score=0.4,
+        )
+        inserted = [candidate for candidate in results[0].candidates if candidate.tier == "inserted"]
+        best = max(
+            (_overlap(candidate.start_s, candidate.end_s, 20.0, 40.0) for candidate in inserted),
+            default=0.0,
+        )
+        self.assertGreaterEqual(best, 10.0, results[0].candidates)
+
     def test_cli_writes_report(self) -> None:
         jingle = synth.ad(12.0)
         first = self.directory / "a.wav"

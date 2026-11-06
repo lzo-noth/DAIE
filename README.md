@@ -9,11 +9,11 @@
 
 DAI 广告由服务端在请求音频时插入，因此有两个可利用的稳定特征：
 
-1. **跨集重复指纹（主信号）**：同一条广告创意通常会在同一播客的多集、不同位置重复出现，而节目正文不会逐字重复。对音频提取 Wang 风格频谱峰值指纹，做跨集偏移投票，重复区间即为强候选。
-2. **声学突变（辅助信号）**：广告是单独文件拼接进来的，边界处常出现响度跳变、音乐床、说话人/频谱突变。对响度、频谱平坦度、频谱通量、MFCC 做变化点检测，得到声学候选。
+1. **跨集重复指纹**：同一条广告创意通常会在同一播客的多集、不同位置重复出现，而节目正文不会逐字重复。对音频提取 Wang 风格频谱峰值指纹，做跨集偏移投票，重复区间即为强候选。
+2. **插入段检测（覆盖单次广告）**：广告是独立文件拼接进来的，边界处通常出现静音、硬切、响度阶跃和音色/房间底噪变化。在 100 Hz 细粒度特征上定位拼接点，再按广告先验（时长、前/中/后贴片位置、音乐床、响度偏差、两端音色变化）给片段打分。两端都没有拼接特征、且与前后语音同音色的连续口播会被降分，因此不把主播口播广告算作目标。
 
-两者合并后按证据打分：重复匹配置信度、边界强度、音乐性、响度偏差、位置先验（前贴片/后贴片）。
-没有标注数据时，重复区间是客观证据；声学候选标记为“未复核”，需要人工确认。
+两者合并后按证据打分：重复匹配置信度、拼接边界强度、音乐性、响度偏差、位置先验。
+没有标注数据时，`repeated` 是强证据；`inserted` 是声学候选，需要人工复核。
 
 ## 安装
 
@@ -38,10 +38,16 @@ python -m dai_detect feed "https://feeds.simplecast.com/hNaFxXpO" -n 3 --report 
 python -m dai_detect files episode1.mp3 episode2.mp3 --report report.json
 ```
 
-单集只能做声学候选：
+单集只能做插入段检测（没有跨集重复可比）：
 
 ```bash
 python -m dai_detect file episode.mp3 --report report.json
+```
+
+验证平台 feed（只抓 RSS，不下载音频）：
+
+```bash
+python -m dai_detect verify platforms.json --report feed_verification.json
 ```
 
 常用参数：
@@ -62,26 +68,33 @@ python -m dai_detect file episode.mp3 --report report.json
 
 - `start_s` / `end_s`：广告区间（秒）；`start` / `end`：时钟格式
 - `score`：0–1，跨集重复候选通常 ≥ 0.7
-- `tier`：`repeated`（跨集指纹命中）或 `acoustic`（仅声学候选）
-- `evidence`：音乐性、响度偏差、边界强度、位置先验、匹配票数
+- `tier`：`repeated`（跨集指纹命中）或 `inserted`（拼接边界 + 广告先验）
+- `evidence`：边界强度/类型、音色变化、音乐性、响度偏差、位置先验、匹配票数
 - `matches`：匹配到的其他剧集与时间区间
+
+`inserted` 只覆盖预录音频插入的广告；主播口播广告不会被刻意检出。
 
 ## GitHub Actions
 
-仓库内置 `.github/workflows/detect.yml`：
+仓库内置两个工作流：
 
-- push 到主分支：跑单元测试（不访问网络）
-- 手动触发 `dai-detect`：输入 RSS 地址和集数，在 US runner 上拉流分析，报告上传为 `dai-report-<run>` artifact
+- `.github/workflows/detect.yml`：push 跑单元测试；手动触发单个 RSS 分析，报告上传为 `dai-report-<run>` artifact。
+- `.github/workflows/platforms.yml`：手动触发平台矩阵。按 `platforms.json` 的每个 feed 并行分析（每个 feed 2 集），上传：
+  - `feed-verification`：每个平台 feed 的可达性、标题、集数、最新一集（只抓 RSS）
+  - `dai-<slug>`：单个 feed 的 `report.json` 与 `run.log`
+  - `dai-matrix-summary`：所有平台的汇总 JSON / Markdown
 
-使用方式：Actions → dai-detect → Run workflow，填写 `feed_url`。运行结束后在该次 run 的 Artifacts 里下载 `report.json` 和 `run.log`。
+用法：Actions → platforms → Run workflow，可填 `platform` 只跑某个平台。所有联网验证都在 runner 上完成；本机网络结果不作数。
 
 ## 局限
 
-- 只出现一次、或只在同一集出现的广告无法用跨集指纹发现，只能依赖声学候选。
-- 主播口播广告（host-read）不是预录音频，重复指纹无效；可后续加 ASR + 话术分类。
-- 共享片头/片尾/主题音乐也会被标为重复，报告里需结合位置与时长判断。
+- 只有拼接边界、且符合广告先验的单次广告才会以 `inserted` 出现；无音乐、无响度变化、与主播同音色的插入广告可能被当成连续口播而漏报。
+- 片头/片尾/章节音乐也可能被标为 `inserted`，需要结合位置、时长和重复性复核。
+- 主播口播广告（host-read）是节目音频的一部分，按目标不检出。
+- Spotify SAI 等 App 内插入不在 RSS/下载文件里，feed 分析看不到；需要设备播放捕获。
+- 共享片头/片尾/主题音乐会被标为重复，报告里需结合位置与时长判断。
 - 同一广告在不同请求间可能被替换，`--fresh` 才能拿到当前版本；缓存的是特征，不是音频。
-- 声学候选阈值是启发式，没有标注集时建议把 `acoustic` 当作人工复核清单。
+- 平台/地区定向会改变广告内容：Actions runner 在美国，拿到的是美国定向广告。
 - 目前只做离线分析；实时跳过需要把特征/匹配器接入播放链路并维护滚动索引。
 
 ## 术语
@@ -98,4 +111,4 @@ python -m dai_detect file episode.mp3 --report report.json
 python -m unittest discover -s tests -t . -v
 ```
 
-测试包含合成音频端到端：两集在不同位置插入同一段 20 秒广告，断言两集都能检出、边界误差 ≤ 3 秒，且无广告的第三集不产生重复候选。
+测试包含合成音频端到端：两集在不同位置插入同一段 20 秒广告，断言两集都能检出、边界误差 ≤ 3 秒；另有单集插入广告（无重复）与连续口播负例。

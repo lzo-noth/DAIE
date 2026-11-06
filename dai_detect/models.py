@@ -54,12 +54,19 @@ class EpisodeFeatures:
     flatness: np.ndarray
     flux: np.ndarray
     mfcc: np.ndarray
+    fine_loudness_db: np.ndarray
+    fine_flux: np.ndarray
+    fine_mfcc: np.ndarray
+    fine_grid_s: float
     hashes: np.ndarray
     hash_frames: np.ndarray
     fingerprint_fps: float
 
     def times(self) -> np.ndarray:
         return np.arange(len(self.loudness_db), dtype=np.float64) * self.grid_s
+
+    def fine_times(self) -> np.ndarray:
+        return np.arange(len(self.fine_loudness_db), dtype=np.float64) * self.fine_grid_s
 
     def frame_count(self) -> int:
         return int(round(self.duration_s * self.fingerprint_fps))
@@ -75,6 +82,10 @@ class Config:
     acoustic_max_s: float = 180.0
     min_acoustic_score: float = 0.55
     max_acoustic_per_episode: int = 8
+    insertion_min_s: float = 8.0
+    insertion_max_s: float = 180.0
+    min_insertion_score: float = 0.52
+    max_insertions_per_episode: int = 24
     max_hash_df: int = 50
     min_votes: int = 8
     cache: bool = True

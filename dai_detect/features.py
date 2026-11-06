@@ -122,6 +122,10 @@ class FeatureExtractor:
             "flatness": _aggregate(flat),
             "flux": _aggregate(flux),
             "mfcc": _aggregate(mfcc),
+            "fine_loudness_db": loud,
+            "fine_flux": flux,
+            "fine_mfcc": mfcc,
+            "fine_grid_s": HOP / float(SAMPLE_RATE),
         }
 
 

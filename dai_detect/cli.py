@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .models import Config, Episode
 from .pipeline import make_episode_from_path, run
+from .platforms import verify_platforms
 from .report import build_report, print_summary, write_report
 from .rss import FeedError, fetch_feed, parse_feed
 
@@ -69,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     _configure_output()
     parser = argparse.ArgumentParser(
         prog="dai-detect",
-        description="从流式播客音频识别 DAI 动态插入广告（跨集重复指纹 + 声学候选）",
+        description="从流式播客音频识别 DAI 动态插入广告（重复指纹 + 插入段检测）",
     )
     subparsers = parser.add_subparsers(dest="mode", required=True)
     common = _common_parser()
@@ -81,10 +82,41 @@ def main(argv: list[str] | None = None) -> int:
     files_parser = subparsers.add_parser("files", parents=[common], help="分析多个本地文件或音频 URL")
     files_parser.add_argument("sources", nargs="+")
 
-    file_parser = subparsers.add_parser("file", parents=[common], help="分析单个文件或音频 URL（仅声学候选）")
+    file_parser = subparsers.add_parser("file", parents=[common], help="分析单个文件或音频 URL（仅插入段检测）")
     file_parser.add_argument("source")
 
+    verify_parser = subparsers.add_parser("verify", help="验证平台 feed 可用性（只抓 RSS，不下载音频）")
+    verify_parser.add_argument("registry", nargs="?", default="platforms.json", help="平台注册表 JSON")
+    verify_parser.add_argument("--report", type=Path, help="将验证结果写入 JSON")
+    verify_parser.add_argument("--proxy", help="HTTP(S) 代理")
+    verify_parser.add_argument("--quiet", action="store_true")
+
     args = parser.parse_args(argv)
+
+    if args.mode == "verify":
+        try:
+            report = verify_platforms(args.registry, proxy=args.proxy)
+        except (OSError, ValueError) as exc:
+            print(f"错误: {exc}", file=sys.stderr)
+            return 1
+        if not args.quiet:
+            print("=== Feed 验证 ===")
+            for platform in report["platforms"]:
+                for feed in platform["feeds"]:
+                    if feed["status"] == "ok":
+                        print(
+                            f"[ok] {platform['platform']} / {feed['name']}: "
+                            f"{feed.get('title')!r} episodes={feed.get('episodes')} "
+                            f"latest={feed.get('latest_title')}"
+                        )
+                    else:
+                        print(f"[error] {platform['platform']} / {feed['name']}: {feed['error']}")
+        if args.report:
+            write_report(args.report, report)
+            print(f"验证结果已写入: {args.report}")
+        feeds = [feed for platform in report["platforms"] for feed in platform["feeds"]]
+        return 0 if any(feed["status"] == "ok" for feed in feeds) else 1
+
     cfg = Config(min_run_s=args.min_run, cache=not args.no_cache, proxy=args.proxy)
     progress = None if args.quiet else _progress
 
