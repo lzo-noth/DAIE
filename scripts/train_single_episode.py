@@ -360,6 +360,45 @@ def _cv_quality(
     }
 
 
+def _calibration_validity(
+    event_metrics: dict,
+    onset_selection: dict,
+    offset_selection: dict,
+    boundary_expected: bool,
+    converged: bool,
+) -> dict:
+    """Final acceptance flags for the deployed threshold combination.
+
+    Per-threshold validity is not enough: the returned classifier and boundary
+    thresholds must have been checked together, and a non-converged
+    coordinate-descent run has not jointly validated them.
+    """
+    attempted = int(event_metrics.get("folds_attempted") or 0)
+    event_ok = bool(
+        event_metrics.get("objective") == "event_f1"
+        and attempted > 0
+        and int(event_metrics.get("pipeline_folds_completed") or 0) == attempted
+    )
+    if boundary_expected:
+        onset_ok = bool((onset_selection or {}).get("boundary_calibration_valid"))
+        offset_ok = bool((offset_selection or {}).get("boundary_calibration_valid"))
+    else:
+        onset_ok = offset_ok = None
+    final_ok = bool(
+        event_ok
+        and (onset_ok and offset_ok if boundary_expected else True)
+        and converged
+    )
+    return {
+        "valid": final_ok,
+        "converged": bool(converged),
+        "event_threshold_valid": event_ok,
+        "onset_threshold_valid": onset_ok,
+        "offset_threshold_valid": offset_ok,
+        "final_pipeline_valid": final_ok,
+    }
+
+
 def _group_folds(groups: list[str]) -> list[list[int]]:
     """Leave-one-feed-out folds: each fold returns the held-out indices.
 
@@ -621,10 +660,11 @@ def _select_boundary_candidate(
         p95 = result.get("p95")
         return float(p95) if p95 is not None else float("inf")
 
-    def key(result: dict) -> tuple[float, int, float]:
+    def key(result: dict) -> tuple[float, int, int, float]:
         return (
             p95_value(result),
             -int(result.get("matched") or 0),
+            int(result.get("false_positives") or 0),
             abs(float(result["threshold"]) - 0.5),
         )
 
@@ -683,6 +723,8 @@ def _choose_boundary_thresholds(
     onset_completed = 0
     offset_completed = 0
     pipeline_completed = 0
+    positive_episodes = 0
+    negative_control_episodes = 0
     for fold_index, held in enumerate(folds):
         inner_train = [index for index in train_indices if index not in set(held)]
         train_rows = _window_rows(inner_train, samples, offsets, len(y_all))
@@ -715,8 +757,12 @@ def _choose_boundary_thresholds(
         contributed = False
         for index in held:
             sample = samples[index]
-            if sample.ads is None or not sample.ads:
+            if sample.ads is None:
                 continue
+            if sample.ads:
+                positive_episodes += 1
+            else:
+                negative_control_episodes += 1
             probabilities = _predict(classifier, sample.windows["features"])
             enter, exit_value = resolve_thresholds(provisional_threshold)
             events = decode_windows(
@@ -756,16 +802,19 @@ def _choose_boundary_thresholds(
         "offset_folds_completed": offset_completed,
         "pipeline_folds_completed": pipeline_completed,
         "episodes": len(stored),
+        "positive_boundary_episodes": positive_episodes,
+        "negative_control_episodes": negative_control_episodes,
         "ground_truth_events": ground_truth_events,
         "provisional_classifier_threshold": round(float(provisional_threshold), 4),
     }
 
     def evaluate(
         onset_threshold: float, offset_threshold: float
-    ) -> tuple[list[float], list[float], int]:
+    ) -> tuple[list[float], list[float], int, int]:
         start_errors: list[float] = []
         end_errors: list[float] = []
         matched = 0
+        false_positives = 0
         for item in stored:
             if item["events"] and item["onset_scores"] is not None:
                 change = {
@@ -782,22 +831,24 @@ def _choose_boundary_thresholds(
                 refined = []
             metrics = evaluate_events(refined, item["gt"])
             matched += len(metrics["matches"])
+            false_positives += int(metrics["false_positives"])
             for match in metrics["matches"]:
                 start_errors.append(float(match["start_error"]))
                 end_errors.append(float(match["end_error"]))
-        return start_errors, end_errors, matched
+        return start_errors, end_errors, matched, false_positives
 
     def measure(kind: str, value: float, other: float) -> dict:
         if kind == "onset":
-            start_errors, _, matched = evaluate(value, other)
+            start_errors, _, matched, false_positives = evaluate(value, other)
             errors = start_errors
         else:
-            _, end_errors, matched = evaluate(other, value)
+            _, end_errors, matched, false_positives = evaluate(other, value)
             errors = end_errors
         return {
             "threshold": round(float(value), 4),
             "matched": matched,
             "ground_truth_events": ground_truth_events,
+            "false_positives": false_positives,
             "p95": float(np.percentile(errors, 95)) if errors else None,
         }
 
@@ -836,6 +887,7 @@ def _choose_boundary_thresholds(
             round(float(onset_result["p95"]), 3) if onset_result["p95"] is not None else None
         ),
         "matched_events": int(onset_result["matched"]),
+        "false_positives": int(onset_result.get("false_positives") or 0),
         "ground_truth_events": ground_truth_events,
         "event_recall": (
             round(float(onset_result["matched"]) / ground_truth_events, 4)
@@ -855,6 +907,7 @@ def _choose_boundary_thresholds(
             round(float(offset_result["p95"]), 3) if offset_result["p95"] is not None else None
         ),
         "matched_events": int(offset_result["matched"]),
+        "false_positives": int(offset_result.get("false_positives") or 0),
         "ground_truth_events": ground_truth_events,
         "event_recall": (
             round(float(offset_result["matched"]) / ground_truth_events, 4)
@@ -978,11 +1031,62 @@ def _calibrate_thresholds(
     event_metrics["calibration"] = {
         "rounds": rounds,
         "converged": converged,
+        "final_recalibrated": False,
         "initial_classifier_threshold": round(float(initial_event_threshold or 0.5), 4),
         "final_classifier_threshold": round(float(event_threshold), 4),
         "max_rounds": MAX_CALIBRATION_ROUNDS,
         "tolerance": THRESHOLD_TOLERANCE,
         "history": history,
+    }
+
+    if boundary_episode_indices and not converged:
+        # The last loop round selected the classifier threshold before the
+        # final boundary update. Re-select it against the returned boundary
+        # thresholds so deployment does not receive a mixed parameter set.
+        event_threshold, event_metrics = _choose_event_threshold(
+            train_indices,
+            samples,
+            X_all,
+            y_all,
+            offsets,
+            seed=event_seed,
+            boundary_onset_X=boundary_onset_X,
+            boundary_onset_y=boundary_onset_y,
+            boundary_offset_X=boundary_offset_X,
+            boundary_offset_y=boundary_offset_y,
+            boundary_episode_indices=boundary_episode_indices,
+            boundary_thresholds=(onset_threshold, offset_threshold),
+        )
+        event_metrics["calibration"] = {
+            "rounds": rounds,
+            "converged": False,
+            "final_recalibrated": True,
+            "initial_classifier_threshold": round(
+                float(initial_event_threshold or 0.5), 4
+            ),
+            "final_classifier_threshold": round(float(event_threshold), 4),
+            "max_rounds": MAX_CALIBRATION_ROUNDS,
+            "tolerance": THRESHOLD_TOLERANCE,
+            "history": history,
+        }
+
+    calibration = event_metrics["calibration"]
+    event_block = event_metrics.get("event") or {}
+    event_metrics["final_calibration_metrics"] = {
+        "objective": event_metrics.get("objective"),
+        "event_precision": event_block.get(
+            "event_precision", event_metrics.get("event_precision")
+        ),
+        "event_recall": event_block.get(
+            "event_recall", event_metrics.get("event_recall")
+        ),
+        "event_f1": event_block.get("event_f1", event_metrics.get("event_f1")),
+        "boundary_p95_s": event_block.get(
+            "boundary_p95_s", event_metrics.get("boundary_p95_s")
+        ),
+        "folds_attempted": event_metrics.get("folds_attempted"),
+        "pipeline_folds_completed": event_metrics.get("pipeline_folds_completed"),
+        "final_recalibrated": calibration.get("final_recalibrated", False),
     }
     return event_threshold, onset_threshold, offset_threshold, event_metrics, onset_metrics, offset_metrics
 
@@ -1536,6 +1640,25 @@ def main() -> int:
         "window": threshold_metrics(y_all, oof, deployment_threshold),
         "threshold_selection": deployment_threshold_metrics,
     }
+    deployment_calibration_meta = deployment_threshold_metrics.get("calibration") or {}
+    deployment_calibration.update(
+        _calibration_validity(
+            deployment_threshold_metrics,
+            deployment_onset_selection,
+            deployment_offset_selection,
+            boundary_expected=bool(boundary_episode_indices),
+            converged=bool(deployment_calibration_meta.get("converged")),
+        )
+    )
+    deployment_calibration["final_recalibrated"] = bool(
+        deployment_calibration_meta.get("final_recalibrated")
+    )
+    if not deployment_calibration["valid"]:
+        print(
+            "[warning] 部署阈值组合未通过校准验收；模型仍会写出，"
+            "但不能报告为已完成校准验收",
+            flush=True,
+        )
     cv_quality = _cv_quality(
         groups,
         fold_reports,

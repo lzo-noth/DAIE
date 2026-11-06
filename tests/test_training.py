@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -13,6 +14,7 @@ from scripts.train_single_episode import (
     _aggregate_head_groups,
     _boundary_candidates,
     _calibrate_thresholds,
+    _calibration_validity,
     _choose_boundary_thresholds,
     _choose_classifier_threshold,
     _choose_event_threshold,
@@ -395,6 +397,144 @@ class BoundaryThresholdCalibrationTest(unittest.TestCase):
                 boundary_heads={},
                 require_boundary=True,
             )
+
+    def test_negative_only_holdouts_still_complete_pipeline(self) -> None:
+        for sample in self.samples:
+            sample.ads = []
+        _, _, onset_metrics, _ = _choose_boundary_thresholds(
+            [0, 1, 2],
+            self.samples,
+            self.onset_X,
+            self.onset_y,
+            self.offset_X,
+            self.offset_y,
+            [0, 1, 2],
+            self.X,
+            self.y,
+            self.offsets,
+            seed=3,
+        )
+        coverage = onset_metrics["coverage"]
+        self.assertEqual(coverage["pipeline_folds_completed"], 3)
+        self.assertEqual(coverage["positive_boundary_episodes"], 0)
+        self.assertEqual(coverage["negative_control_episodes"], 3)
+        self.assertEqual(onset_metrics["ground_truth_events"], 0)
+        self.assertFalse(onset_metrics["boundary_calibration_valid"])
+        self.assertGreaterEqual(onset_metrics["false_positives"], 1)
+
+    def test_nonconverged_run_recalibrates_with_final_boundaries(self) -> None:
+        event_values = [0.3, 0.35, 0.4, 0.45, 0.5, 0.65]
+        boundary_values = [
+            (0.2, 0.6),
+            (0.3, 0.7),
+            (0.4, 0.8),
+            (0.5, 0.2),
+            (0.6, 0.3),
+        ]
+        event_calls: list[dict] = []
+        boundary_calls: list[float] = []
+
+        def fake_event(*args, **kwargs):
+            event_calls.append(kwargs)
+            value = event_values[len(event_calls) - 1]
+            metrics = {
+                "source": "inner_grouped_cv_event_f1",
+                "objective": "event_f1",
+                "folds_attempted": 2,
+                "pipeline_folds_completed": 2,
+                "event": {
+                    "event_precision": 1.0,
+                    "event_recall": 1.0,
+                    "event_f1": 1.0,
+                    "boundary_p95_s": 0.1,
+                },
+            }
+            return value, metrics
+
+        def fake_boundary(*args, **kwargs):
+            boundary_calls.append(kwargs.get("provisional_threshold"))
+            onset, offset = boundary_values[len(boundary_calls) - 1]
+            selection = {
+                "boundary_calibration_valid": True,
+                "provisional_classifier_threshold": kwargs.get("provisional_threshold"),
+                "coverage": {"folds_attempted": 2, "pipeline_folds_completed": 2},
+            }
+            return onset, offset, dict(selection), dict(selection)
+
+        with mock.patch(
+            "scripts.train_single_episode._choose_event_threshold",
+            side_effect=fake_event,
+        ), mock.patch(
+            "scripts.train_single_episode._choose_boundary_thresholds",
+            side_effect=fake_boundary,
+        ):
+            event, onset, offset, event_metrics, _, _ = _calibrate_thresholds(
+                [0, 1, 2],
+                self.samples,
+                self.X,
+                self.y,
+                self.offsets,
+                self.onset_X,
+                self.onset_y,
+                self.offset_X,
+                self.offset_y,
+                [0, 1, 2],
+                event_seed=1,
+                boundary_seed=2,
+            )
+
+        self.assertEqual(len(boundary_calls), 5)
+        self.assertEqual(len(event_calls), 6)
+        self.assertFalse(event_metrics["calibration"]["converged"])
+        self.assertTrue(event_metrics["calibration"]["final_recalibrated"])
+        self.assertEqual(event, event_values[-1])
+        self.assertEqual(onset, boundary_values[-1][0])
+        self.assertEqual(offset, boundary_values[-1][1])
+        self.assertEqual(
+            event_calls[-1]["boundary_thresholds"],
+            boundary_values[-1],
+        )
+        final_metrics = event_metrics["final_calibration_metrics"]
+        self.assertEqual(final_metrics["event_f1"], 1.0)
+        self.assertEqual(final_metrics["boundary_p95_s"], 0.1)
+        self.assertTrue(final_metrics["final_recalibrated"])
+
+    def test_calibration_validity_requires_convergence_and_joint_coverage(self) -> None:
+        event = {
+            "objective": "event_f1",
+            "folds_attempted": 3,
+            "pipeline_folds_completed": 3,
+        }
+        onset = {"boundary_calibration_valid": True}
+        offset = {"boundary_calibration_valid": True}
+        good = _calibration_validity(event, onset, offset, True, True)
+        self.assertTrue(good["valid"])
+        self.assertTrue(good["final_pipeline_valid"])
+
+        not_converged = _calibration_validity(event, onset, offset, True, False)
+        self.assertFalse(not_converged["valid"])
+        self.assertFalse(not_converged["final_pipeline_valid"])
+        self.assertFalse(not_converged["converged"])
+
+        fallback = _calibration_validity(
+            {"objective": "window_f1_fallback", "folds_attempted": 3,
+             "pipeline_folds_completed": 3},
+            onset,
+            offset,
+            True,
+            True,
+        )
+        self.assertFalse(fallback["event_threshold_valid"])
+
+        bad_offset = _calibration_validity(
+            event, onset, {"boundary_calibration_valid": False}, True, True
+        )
+        self.assertFalse(bad_offset["valid"])
+        self.assertFalse(bad_offset["offset_threshold_valid"])
+
+        no_boundary = _calibration_validity(event, {}, {}, False, True)
+        self.assertTrue(no_boundary["valid"])
+        self.assertIsNone(no_boundary["onset_threshold_valid"])
 
     def test_no_ad_false_positive_requires_learned_boundary_head(self) -> None:
         sample = _boundary_episode("A")
