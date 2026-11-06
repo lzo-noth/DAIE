@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import shutil
 import subprocess
@@ -40,40 +39,6 @@ def source_key(src: str, version: str) -> str:
         except OSError:
             basis = f"file|{path.resolve()}|missing|{version}"
     return hashlib.sha1(basis.encode("utf-8")).hexdigest()
-
-
-def probe_duration(src: str, proxy: Optional[str] = None, timeout: float = 20.0) -> Optional[float]:
-    ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
-        return None
-    cmd = [
-        ffprobe,
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "json",
-        src,
-    ]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            timeout=timeout,
-            env=_ffmpeg_env(proxy),
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
-        return None
-    try:
-        payload = json.loads(result.stdout.decode("utf-8", "replace") or "{}")
-        duration = float(payload.get("format", {}).get("duration", 0.0))
-    except (ValueError, TypeError, AttributeError):
-        return None
-    return duration if duration > 0 else None
 
 
 def iter_pcm(
@@ -148,9 +113,13 @@ def iter_pcm(
 
 def save_cache(path: Path, arrays: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    np.savez_compressed(tmp, **arrays)
-    os.replace(tmp, path)
+    tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp.npz")
+    try:
+        np.savez_compressed(tmp, **arrays)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
 
 
 def load_cache(path: Path) -> Optional[dict]:

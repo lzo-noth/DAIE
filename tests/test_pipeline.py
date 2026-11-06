@@ -10,7 +10,7 @@ from pathlib import Path
 
 from dai_detect.cli import main
 from dai_detect.models import Config
-from dai_detect.pipeline import make_episode_from_path, run
+from dai_detect.pipeline import analyze_episode, make_episode_from_path, run
 from tests import synth
 
 
@@ -50,6 +50,20 @@ class PipelineTest(unittest.TestCase):
             self.assertLessEqual(abs(best.end_s - (expected + 20.0)), 3.0)
             self.assertTrue(best.matches)
             self.assertTrue(all(match.episode_id for match in best.matches))
+
+    def test_cache_round_trip(self) -> None:
+        import numpy as np
+
+        path = self.directory / "cached.wav"
+        synth.write_wav(path, synth.speech(3.0, 21))
+        episode = make_episode_from_path(str(path))
+        cache_dir = self.directory / "cache"
+        first = analyze_episode(episode, Config(cache=True), cache_dir, fresh=True)
+        self.assertTrue(list(cache_dir.glob("*.npz")), "缓存文件未写入")
+        self.assertFalse(list(cache_dir.glob("*.tmp*")), "临时缓存文件未清理")
+        second = analyze_episode(episode, Config(cache=True), cache_dir, fresh=False)
+        np.testing.assert_array_equal(first.hashes, second.hashes)
+        self.assertAlmostEqual(first.duration_s, second.duration_s, delta=1e-6)
 
     def test_cli_writes_report(self) -> None:
         jingle = synth.ad(12.0)
