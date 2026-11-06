@@ -57,6 +57,11 @@ from dai_detect.single_features import WINDOW_FEATURES, build_windows, window_la
 from dai_detect.temporal_decoder import decode_windows
 
 
+MIN_BOUNDARY_EVENT_RECALL = 0.80
+MAX_CALIBRATION_ROUNDS = 5
+THRESHOLD_TOLERANCE = 0.01
+
+
 @dataclass
 class EpisodeSample:
     feed: str
@@ -332,6 +337,7 @@ def _cv_quality(
                 boundary_ok = boundary_ok and bool(
                     boundary_attempted > 0
                     and int(coverage.get("pipeline_folds_completed") or 0) == boundary_attempted
+                    and metrics.get("boundary_calibration_valid") is True
                 )
         details.append(
             {
@@ -575,30 +581,65 @@ def _boundary_candidates(
     return coarse_values, fine_values
 
 
-def _select_boundary_candidate(results: list[dict], min_recall_ratio: float = 0.8) -> dict:
+def _select_boundary_candidate(
+    results: list[dict],
+    min_recall_ratio: float = 0.8,
+    min_event_recall: float = MIN_BOUNDARY_EVENT_RECALL,
+) -> dict:
     """Pick a threshold by P95 without trading away event coverage.
 
     P95 only sees matched events, so a candidate with one or two easy matches
-    can look perfect while missing most ads. Candidates within
-    ``min_recall_ratio`` of the best achievable match count stay eligible;
-    P95 then breaks ties, followed by match count.
+    can look perfect while missing most ads. Candidates must first retain
+    ``min_recall_ratio`` of the best achievable match count and also reach the
+    absolute ``min_event_recall`` target; P95 then breaks ties, followed by
+    match count. When no candidate reaches the absolute target, the best
+    coverage candidate is returned with ``recall_valid=False`` so callers do
+    not report an optimized P95 as a valid calibration.
     """
     if not results:
-        return {"threshold": 0.5, "matched": 0, "p95": None}
+        return {"threshold": 0.5, "matched": 0, "p95": None, "recall_valid": False}
     best_matched = max(int(result.get("matched") or 0) for result in results)
     if best_matched <= 0:
-        return min(results, key=lambda result: abs(float(result["threshold"]) - 0.5))
+        chosen = min(results, key=lambda result: abs(float(result["threshold"]) - 0.5))
+        return {**chosen, "recall_valid": False}
+    ground_truth = max(int(result.get("ground_truth_events") or 0) for result in results)
     required = max(1, int(math.ceil(min_recall_ratio * best_matched)))
-    eligible = [result for result in results if int(result.get("matched") or 0) >= required]
-    if not eligible:
-        eligible = results
+    required_absolute = (
+        max(1, int(math.ceil(min_event_recall * ground_truth))) if ground_truth else None
+    )
+    within_range = [
+        result for result in results if int(result.get("matched") or 0) >= required
+    ]
+    eligible = [
+        result
+        for result in within_range
+        if required_absolute is not None
+        and int(result.get("matched") or 0) >= required_absolute
+    ]
+
+    def p95_value(result: dict) -> float:
+        p95 = result.get("p95")
+        return float(p95) if p95 is not None else float("inf")
 
     def key(result: dict) -> tuple[float, int, float]:
-        p95 = result.get("p95")
-        value = float(p95) if p95 is not None else float("inf")
-        return (value, -int(result.get("matched") or 0), abs(float(result["threshold"]) - 0.5))
+        return (
+            p95_value(result),
+            -int(result.get("matched") or 0),
+            abs(float(result["threshold"]) - 0.5),
+        )
 
-    return min(eligible, key=key)
+    if eligible:
+        return {**min(eligible, key=key), "recall_valid": True}
+
+    fallback = min(
+        within_range or results,
+        key=lambda result: (
+            -int(result.get("matched") or 0),
+            p95_value(result),
+            abs(float(result["threshold"]) - 0.5),
+        ),
+    )
+    return {**fallback, "recall_valid": False}
 
 
 def _choose_boundary_thresholds(
@@ -615,6 +656,7 @@ def _choose_boundary_thresholds(
     seed: int,
     provisional_threshold: float = 0.5,
     min_recall_ratio: float = 0.8,
+    min_event_recall: float = MIN_BOUNDARY_EVENT_RECALL,
 ) -> tuple[float, float, dict, dict]:
     """Calibrate onset/offset thresholds against final refined boundaries.
 
@@ -755,23 +797,33 @@ def _choose_boundary_thresholds(
         return {
             "threshold": round(float(value), 4),
             "matched": matched,
+            "ground_truth_events": ground_truth_events,
             "p95": float(np.percentile(errors, 95)) if errors else None,
         }
 
     def search(kind: str, other: float) -> tuple[float, dict]:
         coarse, _ = _boundary_candidates(center=0.5)
         results = [measure(kind, value, other) for value in coarse]
-        best = _select_boundary_candidate(results, min_recall_ratio)
+        best = _select_boundary_candidate(
+            results, min_recall_ratio, min_event_recall
+        )
         _, fine = _boundary_candidates(center=float(best["threshold"]))
         results.extend(measure(kind, value, other) for value in fine)
-        best = _select_boundary_candidate(results, min_recall_ratio)
+        best = _select_boundary_candidate(
+            results, min_recall_ratio, min_event_recall
+        )
         return float(best["threshold"]), best
 
     # Coordinate descent: onset and offset both move the decoded boundary, so
     # alternate them twice instead of optimizing either against a stale value.
     onset_threshold = offset_threshold = 0.5
-    onset_result: dict = {"threshold": 0.5, "matched": 0, "p95": None}
-    offset_result: dict = {"threshold": 0.5, "matched": 0, "p95": None}
+    onset_result: dict = {
+        "threshold": 0.5,
+        "matched": 0,
+        "p95": None,
+        "recall_valid": False,
+    }
+    offset_result: dict = dict(onset_result)
     for _ in range(2):
         onset_threshold, onset_result = search("onset", offset_threshold)
         offset_threshold, offset_result = search("offset", onset_threshold)
@@ -779,6 +831,7 @@ def _choose_boundary_thresholds(
     onset_metrics = {
         "source": f"{fold_kind}_boundary_error",
         "objective": "boundary_p95",
+        "boundary_calibration_valid": bool(onset_result.get("recall_valid")),
         "boundary_start_p95_s": (
             round(float(onset_result["p95"]), 3) if onset_result["p95"] is not None else None
         ),
@@ -790,12 +843,14 @@ def _choose_boundary_thresholds(
             else None
         ),
         "min_recall_ratio": min_recall_ratio,
+        "min_event_recall": min_event_recall,
         "provisional_classifier_threshold": round(float(provisional_threshold), 4),
         "coverage": coverage,
     }
     offset_metrics = {
         "source": f"{fold_kind}_boundary_error",
         "objective": "boundary_p95",
+        "boundary_calibration_valid": bool(offset_result.get("recall_valid")),
         "boundary_end_p95_s": (
             round(float(offset_result["p95"]), 3) if offset_result["p95"] is not None else None
         ),
@@ -807,6 +862,7 @@ def _choose_boundary_thresholds(
             else None
         ),
         "min_recall_ratio": min_recall_ratio,
+        "min_event_recall": min_event_recall,
         "provisional_classifier_threshold": round(float(provisional_threshold), 4),
         "coverage": coverage,
     }
@@ -827,68 +883,106 @@ def _calibrate_thresholds(
     event_seed: int,
     boundary_seed: int,
     min_recall_ratio: float = 0.8,
+    min_event_recall: float = MIN_BOUNDARY_EVENT_RECALL,
 ) -> tuple[float, float, float, dict, dict, dict]:
-    """Alternate classifier and boundary calibration on the same pipeline.
+    """Coordinate descent over classifier, onset and offset thresholds.
 
-    Step 1 calibrates the classifier threshold with default boundary
-    thresholds. Step 2 recalibrates onset/offset on spans decoded by that
-    classifier threshold. Step 3 recalibrates the classifier with the new
-    boundary thresholds, so the returned thresholds were all selected against
-    the same decode behavior.
+    Each round selects the classifier threshold using the current boundary
+    thresholds, then recalibrates onset/offset on spans decoded by that
+    classifier threshold. The loop stops when every threshold moves by at most
+    ``THRESHOLD_TOLERANCE`` or after ``MAX_CALIBRATION_ROUNDS``. Without
+    boundary labels there is nothing to alternate and one round is recorded.
     """
     onset_threshold = offset_threshold = 0.5
-    event_threshold, event_metrics = _choose_event_threshold(
-        train_indices,
-        samples,
-        X_all,
-        y_all,
-        offsets,
-        seed=event_seed,
-        boundary_onset_X=boundary_onset_X,
-        boundary_onset_y=boundary_onset_y,
-        boundary_offset_X=boundary_offset_X,
-        boundary_offset_y=boundary_offset_y,
-        boundary_episode_indices=boundary_episode_indices,
-        boundary_thresholds=(onset_threshold, offset_threshold),
-    )
-    if not boundary_episode_indices:
-        return event_threshold, onset_threshold, offset_threshold, event_metrics, {}, {}
+    event_threshold = 0.5
+    event_metrics: dict = {}
+    onset_metrics: dict = {}
+    offset_metrics: dict = {}
+    initial_event_threshold: float | None = None
+    history: list[dict] = []
+    converged = False
+    rounds = 0
+    for round_index in range(MAX_CALIBRATION_ROUNDS):
+        previous_event = event_threshold
+        previous_onset = onset_threshold
+        previous_offset = offset_threshold
+        event_threshold, event_metrics = _choose_event_threshold(
+            train_indices,
+            samples,
+            X_all,
+            y_all,
+            offsets,
+            seed=event_seed,
+            boundary_onset_X=boundary_onset_X,
+            boundary_onset_y=boundary_onset_y,
+            boundary_offset_X=boundary_offset_X,
+            boundary_offset_y=boundary_offset_y,
+            boundary_episode_indices=boundary_episode_indices,
+            boundary_thresholds=(onset_threshold, offset_threshold),
+        )
+        if initial_event_threshold is None:
+            initial_event_threshold = event_threshold
+        rounds = round_index + 1
+        if not boundary_episode_indices:
+            history.append(
+                {
+                    "round": rounds,
+                    "classifier_threshold": round(float(event_threshold), 4),
+                    "onset_threshold": round(float(onset_threshold), 4),
+                    "offset_threshold": round(float(offset_threshold), 4),
+                }
+            )
+            converged = True
+            break
 
-    initial_event_threshold = event_threshold
-    onset_threshold, offset_threshold, onset_metrics, offset_metrics = _choose_boundary_thresholds(
-        train_indices,
-        samples,
-        boundary_onset_X,
-        boundary_onset_y,
-        boundary_offset_X,
-        boundary_offset_y,
-        boundary_episode_indices,
-        X_all,
-        y_all,
-        offsets,
-        seed=boundary_seed,
-        provisional_threshold=event_threshold,
-        min_recall_ratio=min_recall_ratio,
-    )
-    event_threshold, event_metrics = _choose_event_threshold(
-        train_indices,
-        samples,
-        X_all,
-        y_all,
-        offsets,
-        seed=event_seed,
-        boundary_onset_X=boundary_onset_X,
-        boundary_onset_y=boundary_onset_y,
-        boundary_offset_X=boundary_offset_X,
-        boundary_offset_y=boundary_offset_y,
-        boundary_episode_indices=boundary_episode_indices,
-        boundary_thresholds=(onset_threshold, offset_threshold),
-    )
+        onset_threshold, offset_threshold, onset_metrics, offset_metrics = (
+            _choose_boundary_thresholds(
+                train_indices,
+                samples,
+                boundary_onset_X,
+                boundary_onset_y,
+                boundary_offset_X,
+                boundary_offset_y,
+                boundary_episode_indices,
+                X_all,
+                y_all,
+                offsets,
+                seed=boundary_seed,
+                provisional_threshold=event_threshold,
+                min_recall_ratio=min_recall_ratio,
+                min_event_recall=min_event_recall,
+            )
+        )
+        classifier_delta = abs(event_threshold - previous_event)
+        onset_delta = abs(onset_threshold - previous_onset)
+        offset_delta = abs(offset_threshold - previous_offset)
+        history.append(
+            {
+                "round": rounds,
+                "classifier_threshold": round(float(event_threshold), 4),
+                "onset_threshold": round(float(onset_threshold), 4),
+                "offset_threshold": round(float(offset_threshold), 4),
+                "classifier_delta": round(float(classifier_delta), 4),
+                "onset_delta": round(float(onset_delta), 4),
+                "offset_delta": round(float(offset_delta), 4),
+                "boundary_calibration_valid": bool(
+                    onset_metrics.get("boundary_calibration_valid")
+                    and offset_metrics.get("boundary_calibration_valid")
+                ),
+            }
+        )
+        if max(classifier_delta, onset_delta, offset_delta) <= THRESHOLD_TOLERANCE:
+            converged = True
+            break
+
     event_metrics["calibration"] = {
-        "rounds": 2,
-        "initial_classifier_threshold": round(float(initial_event_threshold), 4),
-        "classifier_threshold_used_for_boundary": round(float(initial_event_threshold), 4),
+        "rounds": rounds,
+        "converged": converged,
+        "initial_classifier_threshold": round(float(initial_event_threshold or 0.5), 4),
         "final_classifier_threshold": round(float(event_threshold), 4),
+        "max_rounds": MAX_CALIBRATION_ROUNDS,
+        "tolerance": THRESHOLD_TOLERANCE,
+        "history": history,
     }
     return event_threshold, onset_threshold, offset_threshold, event_metrics, onset_metrics, offset_metrics
 
@@ -992,12 +1086,13 @@ def _event_metrics(
     boundary_heads: Optional[dict[int, tuple[dict, dict, float, float]]] = None,
     require_boundary: bool = False,
 ) -> dict:
-    predictions: list[dict] = []
-    ground_truth: list[dict] = []
-    total_duration = 0.0
     labeled = [index for index in indices if samples[index].ads is not None]
     if not labeled:
         return {}
+    total_duration = 0.0
+    matched = false_positives = false_negatives = 0
+    predicted_total = ground_truth_total = 0
+    boundary_errors: list[float] = []
     for index in labeled:
         sample = samples[index]
         probability = np.asarray(probabilities[index])
@@ -1037,9 +1132,12 @@ def _event_metrics(
                     "onset_threshold": onset_threshold,
                     "offset_threshold": offset_threshold,
                 }
-            elif require_boundary and sample.ads:
+            elif require_boundary and events:
+                # Refinement runs even when ground truth is empty, so an
+                # unlabelled episode that produces a false positive must use
+                # the same learned boundary path as deployment.
                 raise ValueError(
-                    f"第 {index} 集有广告标注但缺少学习型边界头；"
+                    f"第 {index} 集存在待精修事件但缺少学习型边界头；"
                     "需要边界模型时不允许回退启发式精修"
                 )
             else:
@@ -1057,25 +1155,50 @@ def _event_metrics(
                 }
                 for event in events
             ]
-        predictions.extend(refined)
-        ground_truth.extend(
-            [{"start_s": float(ad["start_s"]), "end_s": float(ad["end_s"])} for ad in sample.ads]
-        )
+        # Timestamps restart at zero for every episode, so matching must be
+        # scoped to one episode. Pooling spans across episodes can pair a false
+        # positive in one show with a miss in another and report a perfect
+        # match.
+        truth = [
+            {"start_s": float(ad["start_s"]), "end_s": float(ad["end_s"])}
+            for ad in sample.ads
+        ]
+        episode = evaluate_events(refined, truth, duration_s=sample.duration_s)
+        matched += int(episode["matched"])
+        false_positives += int(episode["false_positives"])
+        false_negatives += int(episode["false_negatives"])
+        predicted_total += int(episode["predicted_events"])
+        ground_truth_total += int(episode["ground_truth_events"])
+        for match in episode["matches"]:
+            boundary_errors.extend(
+                (float(match["start_error"]), float(match["end_error"]))
+            )
         total_duration += sample.duration_s
-    metrics = evaluate_events(predictions, ground_truth, duration_s=total_duration)
+
+    precision = matched / predicted_total if predicted_total else None
+    recall = matched / ground_truth_total if ground_truth_total else None
+    if precision is None or recall is None:
+        f1 = None
+    elif precision + recall:
+        f1 = 2.0 * precision * recall / (precision + recall)
+    else:
+        f1 = 0.0
     return {
-        key: metrics[key]
-        for key in (
-            "event_precision",
-            "event_recall",
-            "event_f1",
-            "boundary_p95_s",
-            "false_positives",
-            "false_negatives",
-            "false_positives_per_hour",
-            "ground_truth_events",
-            "predicted_events",
-        )
+        "event_precision": round(precision, 4) if precision is not None else None,
+        "event_recall": round(recall, 4) if recall is not None else None,
+        "event_f1": round(f1, 4) if f1 is not None else None,
+        "boundary_p95_s": (
+            round(float(np.percentile(boundary_errors, 95)), 3) if boundary_errors else None
+        ),
+        "false_positives": false_positives,
+        "false_negatives": false_negatives,
+        "false_positives_per_hour": (
+            round(false_positives / (total_duration / 3600.0), 3)
+            if total_duration > 0
+            else None
+        ),
+        "ground_truth_events": ground_truth_total,
+        "predicted_events": predicted_total,
     }
 
 
@@ -1098,6 +1221,12 @@ def main() -> int:
         "--allow-audio-mismatch",
         action="store_true",
         help="音频身份不匹配时仅警告并继续（默认中止）",
+    )
+    parser.add_argument(
+        "--min-boundary-event-recall",
+        type=float,
+        default=MIN_BOUNDARY_EVENT_RECALL,
+        help="边界阈值校准要求的最低事件召回率，未达到时标记校准无效",
     )
     args = parser.parse_args()
 
@@ -1284,6 +1413,7 @@ def main() -> int:
             boundary_episode_indices,
             event_seed=fold_index + 1,
             boundary_seed=fold_index + 31,
+            min_event_recall=args.min_boundary_event_recall,
         )
         if not boundary_episode_indices:
             onset_X = onset_y = offset_X = offset_y = None
@@ -1301,14 +1431,17 @@ def main() -> int:
             offset_head = _fit_logistic(*_balance(offset_X, offset_y, ratio=6, seed=fold_index + 21))
 
         if onset_head is not None and offset_head is not None:
+            # Bind learned heads to every held episode, including confirmed
+            # no-ad episodes that may still produce false positives. Deployment
+            # does not know the labels, so evaluation must not take a
+            # different refinement path for unlabelled audio.
             for index in held:
-                if index in boundary_episode_indices:
-                    fold_boundary_heads[index] = (
-                        onset_head,
-                        offset_head,
-                        onset_threshold,
-                        offset_threshold,
-                    )
+                fold_boundary_heads[index] = (
+                    onset_head,
+                    offset_head,
+                    onset_threshold,
+                    offset_threshold,
+                )
             for entry, episode in enumerate(boundary_episode_indices):
                 if episode not in held_set:
                     continue
@@ -1394,6 +1527,7 @@ def main() -> int:
         boundary_episode_indices,
         event_seed=101,
         boundary_seed=909,
+        min_event_recall=args.min_boundary_event_recall,
     )
     deployment_calibration = {
         "threshold": round(deployment_threshold, 4),

@@ -367,12 +367,16 @@ class BoundaryThresholdCalibrationTest(unittest.TestCase):
             event_seed=1,
             boundary_seed=2,
         )
-        self.assertEqual(event_metrics["calibration"]["rounds"], 2)
-        initial = event_metrics["calibration"]["initial_classifier_threshold"]
-        self.assertEqual(onset_metrics["provisional_classifier_threshold"], initial)
+        calibration = event_metrics["calibration"]
+        self.assertLessEqual(calibration["rounds"], 5)
+        self.assertGreaterEqual(calibration["rounds"], 1)
+        self.assertEqual(calibration["final_classifier_threshold"], round(event, 4))
         self.assertEqual(
-            event_metrics["calibration"]["final_classifier_threshold"], round(event, 4)
+            onset_metrics["provisional_classifier_threshold"],
+            calibration["history"][-1]["classifier_threshold"],
         )
+        self.assertEqual(len(calibration["history"]), calibration["rounds"])
+        self.assertIn("converged", calibration)
         self.assertGreaterEqual(onset, 0.2)
         self.assertLessEqual(onset, 0.8)
         self.assertGreaterEqual(offset, 0.2)
@@ -392,6 +396,59 @@ class BoundaryThresholdCalibrationTest(unittest.TestCase):
                 require_boundary=True,
             )
 
+    def test_no_ad_false_positive_requires_learned_boundary_head(self) -> None:
+        sample = _boundary_episode("A")
+        sample.ads = []
+        probabilities = np.full(len(sample.windows["times"]), 0.9)
+        with self.assertRaises(ValueError):
+            _event_metrics(
+                [sample],
+                [0],
+                {0: probabilities},
+                thresholds=0.5,
+                refine=True,
+                boundary_heads={},
+                require_boundary=True,
+            )
+
+    def test_no_ad_episode_without_events_skips_refinement(self) -> None:
+        sample = _boundary_episode("A")
+        sample.ads = []
+        probabilities = np.full(len(sample.windows["times"]), 0.05)
+        metrics = _event_metrics(
+            [sample],
+            [0],
+            {0: probabilities},
+            thresholds=0.5,
+            refine=True,
+            boundary_heads={},
+            require_boundary=True,
+        )
+        self.assertIsNone(metrics["event_precision"])
+        self.assertIsNone(metrics["event_recall"])
+        self.assertEqual(metrics["false_positives"], 0)
+
+    def test_absolute_boundary_recall_is_enforced(self) -> None:
+        results = [
+            {"threshold": 0.3, "matched": 10, "ground_truth_events": 100, "p95": 0.05},
+            {"threshold": 0.5, "matched": 8, "ground_truth_events": 100, "p95": 0.02},
+        ]
+        best = _select_boundary_candidate(
+            results, min_recall_ratio=0.8, min_event_recall=0.8
+        )
+        self.assertFalse(best["recall_valid"])
+        self.assertEqual(best["threshold"], 0.3)
+
+        valid_results = [
+            {"threshold": 0.3, "matched": 9, "ground_truth_events": 10, "p95": 0.2},
+            {"threshold": 0.5, "matched": 8, "ground_truth_events": 10, "p95": 0.1},
+        ]
+        valid = _select_boundary_candidate(
+            valid_results, min_recall_ratio=0.8, min_event_recall=0.8
+        )
+        self.assertTrue(valid["recall_valid"])
+        self.assertEqual(valid["threshold"], 0.5)
+
     def test_cv_quality_requires_complete_pipeline(self) -> None:
         report = {
             "fold": 0,
@@ -401,8 +458,14 @@ class BoundaryThresholdCalibrationTest(unittest.TestCase):
                 "pipeline_folds_completed": 2,
             },
             "boundary_threshold_selection": {
-                "onset": {"coverage": {"folds_attempted": 2, "pipeline_folds_completed": 2}},
-                "offset": {"coverage": {"folds_attempted": 2, "pipeline_folds_completed": 2}},
+                "onset": {
+                    "coverage": {"folds_attempted": 2, "pipeline_folds_completed": 2},
+                    "boundary_calibration_valid": True,
+                },
+                "offset": {
+                    "coverage": {"folds_attempted": 2, "pipeline_folds_completed": 2},
+                    "boundary_calibration_valid": True,
+                },
             },
         }
         strict = _cv_quality(["A", "B", "C"], [report], boundary_expected=True)
@@ -413,6 +476,16 @@ class BoundaryThresholdCalibrationTest(unittest.TestCase):
         limited = _cv_quality(["A", "B", "C"], [report], boundary_expected=True)
         self.assertEqual(limited["level"], "limited_nested_cv")
         self.assertFalse(limited["folds"][0]["boundary_pipeline_complete"])
+
+        report["boundary_threshold_selection"]["onset"]["coverage"][
+            "pipeline_folds_completed"
+        ] = 2
+        report["boundary_threshold_selection"]["onset"][
+            "boundary_calibration_valid"
+        ] = False
+        invalid_recall = _cv_quality(["A", "B", "C"], [report], boundary_expected=True)
+        self.assertEqual(invalid_recall["level"], "limited_nested_cv")
+
         two_feeds = _cv_quality(["A", "B"], [report], boundary_expected=True)
         self.assertEqual(two_feeds["level"], "limited_nested_cv")
 
@@ -460,6 +533,28 @@ class EventEvaluationAlignmentTest(unittest.TestCase):
         self.assertIsNone(metrics["event_recall"])
         self.assertGreaterEqual(metrics["false_positives"], 1)
         self.assertIsNotNone(metrics["false_positives_per_hour"])
+
+    def test_event_matching_is_scoped_to_each_episode(self) -> None:
+        predicted_only = _boundary_episode("A")
+        predicted_only.ads = []
+        truth_only = _boundary_episode("B")
+        times = predicted_only.windows["times"]
+        high = np.where((times >= 10.5) & (times <= 19.5), 0.95, 0.05)
+        low = np.full(len(times), 0.05)
+        metrics = _event_metrics(
+            [predicted_only, truth_only],
+            [0, 1],
+            {0: high, 1: low},
+            thresholds=0.5,
+            refine=False,
+        )
+        self.assertEqual(metrics["predicted_events"], 1)
+        self.assertEqual(metrics["ground_truth_events"], 1)
+        self.assertEqual(metrics["false_positives"], 1)
+        self.assertEqual(metrics["false_negatives"], 1)
+        self.assertEqual(metrics["event_precision"], 0.0)
+        self.assertEqual(metrics["event_recall"], 0.0)
+        self.assertEqual(metrics["event_f1"], 0.0)
 
 
 class AudioIdentityTest(unittest.TestCase):
