@@ -7,3 +7,4 @@ local_report.json
 out/
 samples/
 .venv/
+artifact/
