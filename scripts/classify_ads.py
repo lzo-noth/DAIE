@@ -42,7 +42,11 @@ def main() -> int:
 
     report = json.loads(args.report.read_text(encoding="utf-8"))
     try:
-        client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
+        client = (
+            OpenAI(api_key=api_key, base_url=base_url, timeout=60.0, max_retries=0)
+            if base_url
+            else OpenAI(api_key=api_key, timeout=60.0, max_retries=0)
+        )
         results = classify_items(report, client, model, batch_size=args.batch_size)
         apply_classifications(
             report,

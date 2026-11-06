@@ -78,15 +78,15 @@ def parse_response(text: str, expected_ids: set[str]) -> dict[str, dict[str, Any
 
 def _retryable(exc: Exception) -> bool:
     text = str(exc).lower()
-    return any(marker in text for marker in ("429", "rate limit", "quota", "temporarily"))
+    return any(marker in text for marker in ("429", "rate limit", "quota", "temporarily", "timeout", "timed out"))
 
 
 def _create_with_retry(client, **kwargs):
-    for attempt in range(4):
+    for attempt in range(3):
         try:
             return client.chat.completions.create(**kwargs)
         except Exception as exc:  # noqa: BLE001
-            if attempt == 3 or not _retryable(exc):
+            if attempt == 2 or not _retryable(exc):
                 raise
             time.sleep(2 * (attempt + 1))
 
