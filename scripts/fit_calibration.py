@@ -13,6 +13,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dai_detect.calibration import FEATURES, label_features
+from dai_detect.keywords import load_terms, match_terms
 
 
 def _sigmoid(z: np.ndarray) -> np.ndarray:
@@ -25,8 +26,8 @@ def _row_key(feed: str, episode: str, start: float, end: float, tier: str) -> st
 
 def _load_rows(
     paths: list[Path],
-) -> tuple[list[list[float]], np.ndarray, np.ndarray, list[str], list[str], list[float]]:
-    entries: dict[str, tuple[list[float], int, float, str, str, float]] = {}
+) -> tuple[list[list[float]], np.ndarray, np.ndarray, list[str], list[str], list[float], list[str]]:
+    entries: dict[str, tuple[list[float], int, float, str, str, float, str]] = {}
     for path in paths:
         if path.suffix.lower() == ".jsonl":
             try:
@@ -57,6 +58,7 @@ def _load_rows(
                     feed,
                     f"{feed}|{episode}",
                     duration,
+                    str(row.get("asr_text") or ""),
                 )
             continue
         try:
@@ -87,6 +89,7 @@ def _load_rows(
                 group,
                 f"{group}|{episode}",
                 duration,
+                str(entry.get("asr_text") or features.get("asr_text") or ""),
             )
     rows = [item[0] for item in entries.values()]
     labels = np.asarray([item[1] for item in entries.values()], dtype=np.float64)
@@ -94,7 +97,8 @@ def _load_rows(
     groups = [item[3] for item in entries.values()]
     episodes = [item[4] for item in entries.values()]
     durations = [item[5] for item in entries.values()]
-    return rows, labels, baselines, groups, episodes, durations
+    texts = [item[6] for item in entries.values()]
+    return rows, labels, baselines, groups, episodes, durations, texts
 
 
 def _standardize(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -230,7 +234,7 @@ def main() -> int:
             paths.extend(path.rglob("*.jsonl"))
         else:
             paths.append(path)
-    rows, labels, baselines, groups, episodes, durations = _load_rows(sorted(set(paths)))
+    rows, labels, baselines, groups, episodes, durations, texts = _load_rows(sorted(set(paths)))
     if len(rows) == 0 or labels.sum() == 0 or (len(labels) - labels.sum()) == 0:
         print(f"not enough labels: samples={len(rows)} ads={int(labels.sum())}")
         metrics = {
@@ -300,6 +304,19 @@ def main() -> int:
     hours = _episode_hours(episodes, durations)
     fp_per_hour = round(false_positives / hours, 2) if hours > 0 else None
 
+    terms = load_terms(Path("feedback/keywords.json"))
+    hits = [bool(match_terms(text, terms)) for text in texts]
+    total_ads = int(labels.sum())
+    keyword_tp = int(sum(1 for hit, label in zip(hits, labels) if hit and label == 1))
+    keyword_fp = int(sum(1 for hit, label in zip(hits, labels) if hit and label == 0))
+    keyword_metrics = {
+        "terms": len(terms),
+        "texts": int(sum(1 for text in texts if text)),
+        "hits": keyword_tp + keyword_fp,
+        "precision": round(keyword_tp / max(1, keyword_tp + keyword_fp), 3),
+        "recall": round(keyword_tp / max(1, total_ads), 3),
+    }
+
     targets = {
         "precision": args.target_precision,
         "recall": args.target_recall,
@@ -331,11 +348,13 @@ def main() -> int:
         "baseline": {**baseline_metrics, "auc": round(baseline_auc, 3)},
         "recall_at": {str(k): round(v, 3) for k, v in recall_at.items()},
         "precision_at": {str(k): round(v, 3) for k, v in precision_at.items()},
+        "keyword": keyword_metrics,
         "fp_per_hour": fp_per_hour,
         "targets": targets,
         "target_met": target_met,
     }
     print(f"fp/hour={fp_per_hour} target_met={target_met} targets={targets}")
+    print(f"keyword={keyword_metrics}")
 
     standardized, mean, scale = _standardize(x)
     weights, intercept = _fit_logistic(standardized, labels)

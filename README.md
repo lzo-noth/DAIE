@@ -59,7 +59,8 @@ python -m dai_detect verify platforms.json --report feed_verification.json
 | `--min-score` | 0.5 | 最终候选最低分 |
 | `--report` | 无 | JSON 报告路径 |
 | `--cache-dir` | `.dai-cache` | 特征缓存目录（不含音频） |
-| `--clips-dir` | 无 | 为每个候选生成 10 秒试听 MP3（会强制重新拉流） |
+| `--clips-dir` | 无 | 为每个候选生成试听 MP3（会强制重新拉流） |
+| `--clip-seconds` | 10 | 每个试听片段的秒数；Actions 用 30 秒以便 ASR 抓到完整广告口播 |
 | `--fresh` | 关 | 忽略缓存重新拉流（DAI 内容可能逐次变化） |
 | `--no-cache` | 关 | 完全不读写缓存 |
 | `--proxy` | 无 | 例如 `http://127.0.0.1:7890` |
@@ -85,7 +86,7 @@ LLM 标注也会反馈到检测器：当前样本里 slot 命中主要出现在�
 
 1. **检测**：按 `platforms.json` 矩阵分析每个 feed 的最新集，生成候选和试听片段。
 2. **标注**：`faster-whisper` 转写候选片段；配置 `GEMINI_API_KEY`（或 `OPENAI_API_KEY`）时，用 LLM 判定广告/正片。
-3. **回流**：`scripts/collect_labels.py` 把所有 `llm_labels`（包括被删除的负例）去重写入 `feedback/labels.jsonl`；`scripts/mine_keywords.py` 从广告转写和 LLM 品牌字段中挖出赞助话术/品牌词，写入 `feedback/keywords.json`。
+3. **回流**：`scripts/collect_labels.py` 把所有 `llm_labels`（包括被删除的负例）去重写入 `feedback/labels.jsonl`；`scripts/mine_keywords.py` 从广告转写和 LLM 品牌字段中挖出赞助话术/品牌词，写入 `feedback/keywords.json`。Actions 生成 30 秒候选片段，ASR 能覆盖完整广告口播；关键词按词边界匹配，避免 `revolut` 命中 `revolution` 这类子串误报。
 4. **优化**：`scripts/fit_calibration.py` 按 feed 做留一交叉验证，拟合候选评分器，输出 `calibration.json` 和指标；下一次检测直接加载。`scripts/asr_clips.py` 也会加载 `feedback/keywords.json`，把学到的品牌词作为确定性广告话术特征。
 5. **循环**：`learn` job 自动提交 `feedback/` 与 `calibration.json`（提交信息带 `[skip ci]`），下一轮（每天定时或手动）使用新模型。`feedback/state.json` 记录轮数和指标；达到目标后写入 `feedback/COMPLETE`，`gate` job 之后不再执行分析。默认最多 10 轮，可用 `max_rounds` 调整。
 
@@ -101,7 +102,7 @@ LLM 只用于离线标注，检测/播放链路本身不调用 LLM。关键词�
 - `feedback/COMPLETE`：达到目标后的停止标记。
 - `feedback/STOPPED`：达到最大轮数仍未达标时的停止标记。
 
-首次启用：Actions → platforms → Run workflow；确保仓库 Secrets 里有 `GEMINI_API_KEY`。`learn` job 需要 `contents: write` 权限；如果分支保护禁止 Actions 直接 push，校准和标签仍会作为 `dai-learn` artifact 上传，可手动下载后提交。删除 `feedback/COMPLETE` 可重新启动循环。
+首次启用：Actions → platforms → Run workflow；确保仓库 Secrets 里有 `GEMINI_API_KEY`。`learn` job 需要 `contents: write` 权限；如果分支保护禁止 Actions 直接 push，校准和标签仍会作为 `dai-learn` artifact 上传，可手动下载后提交。删除 `feedback/COMPLETE` 可重新启动循环。`platforms.json` 里标了 `optional: true` 的 feed（当前是 Substack）失败不会把整轮 run 标红。
 
 ### LLM 反馈闭环（手动方式）
 

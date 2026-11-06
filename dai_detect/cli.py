@@ -22,7 +22,8 @@ def _common_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-score", type=float, default=0.5, help="最低候选分数（默认 0.5）")
     parser.add_argument("--min-run", type=float, default=8.0, help="重复区间最短时长（默认 8 秒）")
     parser.add_argument("--cache-dir", type=Path, default=Path(".dai-cache"), help="特征缓存目录")
-    parser.add_argument("--clips-dir", type=Path, help="为候选生成 10 秒试听 MP3")
+    parser.add_argument("--clips-dir", type=Path, help="为候选生成试听 MP3")
+    parser.add_argument("--clip-seconds", type=float, default=10.0, help="每个试听片段的秒数（默认 10）")
     parser.add_argument("--fresh", action="store_true", help="忽略缓存并重新拉流分析")
     parser.add_argument("--no-cache", action="store_true", help="不读写缓存")
     parser.add_argument("--proxy", help="HTTP(S) 代理，例如 http://127.0.0.1:7890")
@@ -148,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         min_score=args.min_score,
         progress=progress,
         clips_dir=args.clips_dir,
+        clip_seconds=args.clip_seconds,
     )
     if args.clips_dir:
         print(f"试听片段目录: {args.clips_dir}")

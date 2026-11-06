@@ -148,12 +148,14 @@
       {
         "name": "The Pragmatic Engineer",
         "slug": "substack-pragmatic",
-        "url": "https://newsletter.pragmaticengineer.com/feed"
+        "url": "https://newsletter.pragmaticengineer.com/feed",
+        "optional": true
       },
       {
         "name": "Lenny's Podcast",
         "slug": "substack-lenny",
-        "url": "https://www.lennysnewsletter.com/feed"
+        "url": "https://www.lennysnewsletter.com/feed",
+        "optional": true
       }
     ]
   },

@@ -277,6 +277,7 @@ def _write_clips(
     audio_path: Path,
     clips_dir: Path,
     limit: int = 40,
+    clip_seconds: float = 10.0,
 ) -> None:
     if not audio_path.exists():
         return
@@ -284,7 +285,7 @@ def _write_clips(
     slug = re.sub(r"[^A-Za-z0-9._-]+", "_", result.episode.title)[:40] or result.episode.id[:8]
     for index, candidate in enumerate(result.candidates[:limit]):
         start = max(0.0, candidate.start_s)
-        duration = min(10.0, candidate.end_s - start)
+        duration = min(clip_seconds, candidate.end_s - start)
         if duration < 1.0:
             continue
         output = clips_dir / f"{slug}_{index:02d}_{int(candidate.start_s)}s_{candidate.tier}.mp3"
@@ -323,6 +324,7 @@ def run(
     min_score: float = 0.5,
     progress: Optional[Callable[[str], None]] = None,
     clips_dir: Optional[Path] = None,
+    clip_seconds: float = 10.0,
 ) -> list[EpisodeResult]:
     results: list[EpisodeResult] = []
     features: list[EpisodeFeatures] = []
@@ -393,7 +395,12 @@ def run(
             results[result_index].candidates.sort(key=lambda item: (-item.score, item.start_s))
         if clips_dir is not None:
             for result_index, audio_path in audio_paths.items():
-                _write_clips(results[result_index], audio_path, clips_dir)
+                _write_clips(
+                    results[result_index],
+                    audio_path,
+                    clips_dir,
+                    clip_seconds=clip_seconds,
+                )
         return results
     finally:
         if audio_root is not None:

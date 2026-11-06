@@ -14,59 +14,13 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dai_detect.audio import ffmpeg_path
+from dai_detect.keywords import load_terms, match_terms
 
-AD_TERMS = [
-    "sponsored by",
-    "brought to you by",
-    "support for this podcast",
-    "support comes from",
-    "this episode is sponsored",
-    "our sponsor",
-    "advertisement",
-    "ad break",
-    "paid for by",
-    "partner of",
-    "use code",
-    "promo code",
-    "offer code",
-    "discount code",
-    "coupon code",
-    "free trial",
-    "terms apply",
-    "sign up",
-    "percent off",
-    "dot com",
-    ".com",
-    "本节目由",
-    "赞助",
-    "优惠码",
-    "折扣",
-    "广告",
-]
-
-
-def _load_learned_terms() -> list[str]:
-    """Terms mined from LLM-labelled ads in the previous feedback round."""
-    import os
-
-    path = Path(os.environ.get("DAI_KEYWORDS", "feedback/keywords.json"))
-    if not path.exists():
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    terms = payload.get("terms") or []
-    return [str(term).lower() for term in terms if str(term).strip()]
-
-
-LEARNED_TERMS = _load_learned_terms()
-ALL_TERMS = sorted(set(AD_TERMS) | set(LEARNED_TERMS))
+ALL_TERMS = load_terms()
 
 
 def ad_terms(text: str) -> list[str]:
-    lowered = text.lower()
-    return sorted({term for term in ALL_TERMS if term in lowered})
+    return match_terms(text, ALL_TERMS)
 
 
 def load_audio(path: Path) -> np.ndarray:
@@ -121,11 +75,12 @@ def process_report(report: dict, clips_dir: Path, model, language: str) -> tuple
                 evidence["asr_error"] = f"{type(exc).__name__}: {exc}"[:300]
                 continue
             terms = ad_terms(text)
-            evidence["asr_text"] = text[:400]
+            evidence["asr_text"] = text[:1200]
             evidence["ad_terms"] = terms
             evidence["ad_language"] = bool(terms)
+            evidence["keyword_verified"] = bool(terms)
             if terms:
-                candidate["score"] = round(min(0.99, float(candidate.get("score", 0.0)) + 0.06), 3)
+                candidate["score"] = round(min(0.99, float(candidate.get("score", 0.0)) + 0.10), 3)
                 confirmed += 1
             total += 1
     report["asr"] = {"model": getattr(model, "model_size_or_path", ""), "language": language, "clips": total, "ad_language": confirmed}

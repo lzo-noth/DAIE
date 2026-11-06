@@ -4,7 +4,7 @@
   "max_rounds": 10,
   "complete": false,
   "stopped": false,
-  "updated_at": "2026-11-06T13:33:10+00:00",
+  "updated_at": "2026-11-06T13:47:00+00:00",
   "targets": {
     "precision": 0.3,
     "recall": 0.8,
@@ -48,9 +48,9 @@
       "auc": 0.837
     },
     "baseline": {
-      "precision": 0.046,
-      "recall": 0.909,
-      "f1": 0.087,
+      "precision": 0.055,
+      "recall": 0.818,
+      "f1": 0.103,
       "auc": 0.653
     },
     "recall_at": {
@@ -80,6 +80,13 @@
       "24": 0.046,
       "30": 0.043,
       "40": 0.041
+    },
+    "keyword": {
+      "terms": 77,
+      "texts": 205,
+      "hits": 19,
+      "precision": 0.316,
+      "recall": 0.273
     },
     "fp_per_hour": 6.26,
     "targets": {

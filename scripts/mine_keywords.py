@@ -71,6 +71,14 @@ GENERIC_BRAND_WORDS = {
     "zero", "episode", "podcast", "show", "today", "year", "years", "time",
     "people", "thing", "things", "way", "lot", "little", "good", "great",
     "much", "many", "back", "first", "last", "next", "other", "same", "own",
+    "networks", "network", "media", "group", "systems", "system", "solutions",
+    "technologies", "technology", "services", "products", "company", "brand",
+    "studio", "music", "news", "sport", "sports", "games", "food", "travel",
+    "hotel", "hotels", "health", "healthcare", "financial", "capital", "bank",
+    "insurance", "energy", "university", "college", "school", "institute",
+    "center", "centre", "foundation", "partners", "ventures", "labs", "lab",
+    "cloud", "data", "digital", "global", "national", "international",
+    "american", "world", "daily", "weekly", "review", "report", "press",
 }
 
 

@@ -163,6 +163,7 @@ jobs:
                       "feed": feed["name"],
                       "slug": feed["slug"],
                       "url": feed["url"],
+                      "optional": bool(feed.get("optional", False)),
                   })
           print("matrix=" + json.dumps({"include": entries}))
           PY
@@ -196,6 +197,7 @@ jobs:
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    continue-on-error: ${{ matrix.optional }}
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJSON(inputs.max_parallel || '16') }}
@@ -230,6 +232,7 @@ jobs:
             --fresh \
             --cache-dir "$RUNNER_TEMP/dai-cache" \
             --clips-dir "out/${{ matrix.slug }}/clips" \
+            --clip-seconds 30 \
             --report "out/${{ matrix.slug }}/report.json" 2>&1 | tee "out/${{ matrix.slug }}/run.log"
       - name: Upload analysis
         if: always()
