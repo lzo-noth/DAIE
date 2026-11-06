@@ -11,7 +11,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from .audio import ffmpeg_path, iter_pcm, load_cache, save_cache, source_key
+from .audio import ffmpeg_path, iter_pcm, load_cache, save_cache, source_key, source_sha256
 from .boundaries import segment_evidence
 from .calibration import Calibration, apply_calibration
 from .features import Decimator, FeatureExtractor
@@ -20,7 +20,7 @@ from .insertion import fine_boundaries, insertion_candidates, refine_bounds
 from .matching import find_repetitions
 from .models import Candidate, Config, Episode, EpisodeFeatures, EpisodeResult, MatchRef
 
-FEATURE_VERSION = "features-v2"
+FEATURE_VERSION = "features-v3"
 
 
 def _cache_path(cache_dir: Path, episode: Episode) -> Path:
@@ -46,6 +46,9 @@ def _from_cache(payload: dict) -> Optional[EpisodeFeatures]:
             hashes=payload["hashes"],
             hash_frames=payload["hash_frames"],
             fingerprint_fps=float(payload["fingerprint_fps"]),
+            audio_id=str(payload.get("audio_id", "")),
+            audio_id_kind=str(payload.get("audio_id_kind", "")),
+            source_sha256=str(payload.get("source_sha256", "")),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -111,6 +114,9 @@ def analyze_episode(
         hashes=hashes,
         hash_frames=hash_frames,
         fingerprint_fps=FPS,
+        audio_id=str(extracted.get("audio_id", "")),
+        audio_id_kind=str(extracted.get("audio_id_kind", "")),
+        source_sha256=source_sha256(episode.audio_url),
     )
     if cfg.cache:
         save_cache(
@@ -130,6 +136,9 @@ def analyze_episode(
                 "hashes": features.hashes,
                 "hash_frames": features.hash_frames,
                 "fingerprint_fps": np.float64(features.fingerprint_fps),
+                "audio_id": np.array(features.audio_id),
+                "audio_id_kind": np.array(features.audio_id_kind),
+                "source_sha256": np.array(features.source_sha256),
             },
         )
     return features
@@ -351,7 +360,15 @@ def run(
                 if progress:
                     progress(f"失败: {episode.title}: {message}")
                 continue
-            results.append(EpisodeResult(episode=episode, duration_s=extracted.duration_s))
+            results.append(
+                EpisodeResult(
+                    episode=episode,
+                    duration_s=extracted.duration_s,
+                    audio_id=extracted.audio_id,
+                    audio_id_kind=extracted.audio_id_kind,
+                    source_sha256=extracted.source_sha256,
+                )
+            )
             if audio_out is not None:
                 audio_paths[len(results) - 1] = audio_out
             features.append(extracted)

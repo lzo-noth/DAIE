@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .audio import PcmHasher
+
 SAMPLE_RATE = 16000
 FRAME = 400
 HOP = 160
@@ -73,6 +75,7 @@ class FeatureExtractor:
         self._mfcc: list[np.ndarray] = []
         self._prev_norm: np.ndarray | None = None
         self._samples = 0
+        self._hasher = PcmHasher()
         self._coarse_carry = {
             "loudness_db": np.zeros(0, dtype=np.float32),
             "flatness": np.zeros(0, dtype=np.float32),
@@ -114,6 +117,7 @@ class FeatureExtractor:
         pcm = np.asarray(pcm, dtype=np.float32)
         if pcm.size == 0:
             return empty
+        self._hasher.push(pcm)
         self._samples += len(pcm)
         buffer = np.concatenate((self._carry, pcm))
         if len(buffer) < FRAME:
@@ -186,11 +190,14 @@ class FeatureExtractor:
         return {
             "duration_s": self._samples / float(SAMPLE_RATE),
             "grid_s": HOP * GRID / float(SAMPLE_RATE),
+            "audio_id": self._hasher.hexdigest(),
+            "audio_id_kind": "feature_16k_mono",
             "loudness_db": _aggregate(loud),
             "flatness": _aggregate(flat),
             "flux": _aggregate(flux),
             "mfcc": _aggregate(mfcc),
             "fine_loudness_db": loud,
+            "fine_flatness": flat,
             "fine_flux": flux,
             "fine_mfcc": mfcc,
             "fine_grid_s": HOP / float(SAMPLE_RATE),

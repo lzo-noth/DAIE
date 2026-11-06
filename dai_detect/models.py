@@ -44,6 +44,9 @@ class EpisodeResult:
     duration_s: float = 0.0
     candidates: list[Candidate] = field(default_factory=list)
     error: Optional[str] = None
+    audio_id: str = ""
+    audio_id_kind: str = ""
+    source_sha256: str = ""
 
 
 @dataclass
@@ -61,6 +64,9 @@ class EpisodeFeatures:
     hashes: np.ndarray
     hash_frames: np.ndarray
     fingerprint_fps: float
+    audio_id: str = ""
+    audio_id_kind: str = ""
+    source_sha256: str = ""
 
     def times(self) -> np.ndarray:
         return np.arange(len(self.loudness_db), dtype=np.float64) * self.grid_s

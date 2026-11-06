@@ -1,0 +1,192 @@
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
+from pathlib import Path
+
+import numpy as np
+
+from dai_detect.ad_classifier import AdModel
+from dai_detect.audio import PcmHasher, file_sha256
+from dai_detect.cli import main
+from dai_detect.evaluation import evaluate_events
+from dai_detect.single_episode import SingleConfig, analyze_single
+from dai_detect.single_features import WINDOW_FEATURES, window_labels
+from dai_detect.temporal_decoder import decode_windows
+from tests import synth
+
+SR48 = 48000
+
+
+class SingleEpisodeTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = Path(tempfile.mkdtemp(prefix="dai-single-"))
+        self.addCleanup(shutil.rmtree, self.directory, ignore_errors=True)
+        for name, value in (
+            ("DAI_AD_MODEL", self.directory / "no-model.json"),
+            ("DAI_BOUNDARY_MODEL", self.directory / "no-boundary.json"),
+        ):
+            previous = os.environ.get(name)
+            os.environ[name] = str(value)
+            if previous is None:
+                self.addCleanup(os.environ.pop, name, None)
+            else:
+                self.addCleanup(os.environ.__setitem__, name, previous)
+
+    def _episode(self, name: str, ad_start: float, ad_end: float, total: float) -> Path:
+        speech_a = synth.speech(ad_start, 201, sr=SR48)
+        music = synth.ad(ad_end - ad_start, seed=11, sr=SR48)
+        speech_b = synth.speech(total - ad_end, 202, sr=SR48)
+        frames = np.concatenate(
+            [
+                synth.stereo(speech_a, 1, sr=SR48),
+                synth.stereo(music, 2, sr=SR48),
+                synth.stereo(speech_b, 3, sr=SR48),
+            ],
+            axis=0,
+        )
+        path = self.directory / name
+        synth.write_stereo_wav(path, frames, sr=SR48)
+        return path
+
+    def test_detects_inserted_ad_in_single_recording(self) -> None:
+        path = self._episode("with_ad.wav", 20.0, 40.0, 60.0)
+        timeline = analyze_single(str(path), SingleConfig())
+        self.assertEqual(timeline["mode"], "single_recording_blind")
+        self.assertTrue(timeline["ads"], timeline)
+        best = max(
+            timeline["ads"],
+            key=lambda ad: max(0.0, min(ad["end"], 40.0) - max(ad["start"], 20.0)),
+        )
+        captured = max(0.0, min(best["end"], 40.0) - max(best["start"], 20.0))
+        self.assertGreaterEqual(captured, 8.0, best)
+        self.assertLessEqual(abs(best["start"] - 20.0), 2.0, best)
+        self.assertLessEqual(abs(best["end"] - 40.0), 2.0, best)
+        self.assertTrue(best["type"] == "third_party_inserted")
+
+    def test_plain_speech_has_no_ad(self) -> None:
+        frames = synth.stereo(synth.speech(60.0, 211, sr=SR48), 4, sr=SR48)
+        path = self.directory / "plain.wav"
+        synth.write_stereo_wav(path, frames, sr=SR48)
+        timeline = analyze_single(str(path), SingleConfig())
+        self.assertEqual(timeline["ads"], [], timeline["ads"])
+
+    def test_temporal_decoder_merges_gaps_and_drops_spikes(self) -> None:
+        times = np.arange(120, dtype=np.float64) * 0.5 + 0.5
+        probabilities = np.full(120, 0.05)
+        probabilities[40:70] = 0.9
+        probabilities[60] = 0.1
+        probabilities[10] = 0.95
+        events = decode_windows(times, probabilities, hop_s=0.5, span_s=1.0, min_ad_s=6.0)
+        self.assertEqual(len(events), 1, events)
+        self.assertLessEqual(abs(events[0].start - 20.0), 1.5)
+        self.assertLessEqual(abs(events[0].end - 35.0), 1.5)
+
+    def test_window_labels_respect_coverage(self) -> None:
+        windows = {
+            "times": np.arange(10, dtype=np.float64) * 0.5 + 0.5,
+            "span_s": 1.0,
+            "features": np.zeros((10, len(WINDOW_FEATURES)), dtype=np.float32),
+            "names": list(WINDOW_FEATURES),
+        }
+        indices, labels = window_labels(windows, [{"start_s": 2.0, "end_s": 4.5}])
+        self.assertGreater(len(indices), 0)
+        self.assertEqual(int(labels.sum()), 4, labels)
+
+    def test_ad_model_round_trip_and_reorders_features(self) -> None:
+        payload = {
+            "features": ["musicness", "loud_dev"],
+            "mean": [0.0, 0.0],
+            "scale": [1.0, 1.0],
+            "weights": [2.0, 1.0],
+            "intercept": -3.0,
+            "threshold": 0.5,
+            "kind": "logistic",
+        }
+        path = self.directory / "model.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        model = AdModel.load(path)
+        self.assertIsNotNone(model)
+        matrix = np.asarray([[0.0, 0.0], [0.5, 6.0]], dtype=np.float32)
+        names = ["loud_dev", "musicness"]
+        probabilities = model.predict(matrix, names)
+        self.assertGreater(probabilities[1], probabilities[0])
+        self.assertGreater(probabilities[1], 0.5)
+
+    def test_event_evaluation_matches_and_scores_boundaries(self) -> None:
+        metrics = evaluate_events(
+            [{"start_s": 20.2, "end_s": 40.3}],
+            [{"start_s": 20.0, "end_s": 40.0}],
+            duration_s=3600.0,
+        )
+        self.assertEqual(metrics["event_precision"], 1.0)
+        self.assertEqual(metrics["event_recall"], 1.0)
+        self.assertAlmostEqual(metrics["boundary_p95_s"], 0.295, places=3)
+
+    def test_audio_identity_binds_the_exact_variant(self) -> None:
+        first = self._episode("variant_a.wav", 20.0, 40.0, 60.0)
+        timeline_a = analyze_single(str(first), SingleConfig())
+        timeline_a2 = analyze_single(str(first), SingleConfig())
+        self.assertEqual(timeline_a["audio"]["id"], timeline_a2["audio"]["id"])
+        self.assertEqual(timeline_a["audio"]["source_sha256"], file_sha256(first))
+        self.assertEqual(timeline_a["audio"]["id_kind"], "downmix_48k_to_16k")
+
+        # Same episode structure, different inserted creative: the decoded PCM
+        # identity must change even though both files have the same duration.
+        sr = SR48
+        speech_a = synth.speech(20.0, 201, sr=sr)
+        speech_b = synth.speech(20.0, 202, sr=sr)
+        other_ad = synth.ad(20.0, seed=99, sr=sr)
+        frames = np.concatenate(
+            [
+                synth.stereo(speech_a, 1, sr=sr),
+                synth.stereo(other_ad, 2, sr=sr),
+                synth.stereo(speech_b, 3, sr=sr),
+            ],
+            axis=0,
+        )
+        second = self.directory / "variant_b.wav"
+        synth.write_stereo_wav(second, frames, sr=sr)
+        timeline_b = analyze_single(str(second), SingleConfig())
+        self.assertNotEqual(timeline_a["audio"]["id"], timeline_b["audio"]["id"])
+
+    def test_pcm_hasher_is_deterministic_and_content_sensitive(self) -> None:
+        signal = synth.speech(2.0, 301, sr=SR48)
+        hasher_a = PcmHasher()
+        hasher_b = PcmHasher()
+        for block in np.array_split(signal, 4):
+            hasher_a.push(block)
+            hasher_b.push(block)
+        self.assertEqual(hasher_a.hexdigest(), hasher_b.hexdigest())
+        altered = signal.copy()
+        altered[:100] += 0.01
+        hasher_c = PcmHasher()
+        hasher_c.push(altered)
+        self.assertNotEqual(hasher_a.hexdigest(), hasher_c.hexdigest())
+
+    def test_analyze_never_reads_the_ground_truth(self) -> None:
+        path = self._episode("contract.wav", 20.0, 40.0, 60.0)
+        # No label, transcript or sibling episode exists in this directory.
+        self.assertEqual(sorted(item.name for item in self.directory.iterdir()), ["contract.wav"])
+        timeline = analyze_single(str(path), SingleConfig())
+        self.assertIn("ads", timeline)
+
+    def test_cli_single_writes_timeline(self) -> None:
+        path = self._episode("cli.wav", 20.0, 40.0, 60.0)
+        report = self.directory / "timeline.json"
+        stdout, stderr = StringIO(), StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = main(["single", str(path), "--report", str(report), "--quiet"])
+        self.assertEqual(code, 0, stderr.getvalue())
+        payload = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(payload["mode"], "single_recording_blind")
+        self.assertTrue(payload["ads"], payload)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -8,8 +8,9 @@ from pathlib import Path
 from .models import Config, Episode
 from .pipeline import make_episode_from_path, run
 from .platforms import verify_platforms
-from .report import build_report, print_summary, write_report
+from .report import build_report, hms, print_summary, write_report
 from .rss import FeedError, fetch_feed, parse_feed
+from .single_episode import SingleConfig, analyze_single, write_timeline
 
 
 def _progress(message: str) -> None:
@@ -93,7 +94,53 @@ def main(argv: list[str] | None = None) -> int:
     verify_parser.add_argument("--proxy", help="HTTP(S) 代理")
     verify_parser.add_argument("--quiet", action="store_true")
 
+    single_parser = subparsers.add_parser(
+        "single",
+        help="单集单音频盲检测：只输入这一集音频，输出广告时间轴",
+    )
+    single_parser.add_argument("source", help="音频文件路径或音频 URL")
+    single_parser.add_argument("--report", type=Path, help="将时间轴 JSON 写入此路径")
+    single_parser.add_argument("--model", type=Path, help="广告分类模型 JSON（默认 models/ad_segment_model.json）")
+    single_parser.add_argument("--boundary-model", type=Path, help="边界模型 JSON（默认 models/boundary_model.json）")
+    single_parser.add_argument("--threshold", type=float, help="覆盖模型进入阈值")
+    single_parser.add_argument("--min-ad", type=float, default=6.0, help="广告最短秒数（默认 6）")
+    single_parser.add_argument("--min-confidence", type=float, default=0.0, help="输出最低置信度（默认 0）")
+    single_parser.add_argument("--proxy", help="HTTP(S) 代理，例如 http://127.0.0.1:7890")
+    single_parser.add_argument("--quiet", action="store_true")
+
     args = parser.parse_args(argv)
+
+    if args.mode == "single":
+        cfg = SingleConfig(
+            min_ad_s=args.min_ad,
+            enter_threshold=args.threshold,
+            min_confidence=args.min_confidence,
+            model_path=str(args.model) if args.model else None,
+            boundary_model_path=str(args.boundary_model) if args.boundary_model else None,
+            proxy=args.proxy,
+        )
+        progress = None if args.quiet else _progress
+        try:
+            timeline = analyze_single(args.source, cfg, progress=progress)
+        except Exception as exc:  # noqa: BLE001 - CLI must report, not traceback
+            print(f"错误: {str(exc) or exc.__class__.__name__}", file=sys.stderr)
+            return 1
+        if not args.quiet:
+            print("")
+            print(f"=== 单音频盲检测: {args.source} ===")
+            print(f"时长 {hms(timeline['duration_s'])}，模型 {timeline['model']['classifier']}")
+            if not timeline["ads"]:
+                print("未发现广告区间")
+            for index, ad in enumerate(timeline["ads"], start=1):
+                print(
+                    f"  [{index}] {hms(ad['start'])} - {hms(ad['end'])}"
+                    f"  {ad['duration_s']:.1f}s  confidence {ad['confidence']:.2f}"
+                    f"  [{ad['type']}/{ad['slot']}]"
+                )
+        if args.report:
+            write_timeline(args.report, timeline)
+            print(f"时间轴已写入: {args.report}")
+        return 0
 
     if args.mode == "verify":
         try:

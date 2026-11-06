@@ -47,6 +47,11 @@ def build_report(
             "published": result.episode.published,
             "duration_s": round(result.duration_s, 2),
             "duration": hms(result.duration_s),
+            "audio": {
+                "id": result.audio_id,
+                "id_kind": result.audio_id_kind,
+                "source_sha256": result.source_sha256,
+            },
             "error": result.error,
             "candidates": [_candidate_payload(candidate) for candidate in result.candidates],
         }

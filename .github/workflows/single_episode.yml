@@ -1,0 +1,171 @@
+name: single-recording
+
+on:
+  push:
+    paths:
+      - "dai_detect/**"
+      - "scripts/**"
+      - "tests/**"
+      - ".github/workflows/single_episode.yml"
+  workflow_dispatch:
+    inputs:
+      audio_url:
+        description: "唯一输入：一集完整播客音频（本地仓库路径或音频 URL）"
+        required: true
+      feed:
+        description: "节目名（用于快照清单）"
+        required: false
+        default: ""
+      episode:
+        description: "集名（用于快照清单）"
+        required: false
+        default: ""
+      model_path:
+        description: "广告分类模型 JSON"
+        required: false
+        default: "models/ad_segment_model.json"
+      ground_truth_url:
+        description: "可选：人工真值 JSON/URL；检测完成后才下载用于评估"
+        required: false
+        default: ""
+      annotations_path:
+        description: "可选：训练标注 JSONL；填写后运行训练 job"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          python -m pip install --quiet numpy
+      - name: Generate synthetic stereo episode
+        run: |
+          mkdir -p out
+          python - <<'PY'
+          import numpy as np
+          from tests import synth
+          sr = 48000
+          frames = np.concatenate(
+              [
+                  synth.stereo(synth.speech(15.0, 1, sr=sr), 2, sr=sr),
+                  synth.stereo(synth.ad(12.0, seed=3, sr=sr), 4, sr=sr),
+                  synth.stereo(synth.speech(15.0, 5, sr=sr), 6, sr=sr),
+              ],
+              axis=0,
+          )
+          synth.write_stereo_wav(__import__("pathlib").Path("out/smoke.wav"), frames, sr=sr)
+          PY
+      - name: Snapshot identity
+        run: |
+          python scripts/snapshot_audio.py --source out/smoke.wav \
+            --feed smoke --episode smoke \
+            --out-dir out/snapshots --manifest out/audio_manifest.jsonl
+      - name: Single-recording detection
+        run: |
+          SNAP=$(python -c "import json;print(json.loads(open('out/audio_manifest.jsonl').readline())['audio'])")
+          python -m dai_detect single "$SNAP" --report out/timeline.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dai-single-smoke-${{ github.run_number }}
+          path: out/
+          if-no-files-found: warn
+          retention-days: 30
+
+  blind-test:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          python -m pip install --quiet numpy
+      - name: Archive the exact audio variant
+        env:
+          AUDIO: ${{ inputs.audio_url }}
+          FEED: ${{ inputs.feed }}
+          EPISODE: ${{ inputs.episode }}
+        run: |
+          mkdir -p out
+          python scripts/snapshot_audio.py --source "$AUDIO" \
+            --feed "$FEED" --episode "$EPISODE" \
+            --out-dir out/snapshots --manifest out/audio_manifest.jsonl
+      - name: Blind detection on the snapshot
+        env:
+          MODEL: ${{ inputs.model_path }}
+        run: |
+          SNAP=$(python -c "import json;print(json.loads(open('out/audio_manifest.jsonl').readline())['audio'])")
+          python scripts/blind_test.py --audio "$SNAP" --model "$MODEL" --out out/timeline.json
+      - name: Download ground truth after detection
+        if: inputs.ground_truth_url != ''
+        env:
+          GT: ${{ inputs.ground_truth_url }}
+        run: curl -fsSL "$GT" -o out/ground_truth.json
+      - name: Score against ground truth
+        if: inputs.ground_truth_url != ''
+        env:
+          MODEL: ${{ inputs.model_path }}
+        run: |
+          SNAP=$(python -c "import json;print(json.loads(open('out/audio_manifest.jsonl').readline())['audio'])")
+          python scripts/blind_test.py --audio "$SNAP" --model "$MODEL" \
+            --ground-truth out/ground_truth.json \
+            --out out/timeline.json --metrics out/metrics.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dai-single-${{ github.run_number }}
+          path: |
+            out/timeline.json
+            out/metrics.json
+            out/audio_manifest.jsonl
+          if-no-files-found: warn
+          retention-days: 30
+
+  train:
+    if: inputs.annotations_path != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          python -m pip install --quiet numpy
+      - name: Train single-recording models
+        env:
+          ANNOTATIONS: ${{ inputs.annotations_path }}
+        run: |
+          mkdir -p out
+          python scripts/train_single_episode.py --annotations "$ANNOTATIONS" \
+            --model-out out/ad_segment_model.json \
+            --boundary-out out/boundary_model.json 2>&1 | tee out/train.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dai-models-${{ github.run_number }}
+          path: out/
+          if-no-files-found: warn
+          retention-days: 30

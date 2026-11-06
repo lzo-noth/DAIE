@@ -1,11 +1,123 @@
 # DAI 广告检测原型
 
 从流式播客音频中识别 DAI（Dynamic Ad Insertion，动态广告插入）广告区间。
+主路线是单集音频盲检测（只读这一份音频）；RSS/跨集模式保留为辅助诊断。
 输入播客 RSS 地址，输出每集音频里疑似广告的起止时间、评分与证据，报告可作为 GitHub Actions artifact 下载。
 
 当前是离线分析原型：音频经 ffmpeg 流式解码，特征与指纹按块处理，不落盘原始音频。
 
-## 原理
+## 单音频盲检测（主路线）
+
+正式目标是 **Single-Recording, Transcript-Free Blind DAI Detection**：
+
+> 输入一集已经过 DAI 动态广告插入的完整播客音频，仅凭这一份音频，检测第三方预录广告的开始、结束、时长和广告位类型。运行时不请求原始音频、其他剧集或任何文字稿，也不做全集 ASR 或逐集人工标注。
+
+完整规格、架构和验收指标见 [SPEC.md](SPEC.md)。运行时链路：
+
+```
+48 kHz 立体声（取证） + 16 kHz 单声道（声学）
+  -> 1.0 秒窗口 / 0.5 秒步长的多尺度特征
+  -> 逐窗广告概率（学习式逻辑回归；无模型时启发式兜底）
+  -> 时序解码（平滑、滞回、间隙合并、时长约束）
+  -> 10 ms 边界精修
+  -> 时间轴 JSON
+```
+
+单集检测：
+
+```bash
+python -m dai_detect single episode.mp3 --report timeline.json
+python -m dai_detect single "https://example.com/episode.mp3" --report timeline.json
+```
+
+输出示例：
+
+```json
+{
+  "mode": "single_recording_blind",
+  "duration_s": 3600.0,
+  "ads": [
+    {"start": 1200.42, "end": 1231.08, "confidence": 0.96,
+     "type": "third_party_inserted", "slot": "mid_roll"}
+  ]
+}
+```
+
+训练（需要人工标注；按 feed 分组做留一验证）：
+
+```bash
+python scripts/train_single_episode.py \
+  --annotations datasets/annotations.jsonl \
+  --model-out models/ad_segment_model.json \
+  --boundary-out models/boundary_model.json
+```
+
+标注 JSONL 每行一集：
+
+```json
+{"audio": "episodes/ep001.mp3", "feed": "My Show", "episode": "Ep 1", "ads": [{"start_s": 1200.4, "end_s": 1231.1}]}
+```
+
+也可以用 LLM 候选弱监督（需要音频清单，格式 `{"feed": "...", "episode": "...", "audio": "..."}`）：
+
+```bash
+python scripts/train_single_episode.py \
+  --labels feedback/labels.jsonl --audio-manifest datasets/audio_manifest.jsonl
+```
+
+弱监督只报告窗口级指标，不报告事件级指标；LLM 标签不是人工真值。
+
+盲测（先检测、后读真值）：
+
+```bash
+python scripts/blind_test.py --audio episode.mp3 \
+  --ground-truth ground_truth/episode.json \
+  --out timeline.json --metrics metrics.json
+```
+
+盲测脚本只有在时间轴生成后才读取真值，并按事件 IoU ≥ 0.3 匹配，输出事件 precision/recall、边界误差 P95 和每小时误报。验收目标：事件 precision ≥ 0.90、recall ≥ 0.90、边界 P95 ≤ 0.5 s。没有人工真值时检测器只输出时间轴，不宣称达标。
+
+### 怎么保证标注音频和训练/评测音频是同一份
+
+DAI 会在同一个 episode URL 背后按请求替换广告，因此 **URL 和文件名不能作为音频身份**。同一集两次下载可能是两个不同变体，标注时间轴只在被标注的那一份里有效。
+
+本仓库用三级身份绑定：
+
+| 标识 | 定义 | 作用 |
+| --- | --- | --- |
+| `source_sha256` | 原始字节的 SHA-256 | 证明是同一个文件（最严格） |
+| `audio_id` | 解码后 16 kHz PCM（16-bit 量化）的 SHA-256 | 证明是同一条录音内容；DAI 变体不同则一定不同 |
+| `audio_id_kind` | 生成 `audio_id` 的解码路径 | 防止跨解码路径误比 |
+
+标注前必须先把这一份音频归档：
+
+```bash
+python scripts/snapshot_audio.py \
+  --source "https://example.com/episode.mp3" \
+  --feed "My Show" --episode "Ep 1" \
+  --manifest datasets/audio_manifest.jsonl
+```
+
+脚本会把原始字节按 `<sha256>.<ext>` 存到 `audio_snapshots/`，并输出/追加一行清单：
+
+```json
+{"audio": "audio_snapshots/<sha256>.mp3", "source_sha256": "<sha256>",
+ "audio_id": "<pcm sha256>", "audio_id_kind": "downmix_48k_to_16k", "duration_s": 3600.0}
+```
+
+之后所有标注、训练、评测都只针对这个快照文件；真值 JSON 里同时写入 `source_sha256` 和 `audio_id`。
+
+强制校验行为：
+
+- `scripts/train_single_episode.py` 默认拒绝缺少 `source_sha256`/`audio_id` 的标注；字节或 PCM 不匹配直接中止训练。调试时才用 `--allow-unverified-audio` / `--allow-audio-mismatch`。
+- `scripts/collect_labels.py` 会把报告里的 `audio_id`、`audio_id_kind`、`source_sha256` 一起写入 `feedback/labels.jsonl`。弱监督训练按 `audio_id` 分组，旧的无身份标签会被跳过，避免把不同变体的标签混用。
+- `scripts/blind_test.py` 在生成时间轴后才校验真值中的身份；不匹配时返回 exit 3，不评分。
+- 单集时间轴和检测报告都会输出 `audio.id` / `audio.source_sha256`。
+- 旧版 `platforms` 循环是流式分析 URL，没有归档被标注的那一份音频；因此它产出的 LLM 标签没有可验证的音频身份，不能直接用于新模型。要使用弱监督，必须先用 `snapshot_audio.py` 归档音频，再在该快照上产生标签。
+
+训练期音频增强（多次重编码、响度归一化、混响/底噪、音乐床、交叉淡化）可以通过在标注文件里为同一节目追加增强副本实现；这些副本必须与原始集放在同一个 feed 分组，避免泄漏。
+
+## 原理（旧版跨集分析，保留）
 
 DAI 广告由服务端在请求音频时插入，因此有两个可利用的稳定特征：
 
@@ -146,7 +258,11 @@ LLM 在这里承担**推理时复核**和离线标注：检测候选生成仍走
 
 ## 局限
 
-- 只有拼接边界、且符合广告先验的单次广告才会以 `inserted` 出现；无音乐、无响度变化、与主播同音色的插入广告可能被当成连续口播而漏报。
+- 单音频模式没有训练模型时只能走启发式兜底，结果不满足验收指标；必须先积累按节目分组的标注。
+- 如果广告与正文的制作风格、房间声学和响度完全一致，纯声学方法无法保证识别；这是信息上限。
+- 边界精修依赖可检测的制作变化；平滑交叉淡入淡出的广告边界可能偏差更大。
+- 模型在某个地区/节目分布上训练后，换到差异很大的节目或定向广告时可能迁移不足，需要重新评估。
+- 旧版跨集分析：只有拼接边界、且符合广告先验的单次广告才会以 `inserted` 出现；无音乐、无响度变化、与主播同音色的插入广告可能被当成连续口播而漏报。
 - 片头/片尾/章节音乐也可能被标为 `inserted`，需要结合位置、时长和重复性复核。
 - 主播口播广告（host-read）是节目音频的一部分，按目标不检出。
 - Spotify SAI 等 App 内插入不在 RSS/下载文件里，feed 分析看不到；需要设备播放捕获。
@@ -170,4 +286,4 @@ LLM 在这里承担**推理时复核**和离线标注：检测候选生成仍走
 python -m unittest discover -s tests -t . -v
 ```
 
-测试包含合成音频端到端：两集在不同位置插入同一段 20 秒广告，断言两集都能检出、边界误差 ≤ 3 秒；另有单集插入广告（无重复）与连续口播负例。
+测试包含合成音频端到端：两集在不同位置插入同一段 20 秒广告，断言两集都能检出、边界误差 ≤ 3 秒；另有单集插入广告（无重复）与连续口播负例。单音频盲检测测试使用 48 kHz 立体声合成节目，断言仅凭单文件检出插入广告、纯语音不误报，并验证时序解码、模型加载和事件级评测。
