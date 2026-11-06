@@ -111,7 +111,7 @@ python scripts/annotate_release_episodes.py \
 
 重要：ASR + LLM 生成的是 `labels_source=llm_weak` 的弱标签，可用于训练或人工预标注，但**不是人工真值**。只有盲测真值显式包含 `"labels_source": "human"` 时，`performance_targets_met` 才可能为 true；否则 workflow 仍可跑通，但结果只用于流程验证，不能作为产品验收。
 
-`release-train-blind` 是手动 workflow，需要在仓库 Secrets 中配置 `GEMINI_API_KEY` 或 `OPENAI_API_KEY`。它读取 `train_manifest_url` 和 `blind_manifest_url`，产出 artifact `dai-release-pipeline-<run_number>`，包含模型、LLM 标注、转写、逐集盲测报告和汇总指标。`allow_weak_blind_labels=true` 只用于让弱标签流程跑通，不会把结果标为性能达标。
+`release-train-blind` 是手动 workflow，需要在仓库 Secrets 中配置 `GEMINI_API_KEY` 或 `OPENAI_API_KEY`。它读取 `train_manifest_url` 和 `blind_manifest_url`，产出 artifact `dai-release-pipeline-<run_number>`，包含模型、LLM 标注、转写、逐集盲测报告和汇总指标。`generate_weak_blind_labels=true` 会用 ASR+LLM 自动生成盲测集真值；`allow_weak_blind_labels=true` 允许这类非人工真值跑通流程。两者都不会把 `performance_targets_met` 标为 true，因为 LLM 标签不是人工验收真值。
 
 标注 JSONL 每行一集：
 

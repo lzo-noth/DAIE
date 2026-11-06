@@ -29,6 +29,10 @@ on:
         description: "允许 LLM_weak/unverified 真值跑通流程（不会标记性能达标）"
         required: false
         default: "false"
+      generate_weak_blind_labels:
+        description: "用 ASR+LLM 为盲测集自动生成 llm_weak 真值（不会标记性能达标）"
+        required: false
+        default: "false"
 
 permissions:
   contents: read
@@ -82,14 +86,36 @@ jobs:
       - name: Blind test release audio batch
         env:
           ALLOW_WEAK: ${{ inputs.allow_weak_blind_labels }}
+          GENERATE_WEAK: ${{ inputs.generate_weak_blind_labels }}
           MIN_EVENTS: ${{ inputs.min_events }}
           MIN_FEEDS: ${{ inputs.min_feeds }}
+          WHISPER_MODEL: ${{ inputs.whisper_model }}
+          LANGUAGE: ${{ inputs.language }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
+          manifest=out/release/blind_manifest.jsonl
+          allow_nonhuman=false
+          if [ "$GENERATE_WEAK" = "true" ]; then
+            python scripts/annotate_release_episodes.py \
+              --manifest out/release/blind_manifest.jsonl \
+              --annotations-out out/release/blind_auto_annotations.jsonl \
+              --transcripts-out out/release/blind_transcripts.jsonl \
+              --snapshot-dir out/release/blind_snapshots \
+              --ground-truth-dir out/release/blind_gt \
+              --blind-manifest-out out/release/blind_generated.jsonl \
+              --whisper-model "$WHISPER_MODEL" --language "$LANGUAGE" \
+              --labels-source llm_weak --allow-empty-ads
+            manifest=out/release/blind_generated.jsonl
+            allow_nonhuman=true
+          fi
           args=()
-          if [ "$ALLOW_WEAK" = "true" ]; then args+=(--allow-nonhuman-ground-truth); fi
+          if [ "$ALLOW_WEAK" = "true" ] || [ "$allow_nonhuman" = "true" ]; then
+            args+=(--allow-nonhuman-ground-truth)
+          fi
           python scripts/blind_test_batch.py \
-            --manifest out/release/blind_manifest.jsonl \
+            --manifest "$manifest" \
             --model out/release/ad_model.json \
             --boundary-model out/release/boundary_model.json \
             --require-models --require-calibrated-models --require-independent-test \
