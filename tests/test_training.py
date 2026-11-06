@@ -11,10 +11,12 @@ from scripts.train_single_episode import (
     EpisodeSample,
     _aggregate_fold_window_metrics,
     _choose_classifier_threshold,
+    _choose_event_threshold,
     _event_metrics,
     _group_folds,
     _identity_problems,
     _inner_folds,
+    _training_artifacts_complete,
 )
 
 
@@ -108,6 +110,50 @@ class GroupedCrossValidationTest(unittest.TestCase):
         self.assertEqual(metrics["threshold_source"], "per_outer_fold")
         self.assertEqual(metrics["precision"], 1.0)
         self.assertEqual(metrics["recall"], 0.5)
+
+    def test_fold_wise_auc_separates_score_scales(self) -> None:
+        # Each fold alone is perfectly ranked, but their scores overlap across
+        # folds; macro AUC is 1.0 while pooled AUC is only 0.75.
+        samples = [_sample("A", [1, 0]), _sample("B", [1, 0])]
+        y = np.asarray([1, 0, 1, 0], dtype=np.float64)
+        oof = np.asarray([0.6, 0.5, 0.2, 0.1])
+        offsets = {id(samples[0]): (0, 2), id(samples[1]): (2, 4)}
+        metrics = _aggregate_fold_window_metrics(
+            y, oof, [[0], [1]], {0: 0.5, 1: 0.5}, samples, offsets
+        )
+        self.assertEqual(metrics["auc_fold"], [1.0, 1.0])
+        self.assertEqual(metrics["auc_macro"], 1.0)
+        from dai_detect.metrics import roc_auc
+
+        self.assertEqual(roc_auc(y, oof), 0.75)
+
+    def test_outer_held_labels_do_not_change_threshold(self) -> None:
+        samples = [_sample("A", [0, 1]), _sample("B", [0, 1]), _sample("C", [0, 1])]
+        X = np.vstack([sample.windows["features"] for sample in samples])
+        y = np.concatenate([sample.labels for sample in samples])
+        offsets = {id(samples[0]): (0, 2), id(samples[1]): (2, 4), id(samples[2]): (4, 6)}
+        first, _ = _choose_event_threshold([0, 1], samples, X, y, offsets, seed=1)
+        mutated = y.copy()
+        mutated[4:6] = 1.0 - mutated[4:6]
+        second, _ = _choose_event_threshold([0, 1], samples, X, mutated, offsets, seed=1)
+        self.assertEqual(first, second)
+
+    def test_event_threshold_objective_is_used_with_events(self) -> None:
+        samples = [_sample("A", [0, 1, 1, 0]), _sample("B", [0, 1, 1, 0])]
+        for sample in samples:
+            sample.ads = [{"start_s": 1.0, "end_s": 2.0}]
+            sample.duration_s = 2.0
+        X = np.vstack([sample.windows["features"] for sample in samples])
+        y = np.concatenate([sample.labels for sample in samples])
+        offsets = {id(samples[0]): (0, 4), id(samples[1]): (4, 8)}
+        _, metrics = _choose_event_threshold([0, 1], samples, X, y, offsets, seed=1)
+        self.assertEqual(metrics["objective"], "event_f1")
+
+    def test_boundary_artifact_is_required_unless_skipped(self) -> None:
+        self.assertFalse(_training_artifacts_complete(False, weak_mode=False, skip_boundary=False))
+        self.assertTrue(_training_artifacts_complete(False, weak_mode=True, skip_boundary=False))
+        self.assertTrue(_training_artifacts_complete(False, weak_mode=False, skip_boundary=True))
+        self.assertTrue(_training_artifacts_complete(True, weak_mode=False, skip_boundary=False))
 
 
 class EventEvaluationAlignmentTest(unittest.TestCase):
