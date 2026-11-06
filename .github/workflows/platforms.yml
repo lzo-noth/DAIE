@@ -490,6 +490,15 @@ jobs:
             --target-auc "$TARGET_AUC" \
             --target-fp-per-hour "$TARGET_FP_PER_HOUR" || true
           cat feedback/state.json 2>/dev/null || true
+      - name: Keep previous calibration if not improved
+        run: |
+          if [ -f calibration.json ]; then
+            ENABLED=$(python -c "import json; print(json.load(open('calibration.json')).get('enabled'))")
+            if [ "$ENABLED" != "True" ]; then
+              git checkout -- calibration.json || true
+              echo "new calibration was not better than the heuristic baseline; keeping previous"
+            fi
+          fi
       - name: Commit feedback and calibration
         run: |
           git config user.name "dai-loop"
