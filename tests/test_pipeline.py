@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -22,6 +23,14 @@ class PipelineTest(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = Path(tempfile.mkdtemp(prefix="dai-test-"))
         self.addCleanup(shutil.rmtree, self.directory, ignore_errors=True)
+        # Tests exercise the heuristic pipeline, not the repo-level learned
+        # calibration artifact (which is trained on real LLM labels).
+        previous = os.environ.get("DAI_CALIBRATION")
+        os.environ["DAI_CALIBRATION"] = str(self.directory / "no-calibration.json")
+        if previous is None:
+            self.addCleanup(os.environ.pop, "DAI_CALIBRATION", None)
+        else:
+            self.addCleanup(os.environ.__setitem__, "DAI_CALIBRATION", previous)
 
     def test_shared_ad_found_in_both_episodes(self) -> None:
         first, second, third, first_ad, second_ad = synth.make_standard_episodes(self.directory)

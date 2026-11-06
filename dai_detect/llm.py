@@ -165,6 +165,8 @@ def apply_classifications(
             report_labels.append(
                 {
                     "episode": episode.get("title"),
+                    "episode_id": episode.get("id"),
+                    "episode_duration_s": episode.get("duration_s"),
                     "id": f"{episode_index}:{candidate_index}",
                     "tier": candidate.get("tier"),
                     "start_s": candidate.get("start_s"),
@@ -179,7 +181,14 @@ def apply_classifications(
                         "position": float(evidence.get("position") or 0.0),
                         "duration_s": float(candidate.get("end_s", 0.0)) - float(candidate.get("start_s", 0.0)),
                         "slot_matches": int(evidence.get("slot_matches") or 0),
+                        "start_spread_s": float(evidence.get("start_spread_s") or 0.0),
+                        "fixed_slot": bool(evidence.get("fixed_slot")),
+                        "matched_episodes": int(evidence.get("matched_episodes") or 0),
+                        "votes": int(evidence.get("votes") or 0),
+                        "ad_language": bool(evidence.get("ad_language")),
                     },
+                    "asr_text": str(evidence.get("asr_text") or "")[:400],
+                    "ad_terms": evidence.get("ad_terms") or [],
                     "llm": result,
                     "is_ad": is_target,
                 }

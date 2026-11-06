@@ -17,15 +17,19 @@ FREQ_SPAN = 32
 PEAK_OVER_MEAN_DB10 = 60
 
 CONTEXT = 2
-LOOKAHEAD = DT_MAX + CONTEXT
-TAIL_ROWS = LOOKAHEAD + CONTEXT
+# Anchors are only emitted for complete 100 ms peak buckets whose full target
+# window (DT_MAX) plus context is already available. This makes the hash
+# stream independent of how the caller chunks the audio.
+LOOKAHEAD = DT_MAX + 2 * CONTEXT
+TAIL_ROWS = LOOKAHEAD + 28
 
 
 class FingerprintExtractor:
     """Wang-style spectral-peak landmark hashes over streaming 8 kHz PCM.
 
-    Keeps 68 frames of context so hashes do not depend on how the stream is
-    chunked and anchors always see the full 64-frame target window.
+    Keeps enough frames of context so hashes do not depend on how the stream is
+    chunked: anchors are only taken from complete 100 ms peak buckets whose
+    full 64-frame target window is already buffered.
     """
 
     def __init__(self) -> None:
@@ -35,6 +39,8 @@ class FingerprintExtractor:
         self._frames: list[int] = []
         self._tail = np.zeros((0, BIN_COUNT), dtype=np.int16)
         self._tail_frame0 = 0
+        self._last_anchor_frame = -1
+        self._drained = 0
         self._finalized = False
 
     def push(self, pcm8k: np.ndarray) -> None:
@@ -73,10 +79,31 @@ class FingerprintExtractor:
             np.asarray(self._frames, dtype=np.int32),
         )
 
+    def drain(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return hashes finalized since the previous drain (streaming use)."""
+        start = self._drained
+        hashes = np.asarray(self._hashes[start:], dtype=np.int64)
+        frames = np.asarray(self._frames[start:], dtype=np.int32)
+        self._drained = len(self._hashes)
+        return hashes, frames
+
     def _process(self, logmel: np.ndarray, frame0: int, final: bool) -> None:
         count = len(logmel)
         if count < CONTEXT * 2 + 3:
             return
+        last_global = frame0 + count - 1
+        if final:
+            anchor_limit_global = last_global - CONTEXT
+        else:
+            # Only complete 100 ms peak buckets are eligible, and each eligible
+            # anchor must still have its full target window plus context.
+            complete_last = ((last_global + 1) // 6) * 6 - 1
+            anchor_limit_global = complete_last - DT_MAX - CONTEXT
+        if anchor_limit_global <= self._last_anchor_frame:
+            return
+        previous_limit = self._last_anchor_frame
+        self._last_anchor_frame = anchor_limit_global
+        anchor_limit = anchor_limit_global - frame0
         core = logmel[CONTEXT:-CONTEXT]
         frame_mean = logmel.mean(axis=1).astype(np.float32)[CONTEXT:-CONTEXT]
         peak = core > (frame_mean[:, None] + PEAK_OVER_MEAN_DB10)
@@ -104,20 +131,23 @@ class FingerprintExtractor:
         ends = np.r_[starts[1:], len(sorted_buckets)]
         ranks = np.arange(len(sorted_buckets)) - np.repeat(starts, ends - starts)
         keep = order[ranks < PEAKS_PER_100MS]
-        keep = keep[np.argsort(local_frames[keep])]
+        keep = keep[np.argsort(local_frames[keep], kind="stable")]
 
         peak_frames = local_frames[keep]
         peak_freqs = freqs[keep]
-        anchor_limit = count - 1 - CONTEXT if final else count - 1 - DT_MAX - CONTEXT
         for i in range(len(peak_frames)):
             anchor_local = int(peak_frames[i])
             if anchor_local > anchor_limit:
                 break
             anchor_frame = int(frame0 + anchor_local)
+            if anchor_frame <= previous_limit:
+                continue
             anchor_freq = int(peak_freqs[i])
             used = 0
             for j in range(i + 1, len(peak_frames)):
                 delta = int(peak_frames[j]) - anchor_local
+                if delta <= 0:
+                    continue
                 if delta > DT_MAX:
                     break
                 target_freq = int(peak_freqs[j])

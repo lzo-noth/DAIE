@@ -1,6 +1,9 @@
 name: platforms
 
 on:
+  schedule:
+    # 每天一轮：检测 -> ASR/LLM 标注 -> 拟合校准 -> 提交，下一轮自动生效。
+    - cron: "0 6 * * *"
   workflow_dispatch:
     inputs:
       episodes:
@@ -31,12 +34,85 @@ on:
         description: "analyze 并发 job 数"
         required: false
         default: "16"
+      max_rounds:
+        description: "自我改进最大轮数"
+        required: false
+        default: "10"
+      target_precision:
+        description: "达到高可用的最低 precision"
+        required: false
+        default: "0.3"
+      target_recall:
+        description: "达到高可用的最低 recall"
+        required: false
+        default: "0.8"
+      target_auc:
+        description: "达到高可用的最低 AUC"
+        required: false
+        default: "0.85"
+      target_fp_per_hour:
+        description: "每小时最多误报候选数"
+        required: false
+        default: "5"
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: dai-self-improve
+  cancel-in-progress: false
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+      round: ${{ steps.check.outputs.round }}
+      max_rounds: ${{ steps.check.outputs.max_rounds }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        env:
+          MAX_ROUNDS_INPUT: ${{ inputs.max_rounds }}
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, pathlib
+          feedback = pathlib.Path("feedback")
+          state = {}
+          try:
+              state = json.loads((feedback / "state.json").read_text(encoding="utf-8"))
+          except (OSError, ValueError):
+              pass
+          marker = feedback / "COMPLETE"
+          stopped_marker = feedback / "STOPPED"
+          current = int(state.get("round") or 0)
+          max_rounds = int(os.environ.get("MAX_ROUNDS_INPUT") or state.get("max_rounds") or 10)
+          if marker.exists() or stopped_marker.exists():
+              print("run=false")
+              print("round=" + str(current))
+              print("max_rounds=" + str(max_rounds))
+              active = marker if marker.exists() else stopped_marker
+              print(f"::notice::loop stopped: {active.read_text(encoding='utf-8').strip()}")
+          elif state.get("stopped"):
+              print("run=false")
+              print("round=" + str(current))
+              print("max_rounds=" + str(max_rounds))
+              print("::notice::loop stopped at max rounds")
+          elif current >= max_rounds:
+              print("run=false")
+              print("round=" + str(current))
+              print("max_rounds=" + str(max_rounds))
+              print("::notice::max rounds reached")
+          else:
+              print("run=true")
+              print("round=" + str(current + 1))
+              print("max_rounds=" + str(max_rounds))
+          PY
+
   setup:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -88,6 +164,8 @@ jobs:
           PY
 
   verify:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -110,12 +188,13 @@ jobs:
           if-no-files-found: warn
 
   analyze:
-    needs: setup
+    needs: [gate, setup]
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
+      max-parallel: ${{ fromJSON(inputs.max_parallel || '16') }}
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
@@ -134,9 +213,9 @@ jobs:
           fi
       - name: Analyze ${{ matrix.platform }} / ${{ matrix.feed }}
         env:
-          EPISODES: ${{ inputs.episodes }}
-          MIN_SCORE: ${{ inputs.min_score }}
-          MIN_RUN: ${{ inputs.min_run }}
+          EPISODES: ${{ inputs.episodes || '2' }}
+          MIN_SCORE: ${{ inputs.min_score || '0.5' }}
+          MIN_RUN: ${{ inputs.min_run || '8' }}
         run: |
           mkdir -p "out/${{ matrix.slug }}"
           set -o pipefail
@@ -158,8 +237,8 @@ jobs:
           retention-days: 30
 
   asr-llm:
-    needs: analyze
-    if: always()
+    needs: [gate, analyze]
+    if: always() && needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -216,8 +295,8 @@ jobs:
           retention-days: 30
 
   summary:
-    needs: [analyze, verify, asr-llm]
-    if: always()
+    needs: [gate, analyze, verify, asr-llm]
+    if: always() && needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -331,3 +410,103 @@ jobs:
           name: dai-matrix-summary
           path: out/summary/
           if-no-files-found: warn
+
+  learn:
+    needs: [gate, asr-llm]
+    if: always() && needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      ROUND: ${{ needs.gate.outputs.round }}
+      MAX_ROUNDS: ${{ needs.gate.outputs.max_rounds }}
+      TARGET_PRECISION: ${{ inputs.target_precision }}
+      TARGET_RECALL: ${{ inputs.target_recall }}
+      TARGET_AUC: ${{ inputs.target_auc }}
+      TARGET_FP_PER_HOUR: ${{ inputs.target_fp_per_hour }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install --quiet numpy
+      - name: Download enriched reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: asr-results
+          path: analysis
+      - name: Collect LLM labels
+        run: |
+          mkdir -p out/learn
+          if [ -d analysis ]; then
+            python scripts/collect_labels.py \
+              --reports-root analysis \
+              --store feedback/labels.jsonl \
+              --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
+          else
+            echo "no enriched reports; reusing feedback/labels.jsonl"
+          fi
+      - name: Mine ad keywords
+        run: |
+          python scripts/mine_keywords.py \
+            --store feedback/labels.jsonl \
+            --out feedback/keywords.json
+      - name: Fit calibration
+        run: |
+          TARGET_PRECISION="${TARGET_PRECISION:-0.3}"
+          TARGET_RECALL="${TARGET_RECALL:-0.8}"
+          TARGET_AUC="${TARGET_AUC:-0.85}"
+          TARGET_FP_PER_HOUR="${TARGET_FP_PER_HOUR:-5}"
+          python scripts/fit_calibration.py feedback/labels.jsonl \
+            --out calibration.json \
+            --mode filter \
+            --target-precision "$TARGET_PRECISION" \
+            --target-recall "$TARGET_RECALL" \
+            --target-auc "$TARGET_AUC" \
+            --target-fp-per-hour "$TARGET_FP_PER_HOUR" \
+            --metrics-out out/learn/metrics.json || true
+      - name: Update loop state
+        run: |
+          TARGET_PRECISION="${TARGET_PRECISION:-0.3}"
+          TARGET_RECALL="${TARGET_RECALL:-0.8}"
+          TARGET_AUC="${TARGET_AUC:-0.85}"
+          TARGET_FP_PER_HOUR="${TARGET_FP_PER_HOUR:-5}"
+          python scripts/update_loop_state.py \
+            --metrics out/learn/metrics.json \
+            --state feedback/state.json \
+            --round "${ROUND:-1}" \
+            --max-rounds "${MAX_ROUNDS:-10}" \
+            --target-precision "$TARGET_PRECISION" \
+            --target-recall "$TARGET_RECALL" \
+            --target-auc "$TARGET_AUC" \
+            --target-fp-per-hour "$TARGET_FP_PER_HOUR" || true
+          cat feedback/state.json 2>/dev/null || true
+      - name: Commit feedback and calibration
+        run: |
+          git config user.name "dai-loop"
+          git config user.email "dai-loop@users.noreply.github.com"
+          git add calibration.json feedback
+          if git diff --cached --quiet; then
+            echo "no feedback changes"
+          else
+            git commit -m "chore(loop): round ${ROUND:-1} self-improve calibration [skip ci]"
+          fi
+      - name: Push feedback
+        continue-on-error: true
+        run: git push origin "HEAD:${GITHUB_REF_NAME}"
+      - name: Upload learning artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dai-learn
+          path: |
+            out/learn/
+            feedback/
+            calibration.json
+          if-no-files-found: warn
+          retention-days: 30

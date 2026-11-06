@@ -53,30 +53,72 @@ def _aggregate(frames: np.ndarray) -> np.ndarray:
 
 
 class FeatureExtractor:
-    """Streaming 16 kHz acoustic features on a 10 Hz grid."""
+    """Streaming 16 kHz acoustic features on a 10 Hz grid.
 
-    def __init__(self) -> None:
+    ``push_rows`` returns the newly available 100 Hz rows (and their 10 Hz
+    aggregates) so a consumer can score audio while it is still playing.
+    ``push``/``finish`` keep the original whole-episode behavior.
+    """
+
+    def __init__(self, retain: bool = True) -> None:
         self._carry = np.zeros(0, dtype=np.float32)
         self._window = np.hanning(FRAME).astype(np.float32)
         self._mel = mel_filterbank()
         self._dct = dct_matrix()
         self._band = np.s_[:, 2:176]
+        self._retain = retain
         self._loud: list[np.ndarray] = []
         self._flat: list[np.ndarray] = []
         self._flux: list[np.ndarray] = []
         self._mfcc: list[np.ndarray] = []
         self._prev_norm: np.ndarray | None = None
         self._samples = 0
+        self._coarse_carry = {
+            "loudness_db": np.zeros(0, dtype=np.float32),
+            "flatness": np.zeros(0, dtype=np.float32),
+            "flux": np.zeros(0, dtype=np.float32),
+            "mfcc": np.zeros((0, N_MFCC), dtype=np.float32),
+        }
 
     def push(self, pcm: np.ndarray) -> None:
+        rows = self._extract(pcm)
+        if self._retain and len(rows["loudness_db"]):
+            self._store(rows)
+
+    def push_rows(self, pcm: np.ndarray) -> dict:
+        """Return newly extracted fine rows plus their complete 10 Hz groups."""
+        rows = self._extract(pcm)
+        if self._retain and len(rows["loudness_db"]):
+            self._store(rows)
+        return {
+            "fine": rows,
+            "coarse": self._coarse(rows),
+            "fine_grid_s": HOP / float(SAMPLE_RATE),
+            "coarse_grid_s": HOP * GRID / float(SAMPLE_RATE),
+            "duration_s": self._samples / float(SAMPLE_RATE),
+        }
+
+    def _store(self, rows: dict) -> None:
+        self._loud.append(rows["loudness_db"])
+        self._flat.append(rows["flatness"])
+        self._flux.append(rows["flux"])
+        self._mfcc.append(rows["mfcc"])
+
+    def _extract(self, pcm: np.ndarray) -> dict:
+        empty = {
+            "loudness_db": np.zeros(0, dtype=np.float32),
+            "flatness": np.zeros(0, dtype=np.float32),
+            "flux": np.zeros(0, dtype=np.float32),
+            "mfcc": np.zeros((0, N_MFCC), dtype=np.float32),
+        }
         pcm = np.asarray(pcm, dtype=np.float32)
         if pcm.size == 0:
-            return
+            return empty
         self._samples += len(pcm)
         buffer = np.concatenate((self._carry, pcm))
         if len(buffer) < FRAME:
             self._carry = buffer
-            return
+            return empty
         count = 1 + (len(buffer) - FRAME) // HOP
         frames = np.lib.stride_tricks.sliding_window_view(buffer, FRAME)[::HOP][:count]
 
@@ -99,11 +141,37 @@ class FeatureExtractor:
         logmel = np.log(np.maximum(magnitude @ self._mel.T, 1e-10))
         mfcc = logmel @ self._dct.T
 
-        self._loud.append(loudness.astype(np.float32))
-        self._flat.append(flatness.astype(np.float32))
-        self._flux.append(flux.astype(np.float32))
-        self._mfcc.append(mfcc.astype(np.float32))
         self._carry = buffer[count * HOP:]
+        return {
+            "loudness_db": loudness.astype(np.float32),
+            "flatness": flatness.astype(np.float32),
+            "flux": flux.astype(np.float32),
+            "mfcc": mfcc.astype(np.float32),
+        }
+
+    def _coarse(self, rows: dict) -> dict:
+        carry = self._coarse_carry
+        combined = {
+            key: np.concatenate((carry[key], rows[key]), axis=0)
+            for key in ("loudness_db", "flatness", "flux", "mfcc")
+        }
+        usable = len(combined["loudness_db"]) // GRID * GRID
+        if usable == 0:
+            self._coarse_carry = combined
+            return {
+                "loudness_db": np.zeros(0, dtype=np.float32),
+                "flatness": np.zeros(0, dtype=np.float32),
+                "flux": np.zeros(0, dtype=np.float32),
+                "mfcc": np.zeros((0, N_MFCC), dtype=np.float32),
+            }
+        output = {
+            "loudness_db": combined["loudness_db"][:usable].reshape(-1, GRID).mean(axis=1),
+            "flatness": combined["flatness"][:usable].reshape(-1, GRID).mean(axis=1),
+            "flux": combined["flux"][:usable].reshape(-1, GRID).mean(axis=1),
+            "mfcc": combined["mfcc"][:usable].reshape(-1, GRID, N_MFCC).mean(axis=1),
+        }
+        self._coarse_carry = {key: combined[key][usable:] for key in combined}
+        return output
 
     def finish(self) -> dict:
         def concat(items: list[np.ndarray], width: int) -> np.ndarray:

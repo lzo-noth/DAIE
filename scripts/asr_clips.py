@@ -45,9 +45,28 @@ AD_TERMS = [
 ]
 
 
+def _load_learned_terms() -> list[str]:
+    """Terms mined from LLM-labelled ads in the previous feedback round."""
+    import os
+
+    path = Path(os.environ.get("DAI_KEYWORDS", "feedback/keywords.json"))
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    terms = payload.get("terms") or []
+    return [str(term).lower() for term in terms if str(term).strip()]
+
+
+LEARNED_TERMS = _load_learned_terms()
+ALL_TERMS = sorted(set(AD_TERMS) | set(LEARNED_TERMS))
+
+
 def ad_terms(text: str) -> list[str]:
     lowered = text.lower()
-    return sorted({term for term in AD_TERMS if term in lowered})
+    return sorted({term for term in ALL_TERMS if term in lowered})
 
 
 def load_audio(path: Path) -> np.ndarray:

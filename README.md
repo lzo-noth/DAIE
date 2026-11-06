@@ -79,10 +79,34 @@ Actions 配置了 `GEMINI_API_KEY`（或 `OPENAI_API_KEY`）后，会对候选 A
 
 LLM 标注也会反馈到检测器：当前样本里 slot 命中主要出现在正片（21/27），timbre 在正片反而更高，因此 slot 只对已有音乐/响度证据的候选小幅加分，timbre 不再作为广告正证据。`scripts/calibrate.py` 可从带 `llm` 字段的报告重算这些统计，输出 `calibration.json`；声学门控 precision 约 0.23，LLM 仍是主要判别层。
 
-### LLM 反馈闭环
+### 自我改进闭环（GitHub Actions）
+
+`platforms.yml` 是完整的反馈闭环，每天自动跑一轮，也可以手动触发：
+
+1. **检测**：按 `platforms.json` 矩阵分析每个 feed 的最新集，生成候选和试听片段。
+2. **标注**：`faster-whisper` 转写候选片段；配置 `GEMINI_API_KEY`（或 `OPENAI_API_KEY`）时，用 LLM 判定广告/正片。
+3. **回流**：`scripts/collect_labels.py` 把所有 `llm_labels`（包括被删除的负例）去重写入 `feedback/labels.jsonl`；`scripts/mine_keywords.py` 从广告转写和 LLM 品牌字段中挖出赞助话术/品牌词，写入 `feedback/keywords.json`。
+4. **优化**：`scripts/fit_calibration.py` 按 feed 做留一交叉验证，拟合候选评分器，输出 `calibration.json` 和指标；下一次检测直接加载。`scripts/asr_clips.py` 也会加载 `feedback/keywords.json`，把学到的品牌词作为确定性广告话术特征。
+5. **循环**：`learn` job 自动提交 `feedback/` 与 `calibration.json`（提交信息带 `[skip ci]`），下一轮（每天定时或手动）使用新模型。`feedback/state.json` 记录轮数和指标；达到目标后写入 `feedback/COMPLETE`，`gate` job 之后不再执行分析。默认最多 10 轮，可用 `max_rounds` 调整。
+
+默认目标（手动 dispatch 时可覆盖）：`precision ≥ 0.3`、`recall ≥ 0.8`、`AUC ≥ 0.85`、每小时误报 ≤ 5。未达标就继续下一轮；达到后自动停止。
+
+LLM 只用于离线标注，检测/播放链路本身不调用 LLM。关键词和校准模型是确定性产物：下一轮检测、ASR 后处理都不依赖 LLM。
+
+反馈文件：
+
+- `feedback/labels.jsonl`：去重后的标注样本，包含声学特征、tier、ASR 文本、关键词、LLM 判定。
+- `feedback/keywords.json`：从广告样本中挖出的赞助话术与品牌词。
+- `feedback/state.json`：当前轮数、目标、指标、是否完成。
+- `feedback/COMPLETE`：达到目标后的停止标记。
+- `feedback/STOPPED`：达到最大轮数仍未达标时的停止标记。
+
+首次启用：Actions → platforms → Run workflow；确保仓库 Secrets 里有 `GEMINI_API_KEY`。`learn` job 需要 `contents: write` 权限；如果分支保护禁止 Actions 直接 push，校准和标签仍会作为 `dai-learn` artifact 上传，可手动下载后提交。删除 `feedback/COMPLETE` 可重新启动循环。
+
+### LLM 反馈闭环（手动方式）
 
 1. 每次 LLM 分类会把**所有候选（包括被删除的负例）**写入 `report.llm_labels`，包含声学特征与 LLM 判定。
-2. 离线运行 `python scripts/fit_calibration.py <报告目录>`：按 feed 做留一交叉验证，拟合 8 维 logistic 候选评分器；只有 CV 指标优于启发式评分时才写 `enabled: true` 的 `calibration.json`。
+2. 离线运行 `python scripts/fit_calibration.py <报告目录>`：按 feed 做留一交叉验证，拟合候选评分器。
 3. 检测器运行时自动读取仓库根目录的 `calibration.json`，对 `inserted` 候选计算 `learned_ad_score`，低于阈值的候选直接过滤；`repeated` 候选保留。
 4. 循环：矩阵 run → 下载报告 → fit_calibration → 提交 calibration.json → 再跑一轮验证。
 

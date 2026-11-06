@@ -167,6 +167,21 @@ def _repetition_candidate(
         + 0.05 * min(evidence["loudness_dev_db"] / 6.0, 1.0)
         + 0.05 * evidence["position"]
     )
+    starts = [start] + [ref.start_frame / FPS for ref in repetition.refs]
+    durations = [features.duration_s] + [
+        feature_durations[ref.episode_index] for ref in repetition.refs
+    ]
+    start_spread = max(starts) - min(starts)
+    near_start = all(value < 180.0 for value in starts)
+    near_end = all(value > duration - 180.0 for value, duration in zip(starts, durations))
+    # Shared intros/outros repeat at almost the same absolute slot and are
+    # short. Pre-roll ads can do that too, but without labels precision matters
+    # more than catching that edge case.
+    fixed_slot = (near_start or near_end) and start_spread <= 60.0 and (end - start) <= 45.0
+    if fixed_slot:
+        score -= 0.10
+    elif len(starts) >= 2 and start_spread >= 300.0 and (end - start) <= 120.0:
+        score += 0.02
     matches = []
     for ref in repetition.refs:
         other = feature_episodes[ref.episode_index]
@@ -185,6 +200,8 @@ def _repetition_candidate(
         "votes": repetition.votes,
         "refined": refined,
         "refine_strength": round(refine_strength, 3),
+        "start_spread_s": round(start_spread, 1),
+        "fixed_slot": bool(fixed_slot),
     }
     return Candidate(
         start_s=round(start, 2),
@@ -359,6 +376,13 @@ def run(
             results[result_index].candidates = _merge_candidates(repeated, inserted)
 
         _apply_slot_consistency(results, feature_result_indices)
+        # Apply the heuristic score floor before calibration: calibration is a
+        # re-ranker and, in rank mode, calibrated scores are relative and can
+        # legitimately fall below the heuristic floor.
+        for result_index in feature_result_indices:
+            results[result_index].candidates = [
+                candidate for candidate in results[result_index].candidates if candidate.score >= min_score
+            ]
         calibration = Calibration.load()
         if calibration is not None:
             for result_index in feature_result_indices:
@@ -366,9 +390,6 @@ def run(
                     results[result_index].candidates, calibration
                 )
         for result_index in feature_result_indices:
-            results[result_index].candidates = [
-                candidate for candidate in results[result_index].candidates if candidate.score >= min_score
-            ]
             results[result_index].candidates.sort(key=lambda item: (-item.score, item.start_s))
         if clips_dir is not None:
             for result_index, audio_path in audio_paths.items():
