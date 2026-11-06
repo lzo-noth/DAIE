@@ -59,6 +59,8 @@ class Calibration:
     intercept: float
     threshold: float
     enabled: bool = True
+    mode: str = "filter"
+    top_k: int = 0
 
     @classmethod
     def load(cls, path: Optional[str | Path] = None) -> Optional["Calibration"]:
@@ -80,6 +82,8 @@ class Calibration:
                 weights=np.asarray(payload["weights"], dtype=np.float64),
                 intercept=float(payload["intercept"]),
                 threshold=float(payload.get("threshold", 0.5)),
+                mode=str(payload.get("mode", "filter")),
+                top_k=int(payload.get("top_k", 0)),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -92,16 +96,20 @@ class Calibration:
 
 
 def apply_calibration(candidates: list[Candidate], calibration: Calibration) -> list[Candidate]:
-    kept: list[Candidate] = []
+    repeated: list[Candidate] = []
+    inserted: list[Candidate] = []
     for candidate in candidates:
         if candidate.tier != "inserted":
-            kept.append(candidate)
+            repeated.append(candidate)
             continue
         probability = calibration.predict(candidate_features(candidate))
         candidate.evidence["heuristic_score"] = round(candidate.score, 3)
         candidate.evidence["learned_ad_score"] = round(probability, 3)
         candidate.score = round(min(0.99, max(0.0, 0.7 * probability + 0.3 * candidate.score)), 3)
-        if probability < calibration.threshold:
+        if calibration.mode == "filter" and probability < calibration.threshold:
             continue
-        kept.append(candidate)
-    return kept
+        inserted.append(candidate)
+    if calibration.mode == "rank" and calibration.top_k > 0:
+        inserted.sort(key=lambda item: (-item.score, item.start_s))
+        inserted = inserted[: calibration.top_k]
+    return [*repeated, *inserted]

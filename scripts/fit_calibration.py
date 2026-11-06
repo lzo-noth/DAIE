@@ -19,11 +19,12 @@ def _sigmoid(z: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-np.clip(z, -30.0, 30.0)))
 
 
-def _load_rows(paths: list[Path]) -> tuple[list[list[float]], np.ndarray, np.ndarray, list[str]]:
+def _load_rows(paths: list[Path]) -> tuple[list[list[float]], np.ndarray, np.ndarray, list[str], list[str]]:
     rows: list[list[float]] = []
     labels: list[int] = []
     baselines: list[float] = []
     groups: list[str] = []
+    episodes: list[str] = []
     for path in paths:
         try:
             report = json.loads(path.read_text(encoding="utf-8"))
@@ -43,7 +44,8 @@ def _load_rows(paths: list[Path]) -> tuple[list[list[float]], np.ndarray, np.nda
                 )
             )
             groups.append(str(group))
-    return rows, np.asarray(labels), np.asarray(baselines), groups
+            episodes.append(f"{group}|{entry.get('episode') or ''}")
+    return rows, np.asarray(labels), np.asarray(baselines), groups, episodes
 
 
 def _standardize(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -116,7 +118,7 @@ def main() -> int:
     paths = []
     for path in args.reports:
         paths.extend(path.rglob("report.json") if path.is_dir() else [path])
-    rows, labels, baselines, groups = _load_rows(sorted(set(paths)))
+    rows, labels, baselines, groups, episodes = _load_rows(sorted(set(paths)))
     if len(rows) == 0 or labels.sum() == 0 or (len(labels) - labels.sum()) == 0:
         print(f"not enough labels: samples={len(rows)} ads={int(labels.sum())}")
         return 1
@@ -146,14 +148,33 @@ def main() -> int:
     print(f"learned  auc={learned_auc:.3f} threshold={learned_threshold:.2f} {learned_metrics}")
     print(f"baseline auc={baseline_auc:.3f} threshold={baseline_threshold:.2f} {baseline_metrics}")
 
-    improved = (
-        learned_metrics["f1"] > baseline_metrics["f1"] + 0.01
-        or (learned_auc > baseline_auc + 0.01 and learned_metrics["recall"] >= args.min_recall)
-    )
+    from collections import defaultdict
+
+    buckets: dict[str, list[tuple[float, int]]] = defaultdict(list)
+    for score, label, episode in zip(learned_cv, labels, episodes):
+        buckets[episode].append((float(score), int(label)))
+    total_ads = int(labels.sum())
+    recall_at: dict[int, float] = {}
+    top_k = 0
+    for k in (5, 8, 10, 12, 15, 20, 24, 30, 40):
+        hits = 0
+        for entries in buckets.values():
+            entries.sort(key=lambda item: item[0], reverse=True)
+            hits += sum(label for _, label in entries[:k])
+        recall_at[k] = hits / max(1, total_ads)
+        if top_k == 0 and recall_at[k] >= args.min_recall and k >= 8:
+            top_k = k
+    print("recall@k:", {k: round(v, 2) for k, v in recall_at.items()})
+    if top_k == 0:
+        top_k = 40
+
+    improved = learned_auc > baseline_auc + 0.01 and recall_at.get(top_k, 0.0) >= args.min_recall
     standardized, mean, scale = _standardize(x)
     weights, intercept = _fit_logistic(standardized, labels)
     payload = {
         "enabled": bool(improved),
+        "mode": "rank",
+        "top_k": int(top_k),
         "features": FEATURES,
         "mean": mean.tolist(),
         "scale": scale.tolist(),
@@ -165,11 +186,12 @@ def main() -> int:
         "ads": int(labels.sum()),
         "groups": unique_groups,
         "metrics": {
-            "learned": {**learned_metrics, "auc": round(learned_auc, 3)},
+            "learned": {**learned_metrics, "auc": round(learned_auc, 3), "recall_at_k": round(recall_at[top_k], 3)},
             "baseline": {**baseline_metrics, "auc": round(baseline_auc, 3)},
+            "recall_at": {str(k): round(v, 3) for k, v in recall_at.items()},
         },
     }
-    print("enabled:", payload["enabled"])
+    print("enabled:", payload["enabled"], "top_k:", top_k)
     if not args.dry_run:
         args.out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         print("wrote", args.out)
