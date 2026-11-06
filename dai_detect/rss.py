@@ -11,6 +11,7 @@ from email.utils import parsedate_to_datetime
 from typing import Optional
 
 from .models import Episode
+from .net import HTTP_USER_AGENT
 
 ATOM = "http://www.w3.org/2005/Atom"
 ITUNES = "http://www.itunes.com/dtds/podcast-1.0.dtd"
@@ -26,7 +27,7 @@ def fetch_feed(url: str, proxy: Optional[str] = None, timeout: float = 30.0) -> 
     if proxy:
         handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
     opener = urllib.request.build_opener(*handlers)
-    request = urllib.request.Request(url, headers={"User-Agent": "dai-detect/0.1"})
+    request = urllib.request.Request(url, headers={"User-Agent": HTTP_USER_AGENT})
     try:
         with opener.open(request, timeout=timeout) as response:
             data = response.read()

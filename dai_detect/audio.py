@@ -9,6 +9,8 @@ from typing import Iterator, Optional
 
 import numpy as np
 
+from .net import HTTP_USER_AGENT
+
 SAMPLE_RATE = 16000
 
 
@@ -56,6 +58,8 @@ def iter_pcm(
         "-hide_banner",
         "-loglevel",
         "error",
+        "-user_agent",
+        HTTP_USER_AGENT,
         "-i",
         src,
         "-vn",
