@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "updated_at": "2026-11-06T13:58:12+00:00",
-  "samples": 604,
-  "ads": 26,
-  "non_ads": 578,
+  "updated_at": "2026-11-06T14:10:54+00:00",
+  "samples": 654,
+  "ads": 30,
+  "non_ads": 624,
   "terms": [
     "sponsored by",
     "brought to you by",
@@ -28,6 +28,8 @@
     "本节目由",
     "优惠码",
     "allstate",
+    "apple",
+    "apple card",
     "autotrader",
     "betterment",
     "coca-cola",
@@ -40,13 +42,15 @@
     "old spice",
     "quaker",
     "revolut",
+    "serval",
     "southwest",
     "spice",
-    "the australian financial review",
     "toyota"
   ],
   "brands": [
     "allstate",
+    "apple",
+    "apple card",
     "autotrader",
     "betterment",
     "brought to you by",
@@ -60,9 +64,9 @@
     "old spice",
     "quaker",
     "revolut",
+    "serval",
     "southwest",
     "spice",
-    "the australian financial review",
     "toyota"
   ],
   "discovered": {}
