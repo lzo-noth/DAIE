@@ -1,0 +1,60 @@
+name: fetch-release-audio
+
+on:
+  workflow_dispatch:
+    inputs:
+      audio_urls:
+        description: "音频 URL 列表，每行一个（直接 MP3/M4A/WAV 链接）"
+        required: true
+      release_tag:
+        description: "要附加到的 Release tag"
+        required: false
+        default: "1.0"
+      upload_to_release:
+        description: "下载后是否作为 Release asset 附加（true/false）"
+        required: false
+        default: "true"
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download audio URLs
+        env:
+          AUDIO_URLS: ${{ inputs.audio_urls }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/audio
+          index=0
+          while IFS= read -r url; do
+            url="${url%$'\r'}"
+            [ -z "$url" ] && continue
+            index=$((index + 1))
+            name="$(basename "${url%%\?*}")"
+            [ -z "$name" ] && name="audio_${index}.mp3"
+            echo "Downloading $url -> out/audio/$name"
+            curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 \
+              -A "dai-audio-fetch" "$url" -o "out/audio/$name"
+          done <<< "$AUDIO_URLS"
+          ls -lh out/audio
+      - name: Upload run artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dai-audio-${{ github.run_number }}
+          path: out/audio/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Attach audio to Release
+        if: inputs.upload_to_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" out/audio/* --clobber
