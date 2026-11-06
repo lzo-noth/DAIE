@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 AD_TYPES = {"third_party_ad", "self_promo", "content", "uncertain"}
@@ -75,6 +76,21 @@ def parse_response(text: str, expected_ids: set[str]) -> dict[str, dict[str, Any
     return results
 
 
+def _retryable(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in ("429", "rate limit", "quota", "temporarily"))
+
+
+def _create_with_retry(client, **kwargs):
+    for attempt in range(4):
+        try:
+            return client.chat.completions.create(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            if attempt == 3 or not _retryable(exc):
+                raise
+            time.sleep(2 * (attempt + 1))
+
+
 def classify_items(
     report: dict,
     client,
@@ -86,16 +102,23 @@ def classify_items(
     for start in range(0, len(items), batch_size):
         batch = items[start:start + batch_size]
         expected = {item["id"] for item in batch}
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": build_prompt(batch)},
-            ],
-            temperature=0,
-        )
-        text = response.choices[0].message.content or ""
-        results.update(parse_response(text, expected))
+        for parse_attempt in range(2):
+            response = _create_with_retry(
+                client,
+                model=model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": build_prompt(batch)},
+                ],
+                temperature=0,
+            )
+            text = response.choices[0].message.content or ""
+            try:
+                results.update(parse_response(text, expected))
+                break
+            except ValueError:
+                if parse_attempt == 1:
+                    raise
     return results
 
 
