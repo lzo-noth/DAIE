@@ -84,6 +84,46 @@ class PipelineTest(unittest.TestCase):
         )
         self.assertGreaterEqual(best, 10.0, results[0].candidates)
 
+    def test_different_ads_same_slot_boosted(self) -> None:
+        first = self.directory / "slot-a.wav"
+        second = self.directory / "slot-b.wav"
+        synth.make_episode(first, [synth.speech(20.0, 61), synth.ad(20.0, seed=7), synth.speech(20.0, 62)])
+        synth.make_episode(second, [synth.speech(20.0, 63), synth.ad(20.0, seed=8), synth.speech(20.0, 64)])
+        results = run(
+            [make_episode_from_path(str(first)), make_episode_from_path(str(second))],
+            Config(cache=False),
+            self.directory / "cache-slot",
+            min_score=0.5,
+        )
+        for result in results:
+            self.assertFalse(
+                [candidate for candidate in result.candidates if candidate.tier == "repeated"],
+                "不同 creative 不应产生重复匹配",
+            )
+            inserted = [candidate for candidate in result.candidates if candidate.tier == "inserted"]
+            matching = [
+                candidate
+                for candidate in inserted
+                if _overlap(candidate.start_s, candidate.end_s, 20.0, 40.0) >= 10.0
+            ]
+            self.assertTrue(matching, result.candidates)
+            self.assertTrue(any(candidate.evidence.get("slot_matches", 0) >= 1 for candidate in matching), matching)
+
+    def test_clips_written_for_candidates(self) -> None:
+        path = self.directory / "clip.wav"
+        synth.make_episode(path, [synth.speech(20.0, 71), synth.ad(20.0), synth.speech(20.0, 72)])
+        clips_dir = self.directory / "clips"
+        results = run(
+            [make_episode_from_path(str(path))],
+            Config(cache=False),
+            self.directory / "cache-clip",
+            min_score=0.4,
+            clips_dir=clips_dir,
+        )
+        clips = list(clips_dir.glob("*.mp3"))
+        self.assertTrue(clips, "未生成试听片段")
+        self.assertTrue(any("clip" in candidate.evidence for candidate in results[0].candidates))
+
     def test_cli_writes_report(self) -> None:
         jingle = synth.ad(12.0)
         first = self.directory / "a.wav"

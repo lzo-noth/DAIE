@@ -256,6 +256,13 @@ def insertion_candidates(
         )
         if host_like:
             score -= 0.22
+        ad_evidence = (
+            stats["musicness"] >= 0.3
+            or stats["loudness_dev_db"] >= 5.0
+            or timbre_min >= 0.55
+        )
+        if not ad_evidence:
+            score -= 0.08
         if duration > features.duration_s * 0.6 and stats["musicness"] < 0.3:
             continue
         if score < cfg.min_insertion_score:

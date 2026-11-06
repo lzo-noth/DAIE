@@ -59,6 +59,7 @@ python -m dai_detect verify platforms.json --report feed_verification.json
 | `--min-score` | 0.5 | 最终候选最低分 |
 | `--report` | 无 | JSON 报告路径 |
 | `--cache-dir` | `.dai-cache` | 特征缓存目录（不含音频） |
+| `--clips-dir` | 无 | 为每个候选生成 10 秒试听 MP3（会强制重新拉流） |
 | `--fresh` | 关 | 忽略缓存重新拉流（DAI 内容可能逐次变化） |
 | `--no-cache` | 关 | 完全不读写缓存 |
 | `--proxy` | 无 | 例如 `http://127.0.0.1:7890` |

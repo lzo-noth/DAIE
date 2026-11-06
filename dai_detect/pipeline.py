@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import re
+import shutil
+import subprocess
+import tempfile
+import wave
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -51,9 +56,10 @@ def analyze_episode(
     cache_dir: Path,
     fresh: bool = False,
     progress: Optional[Callable[[str], None]] = None,
+    audio_out: Optional[Path] = None,
 ) -> EpisodeFeatures:
     cache_file = _cache_path(cache_dir, episode)
-    if cfg.cache and not fresh:
+    if cfg.cache and not fresh and audio_out is None:
         cached = load_cache(cache_file)
         if cached is not None:
             features = _from_cache(cached)
@@ -67,13 +73,27 @@ def analyze_episode(
     collector = FeatureExtractor()
     decimator = Decimator()
     fingerprinter = FingerprintExtractor()
+    writer = None
+    if audio_out is not None:
+        audio_out.parent.mkdir(parents=True, exist_ok=True)
+        writer = wave.open(str(audio_out), "wb")
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(16000)
     seconds = 0.0
-    for block in iter_pcm(episode.audio_url, proxy=cfg.proxy):
-        collector.push(block)
-        fingerprinter.push(decimator.push(block))
-        seconds += len(block) / 16000.0
-        if progress and int(seconds) % 60 == 0 and int(seconds) > 0:
-            progress(f"  已处理 {int(seconds // 60)} 分钟")
+    try:
+        for block in iter_pcm(episode.audio_url, proxy=cfg.proxy):
+            collector.push(block)
+            fingerprinter.push(decimator.push(block))
+            if writer is not None:
+                pcm = np.clip(block * 32767.0, -32768, 32767).astype("<i2")
+                writer.writeframes(pcm.tobytes())
+            seconds += len(block) / 16000.0
+            if progress and int(seconds) % 60 == 0 and int(seconds) > 0:
+                progress(f"  已处理 {int(seconds // 60)} 分钟")
+    finally:
+        if writer is not None:
+            writer.close()
     extracted = collector.finish()
     hashes, hash_frames = fingerprinter.finish()
     features = EpisodeFeatures(
@@ -178,7 +198,6 @@ def _repetition_candidate(
 def _merge_candidates(
     repeated: list[Candidate],
     inserted: list[Candidate],
-    min_score: float,
 ) -> list[Candidate]:
     for candidate in repeated:
         overlaps = [other for other in inserted if _overlap_ratio(candidate, other) >= 0.5]
@@ -192,9 +211,81 @@ def _merge_candidates(
         if not any(_overlap_ratio(candidate, other) >= 0.5 for other in repeated)
     ]
     combined = [*repeated, *kept_inserted]
-    combined = [candidate for candidate in combined if candidate.score >= min_score]
     combined.sort(key=lambda item: (-item.score, item.start_s))
     return combined
+
+
+def _apply_slot_consistency(
+    results: list[EpisodeResult],
+    successful_indices: list[int],
+) -> None:
+    groups: dict[str, list[tuple[int, Candidate]]] = {}
+    for result_index in successful_indices:
+        source = results[result_index].episode.source or "default"
+        for candidate in results[result_index].candidates:
+            if candidate.tier == "inserted":
+                groups.setdefault(source, []).append((result_index, candidate))
+    for items in groups.values():
+        if len(items) < 2:
+            continue
+        for result_index, candidate in items:
+            matches = [
+                other
+                for other_index, other in items
+                if other_index != result_index
+                and abs(candidate.start_s - other.start_s) <= 60.0
+                and 0.4 <= candidate.duration_s / max(other.duration_s, 1e-6) <= 2.5
+            ]
+            if not matches:
+                continue
+            candidate.score = round(min(0.95, candidate.score + (0.10 if len(matches) == 1 else 0.14)), 3)
+            candidate.evidence["slot_matches"] = len(matches)
+            candidate.evidence["slot_delta_s"] = round(
+                min(abs(candidate.start_s - other.start_s) for other in matches), 1
+            )
+
+
+def _write_clips(
+    result: EpisodeResult,
+    audio_path: Path,
+    clips_dir: Path,
+    limit: int = 12,
+) -> None:
+    if not audio_path.exists():
+        return
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", result.episode.title)[:40] or result.episode.id[:8]
+    for index, candidate in enumerate(result.candidates[:limit]):
+        start = max(0.0, candidate.start_s)
+        duration = min(10.0, candidate.end_s - start)
+        if duration < 1.0:
+            continue
+        output = clips_dir / f"{slug}_{index:02d}_{int(candidate.start_s)}s_{candidate.tier}.mp3"
+        command = [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{start:.2f}",
+            "-t",
+            f"{duration:.2f}",
+            "-i",
+            str(audio_path),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-b:a",
+            "32k",
+            str(output),
+        ]
+        try:
+            code = subprocess.run(command, capture_output=True, timeout=60, check=False).returncode
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if code == 0 and output.exists():
+            candidate.evidence["clip"] = output.name
 
 
 def run(
@@ -204,44 +295,72 @@ def run(
     fresh: bool = False,
     min_score: float = 0.5,
     progress: Optional[Callable[[str], None]] = None,
+    clips_dir: Optional[Path] = None,
 ) -> list[EpisodeResult]:
     results: list[EpisodeResult] = []
     features: list[EpisodeFeatures] = []
     feature_episodes: list[Episode] = []
     feature_result_indices: list[int] = []
-    for episode in episodes:
-        try:
-            extracted = analyze_episode(episode, cfg, cache_dir, fresh=fresh, progress=progress)
-        except Exception as exc:  # noqa: BLE001 - per-episode failure must not stop the run
-            message = str(exc) or exc.__class__.__name__
-            results.append(EpisodeResult(episode=episode, error=message))
-            if progress:
-                progress(f"失败: {episode.title}: {message}")
-            continue
-        results.append(EpisodeResult(episode=episode, duration_s=extracted.duration_s))
-        features.append(extracted)
-        feature_episodes.append(episode)
-        feature_result_indices.append(len(results) - 1)
+    audio_paths: dict[int, Path] = {}
+    audio_root = Path(tempfile.mkdtemp(prefix="dai-audio-")) if clips_dir is not None else None
+    effective_fresh = fresh or clips_dir is not None
+    try:
+        for episode in episodes:
+            try:
+                audio_out = audio_root / f"{len(results)}.wav" if audio_root is not None else None
+                extracted = analyze_episode(
+                    episode,
+                    cfg,
+                    cache_dir,
+                    fresh=effective_fresh,
+                    progress=progress,
+                    audio_out=audio_out,
+                )
+            except Exception as exc:  # noqa: BLE001 - per-episode failure must not stop the run
+                message = str(exc) or exc.__class__.__name__
+                results.append(EpisodeResult(episode=episode, error=message))
+                if progress:
+                    progress(f"失败: {episode.title}: {message}")
+                continue
+            results.append(EpisodeResult(episode=episode, duration_s=extracted.duration_s))
+            if audio_out is not None:
+                audio_paths[len(results) - 1] = audio_out
+            features.append(extracted)
+            feature_episodes.append(episode)
+            feature_result_indices.append(len(results) - 1)
 
-    repetitions = find_repetitions(features, cfg)
-    feature_durations = [feature.duration_s for feature in features]
-    boundaries = [fine_boundaries(feature) for feature in features]
-    for feature_index, result_index in enumerate(feature_result_indices):
-        extracted = features[feature_index]
-        repeated = [
-            _repetition_candidate(
-                repetition,
-                extracted,
-                feature_episodes,
-                feature_durations,
-                boundaries[feature_index],
-                cfg,
-            )
-            for repetition in repetitions[feature_index]
-        ]
-        inserted = insertion_candidates(extracted, cfg, boundaries[feature_index])
-        results[result_index].candidates = _merge_candidates(repeated, inserted, min_score)
-    return results
+        repetitions = find_repetitions(features, cfg)
+        feature_durations = [feature.duration_s for feature in features]
+        boundaries = [fine_boundaries(feature) for feature in features]
+        for feature_index, result_index in enumerate(feature_result_indices):
+            extracted = features[feature_index]
+            repeated = [
+                _repetition_candidate(
+                    repetition,
+                    extracted,
+                    feature_episodes,
+                    feature_durations,
+                    boundaries[feature_index],
+                    cfg,
+                )
+                for repetition in repetitions[feature_index]
+            ]
+            inserted = insertion_candidates(extracted, cfg, boundaries[feature_index])
+            results[result_index].candidates = _merge_candidates(repeated, inserted)
+
+        _apply_slot_consistency(results, feature_result_indices)
+        for result_index in feature_result_indices:
+            results[result_index].candidates = [
+                candidate for candidate in results[result_index].candidates if candidate.score >= min_score
+            ]
+            results[result_index].candidates.sort(key=lambda item: (-item.score, item.start_s))
+        if clips_dir is not None:
+            for result_index, audio_path in audio_paths.items():
+                _write_clips(results[result_index], audio_path, clips_dir)
+        return results
+    finally:
+        if audio_root is not None:
+            shutil.rmtree(audio_root, ignore_errors=True)
 
 
 def make_episode_from_path(path: str) -> Episode:

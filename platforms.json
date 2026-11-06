@@ -148,7 +148,12 @@
       {
         "name": "The Pragmatic Engineer",
         "slug": "substack-pragmatic",
-        "url": "https://api.substack.com/feed/podcast/spotify/bd775e35-7384-4fc4-bf47-ae24ae58d79b/458709.rss"
+        "url": "https://newsletter.pragmaticengineer.com/feed"
+      },
+      {
+        "name": "Lenny's Podcast",
+        "slug": "substack-lenny",
+        "url": "https://www.lennysnewsletter.com/feed"
       }
     ]
   },

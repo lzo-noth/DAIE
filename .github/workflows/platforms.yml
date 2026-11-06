@@ -106,6 +106,7 @@ jobs:
             --min-run "$MIN_RUN" \
             --fresh \
             --cache-dir "$RUNNER_TEMP/dai-cache" \
+            --clips-dir "out/${{ matrix.slug }}/clips" \
             --report "out/${{ matrix.slug }}/report.json" 2>&1 | tee "out/${{ matrix.slug }}/run.log"
       - name: Upload result
         if: always()
@@ -164,6 +165,10 @@ jobs:
                       "candidates": len(candidates),
                       "repeated": sum(1 for c in candidates if c.get("tier") == "repeated"),
                       "inserted": sum(1 for c in candidates if c.get("tier") == "inserted"),
+                      "inserted_slot": sum(
+                          1 for c in candidates
+                          if c.get("tier") == "inserted" and c.get("evidence", {}).get("slot_matches")
+                      ),
                       "top": [
                           {
                               "episode": episode.get("title"),
@@ -171,6 +176,8 @@ jobs:
                               "end": c.get("end"),
                               "tier": c.get("tier"),
                               "score": c.get("score"),
+                              "slot_matches": c.get("evidence", {}).get("slot_matches"),
+                              "clip": c.get("evidence", {}).get("clip"),
                           }
                           for episode in episodes
                           for c in episode.get("candidates", [])
@@ -187,14 +194,15 @@ jobs:
           pathlib.Path("out/summary/summary.json").write_text(
               json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
           )
-          lines = ["# DAI platform matrix", "", "| Platform | Feed | Episodes | Repeated | Inserted | Failed | Top |",
-                   "|---|---|---:|---:|---:|---:|---|"]
+          lines = ["# DAI platform matrix", "", "| Platform | Feed | Episodes | Repeated | Inserted | Slot-confirmed | Failed | Top |",
+                   "|---|---|---:|---:|---:|---:|---:|---|"]
           for entry in feeds:
               top = entry.get("top", [{}])[0] if entry.get("top") else {}
               top_text = f"{top.get('start')}–{top.get('end')} ({top.get('tier')}, {top.get('score')})" if top else "-"
               lines.append(
                   f"| {entry.get('platform')} | {entry.get('feed')} | {entry.get('episodes', 0)} | "
-                  f"{entry.get('repeated', 0)} | {entry.get('inserted', 0)} | {entry.get('failed', 0)} | {top_text} |"
+                  f"{entry.get('repeated', 0)} | {entry.get('inserted', 0)} | {entry.get('inserted_slot', 0)} | "
+                  f"{entry.get('failed', 0)} | {top_text} |"
               )
           pathlib.Path("out/summary/summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
           PY
