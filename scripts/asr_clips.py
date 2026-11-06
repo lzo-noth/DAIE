@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from pathlib import Path
+
+import numpy as np
 
 AD_TERMS = [
     "sponsored by",
@@ -45,6 +48,32 @@ def ad_terms(text: str) -> list[str]:
     return sorted({term for term in AD_TERMS if term in lowered})
 
 
+def load_audio(path: Path) -> np.ndarray:
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-i",
+            str(path),
+            "-f",
+            "s16le",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-",
+        ],
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode("utf-8", "replace")[-200:])
+    return np.frombuffer(result.stdout, dtype="<i2").astype(np.float32) / 32768.0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--report", required=True, type=Path)
@@ -69,14 +98,19 @@ def main() -> int:
             clip_path = args.clips_dir / clip_name
             if not clip_path.exists():
                 continue
-            segments, _ = model.transcribe(
-                str(clip_path),
-                language=args.language,
-                beam_size=1,
-                condition_on_previous_text=False,
-                vad_filter=False,
-            )
-            text = " ".join(segment.text.strip() for segment in segments).strip()
+            try:
+                audio = load_audio(clip_path)
+                segments, _ = model.transcribe(
+                    audio,
+                    language=args.language,
+                    beam_size=1,
+                    condition_on_previous_text=False,
+                    vad_filter=False,
+                )
+                text = " ".join(segment.text.strip() for segment in segments).strip()
+            except Exception as exc:  # noqa: BLE001 - one bad clip must not fail the feed
+                evidence["asr_error"] = f"{type(exc).__name__}: {exc}"[:300]
+                continue
             terms = ad_terms(text)
             evidence["asr_text"] = text[:400]
             evidence["ad_terms"] = terms
