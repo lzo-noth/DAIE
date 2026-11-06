@@ -19,6 +19,10 @@ on:
         description: "只跑名称包含该子串的平台（可选）"
         required: false
         default: ""
+      feed:
+        description: "只跑名称或 slug 包含该子串的 feed（可选）"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -50,16 +54,21 @@ jobs:
       - id: matrix
         env:
           PLATFORM_FILTER: ${{ inputs.platform }}
+          FEED_FILTER: ${{ inputs.feed }}
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
           data = json.load(open("platforms.json", encoding="utf-8"))
           needle = (os.environ.get("PLATFORM_FILTER") or "").strip().lower()
+          feed_needle = (os.environ.get("FEED_FILTER") or "").strip().lower()
           entries = []
           for platform in data:
               if needle and needle not in (platform.get("platform") or "").lower():
                   continue
               for feed in platform.get("feeds", []):
+                  haystack = f"{feed.get('slug', '')} {feed.get('name', '')}".lower()
+                  if feed_needle and feed_needle not in haystack:
+                      continue
                   entries.append({
                       "platform": platform["platform"],
                       "feed": feed["name"],
