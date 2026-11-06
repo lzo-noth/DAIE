@@ -42,7 +42,7 @@ jobs:
           key: dai-py312-whisper-base-en-v1
       - name: Prepare ASR dependencies and model
         run: |
-          python -m pip install --quiet numpy faster-whisper
+          python -m pip install --quiet numpy faster-whisper openai
           python - <<'PY'
           from faster_whisper import WhisperModel
           WhisperModel("base.en", device="cpu", compute_type="int8")
@@ -116,12 +116,14 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y ffmpeg
           fi
-          python -m pip install --quiet numpy faster-whisper
+          python -m pip install --quiet numpy faster-whisper openai
       - name: Analyze ${{ matrix.platform }} / ${{ matrix.feed }}
         env:
           EPISODES: ${{ inputs.episodes }}
           MIN_SCORE: ${{ inputs.min_score }}
           MIN_RUN: ${{ inputs.min_run }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           mkdir -p "out/${{ matrix.slug }}"
           set -o pipefail
@@ -138,6 +140,11 @@ jobs:
             --clips-dir "out/${{ matrix.slug }}/clips" \
             --model base.en \
             --language en
+          if [ -n "$GEMINI_API_KEY" ] || [ -n "$OPENAI_API_KEY" ]; then
+            python scripts/classify_ads.py --report "out/${{ matrix.slug }}/report.json"
+          else
+            echo "No GEMINI_API_KEY/OPENAI_API_KEY secret; skipping LLM ad classification"
+          fi
       - name: Upload result
         if: always()
         uses: actions/upload-artifact@v4
@@ -199,6 +206,9 @@ jobs:
                           1 for c in candidates
                           if c.get("tier") == "inserted" and c.get("evidence", {}).get("slot_matches")
                       ),
+                      "llm_ads": sum(
+                          1 for c in candidates if c.get("evidence", {}).get("llm_verified")
+                      ),
                       "ad_language": sum(
                           1 for c in candidates if c.get("evidence", {}).get("ad_language")
                       ),
@@ -213,6 +223,8 @@ jobs:
                               "clip": c.get("evidence", {}).get("clip"),
                               "ad_language": c.get("evidence", {}).get("ad_language"),
                               "ad_terms": c.get("evidence", {}).get("ad_terms"),
+                              "llm_verified": c.get("evidence", {}).get("llm_verified"),
+                              "llm_brand": (c.get("evidence", {}).get("llm") or {}).get("brand"),
                           }
                           for episode in episodes
                           for c in episode.get("candidates", [])
@@ -229,15 +241,15 @@ jobs:
           pathlib.Path("out/summary/summary.json").write_text(
               json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
           )
-          lines = ["# DAI platform matrix", "", "| Platform | Feed | Episodes | Repeated | Inserted | Slot-confirmed | Ad-language | Failed | Top |",
-                   "|---|---|---:|---:|---:|---:|---:|---:|---|"]
+          lines = ["# DAI platform matrix", "", "| Platform | Feed | Episodes | Repeated | Inserted | Slot-confirmed | Ad-language | LLM ads | Failed | Top |",
+                   "|---|---|---:|---:|---:|---:|---:|---:|---:|---|"]
           for entry in feeds:
               top = entry.get("top", [{}])[0] if entry.get("top") else {}
               top_text = f"{top.get('start')}–{top.get('end')} ({top.get('tier')}, {top.get('score')})" if top else "-"
               lines.append(
                   f"| {entry.get('platform')} | {entry.get('feed')} | {entry.get('episodes', 0)} | "
                   f"{entry.get('repeated', 0)} | {entry.get('inserted', 0)} | {entry.get('inserted_slot', 0)} | "
-                  f"{entry.get('ad_language', 0)} | {entry.get('failed', 0)} | {top_text} |"
+                  f"{entry.get('ad_language', 0)} | {entry.get('llm_ads', 0)} | {entry.get('failed', 0)} | {top_text} |"
               )
           pathlib.Path("out/summary/summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
           PY

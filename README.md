@@ -70,10 +70,12 @@ python -m dai_detect verify platforms.json --report feed_verification.json
 - `start_s` / `end_s`：广告区间（秒）；`start` / `end`：时钟格式
 - `score`：0–1，跨集重复候选通常 ≥ 0.7
 - `tier`：`repeated`（跨集指纹命中）或 `inserted`（拼接边界 + 广告先验）
-- `evidence`：边界强度/类型、音色变化、音乐性、响度偏差、位置先验、匹配票数；Actions 里还会附 `slot_matches`、`clip`、`asr_text`、`ad_language`
+- `evidence`：边界强度/类型、音色变化、音乐性、响度偏差、位置先验、匹配票数；Actions 里还会附 `slot_matches`、`clip`、`asr_text`、`ad_language`、`llm`/`llm_verified`
 - `matches`：匹配到的其他剧集与时间区间
 
 `inserted` 只覆盖预录音频插入的广告；主播口播广告不会被刻意检出。跨集广告位一致（`slot_matches`）用于识别“同一广告位、不同 creative”。
+
+Actions 配置了 `GEMINI_API_KEY`（或 `OPENAI_API_KEY`）后，会对候选 ASR 文本做 LLM 分类：第三方广告加权并标记 `llm_verified`，正片、自宣和主播口播默认从报告中移除。未配置 key 时只保留重复指纹、slot 和关键词证据。
 
 ## GitHub Actions
 
@@ -85,7 +87,9 @@ python -m dai_detect verify platforms.json --report feed_verification.json
   - `dai-<slug>`：单个 feed 的 `report.json`、`run.log` 和候选 10 秒试听片段 `clips/*.mp3`
   - `dai-matrix-summary`：所有平台的汇总 JSON / Markdown（含 slot-confirmed、ASR ad-language 计数）
 
-矩阵任务会在候选片段上跑 `faster-whisper`（`base.en`），把“sponsored by / use code / 优惠码”等话术写入 `evidence.asr_text` 与 `evidence.ad_language`，用于区分插入广告和普通内容。
+矩阵任务会在候选片段上跑 `faster-whisper`（`base.en`），把“sponsored by / use code / 优惠码”等话术写入 `evidence.asr_text` 与 `evidence.ad_language`；若配置了 `GEMINI_API_KEY` 或 `OPENAI_API_KEY`，再用 `scripts/classify_ads.py` 调用 LLM 做广告/正片分类，默认丢弃被判定为正片、自宣或主播口播的插入候选。
+
+启用 LLM：GitHub 仓库 Settings → Secrets and variables → Actions → New repository secret，添加 `GEMINI_API_KEY`（默认使用 Gemini 的 OpenAI 兼容端点与 `gemini-2.5-flash`，可用 `GEMINI_MODEL` 覆盖）。没有 key 时矩阵照常运行，只是不做 LLM 分类。
 
 用法：Actions → platforms → Run workflow，可填 `platform` 只跑某个平台。所有联网验证都在 runner 上完成；本机网络结果不作数。
 
@@ -98,6 +102,7 @@ python -m dai_detect verify platforms.json --report feed_verification.json
 - 共享片头/片尾/主题音乐会被标为重复，报告里需结合位置与时长判断。
 - 同一广告在不同请求间可能被替换，`--fresh` 才能拿到当前版本；缓存的是特征，不是音频。
 - 平台/地区定向会改变广告内容：Actions runner 在美国，拿到的是美国定向广告。
+- LLM 分类依赖 ASR 文本质量，可能把品牌型广告误判成正片；`clips/*.mp3` 仍保留，供人工复核。LLM 调用会产生少量 API 费用。
 - 目前只做离线分析；实时跳过需要把特征/匹配器接入播放链路并维护滚动索引。
 
 ## 术语
