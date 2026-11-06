@@ -41,29 +41,7 @@ BASE_TERMS = [
     "广告",
 ]
 
-STOPWORDS = {
-    "the", "and", "for", "that", "with", "this", "you", "your", "have", "from",
-    "are", "was", "were", "will", "can", "just", "like", "about", "there",
-    "they", "what", "when", "where", "which", "who", "how", "not", "but", "all",
-    "our", "out", "one", "two", "get", "got", "now", "new", "more", "most",
-    "some", "any", "its", "it's", "i'm", "don't", "didn't", "doesn't", "isn't",
-    "yeah", "okay", "right", "well", "really", "actually", "going", "gonna",
-}
-
 TOKEN_RE = re.compile(r"[a-z][a-z0-9.+'\-]{2,}")
-
-
-def _tokens(text: str) -> set[str]:
-    words = TOKEN_RE.findall(text.lower())
-    words = [word.strip(".'-") for word in words]
-    words = [word for word in words if word and word not in STOPWORDS]
-    phrases = set(words)
-    for size in (2, 3):
-        for index in range(len(words) - size + 1):
-            phrase = " ".join(words[index:index + size])
-            if all(word not in STOPWORDS for word in words[index:index + size]):
-                phrases.add(phrase)
-    return phrases
 
 
 GENERIC_BRAND_WORDS = {
@@ -87,8 +65,10 @@ def _brands(text: str) -> set[str]:
     brands = set()
     for piece in pieces:
         cleaned = " ".join(TOKEN_RE.findall(piece)).strip()
-        if len(cleaned) >= 3:
-            brands.add(cleaned)
+        if not cleaned or len(cleaned) > 40 or len(cleaned.split()) > 4:
+            continue
+        brands.add(cleaned)
+        if len(cleaned.split()) <= 2:
             brands.update(
                 word
                 for word in cleaned.split()
@@ -116,40 +96,22 @@ def load_rows(path: Path) -> list[dict]:
     return rows
 
 
-def mine(rows: list[dict], existing: dict, max_terms: int = 240) -> dict:
+def mine(rows: list[dict], existing: dict, max_terms: int = 120) -> dict:
     ads = [row for row in rows if row.get("is_ad")]
     non_ads = [row for row in rows if not row.get("is_ad")]
-    ad_counts: dict[str, int] = {}
-    non_counts: dict[str, int] = {}
-    for row in ads:
-        for term in _tokens(str(row.get("asr_text") or "")):
-            ad_counts[term] = ad_counts.get(term, 0) + 1
-        for term in (row.get("ad_terms") or []):
-            ad_counts[str(term).lower()] = ad_counts.get(str(term).lower(), 0) + 1
-    for row in non_ads:
-        for term in _tokens(str(row.get("asr_text") or "")):
-            non_counts[term] = non_counts.get(term, 0) + 1
-
-    discovered: dict[str, float] = {}
-    for term, count in ad_counts.items():
-        if len(term) < 4 or term in STOPWORDS:
-            continue
-        non_count = non_counts.get(term, 0)
-        odds = (count + 1) / (non_count + 1)
-        if count >= 2 and odds >= 3.0:
-            discovered[term] = odds
     brands: set[str] = set()
     for row in ads:
         llm = row.get("llm") or {}
         brands.update(_brands(str(llm.get("brand") or "")))
-        brands.update(_brands(str(row.get("asr_text") or "")) if row.get("ad_language") else set())
-    existing_terms = [str(term) for term in existing.get("terms") or []]
-    existing_brands = [str(term) for term in existing.get("brands") or []]
-
-    ranked = sorted(discovered.items(), key=lambda item: (-item[1], item[0]))
-    terms = list(dict.fromkeys([*BASE_TERMS, *existing_terms, *[term for term, _ in ranked], *sorted(brands)]))
+        for term in (row.get("ad_terms") or []):
+            cleaned = str(term).lower().strip()
+            if cleaned in BASE_TERMS:
+                brands.add(cleaned)
+    # Only the LLM brand field and curated ad phrases are used as learned
+    # keywords. Mining arbitrary n-grams from transcripts produced too many
+    # false positives ("that's", "everything") in the first rounds.
+    terms = list(dict.fromkeys([*BASE_TERMS, *sorted(brands)]))
     terms = [term for term in terms if len(term) >= 3 and term not in GENERIC_BRAND_WORDS][:max_terms]
-    all_brands = sorted(set(existing_brands) | brands)
     return {
         "version": 1,
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -157,8 +119,8 @@ def mine(rows: list[dict], existing: dict, max_terms: int = 240) -> dict:
         "ads": len(ads),
         "non_ads": len(non_ads),
         "terms": terms,
-        "brands": all_brands,
-        "discovered": {term: round(odds, 2) for term, odds in ranked[:120]},
+        "brands": sorted(brands),
+        "discovered": {},
     }
 
 

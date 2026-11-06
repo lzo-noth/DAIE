@@ -4,7 +4,10 @@
   "max_rounds": 10,
   "complete": false,
   "stopped": false,
-  "updated_at": "2026-11-06T13:56:16+00:00",
+  "stop_reason": "",
+  "stale_rounds": 1,
+  "patience": 2,
+  "updated_at": "2026-11-06T14:00:52+00:00",
   "targets": {
     "precision": 0.3,
     "recall": 0.8,
@@ -39,18 +42,18 @@
       "WTF with Marc Maron Podcast"
     ],
     "episode_hours": 26.38,
-    "threshold": 0.16,
+    "threshold": 0.23,
     "top_k": 0,
     "learned": {
-      "precision": 0.073,
-      "recall": 0.923,
-      "f1": 0.136,
+      "precision": 0.076,
+      "recall": 0.808,
+      "f1": 0.138,
       "auc": 0.783
     },
     "baseline": {
-      "precision": 0.05,
-      "recall": 0.923,
-      "f1": 0.094,
+      "precision": 0.058,
+      "recall": 0.808,
+      "f1": 0.109,
       "auc": 0.669
     },
     "recall_at": {
@@ -82,13 +85,13 @@
       "40": 0.044
     },
     "keyword": {
-      "terms": 221,
+      "terms": 42,
       "texts": 270,
-      "hits": 75,
-      "precision": 0.133,
-      "recall": 0.385
+      "hits": 27,
+      "precision": 0.296,
+      "recall": 0.308
     },
-    "fp_per_hour": 11.52,
+    "fp_per_hour": 9.74,
     "targets": {
       "precision": 0.3,
       "recall": 0.8,
@@ -96,5 +99,16 @@
       "fp_per_hour": 5.0
     },
     "target_met": false
+  },
+  "active_calibration": {
+    "enabled": true,
+    "mode": "filter",
+    "learned": {
+      "precision": 0.108,
+      "recall": 0.909,
+      "f1": 0.193,
+      "auc": 0.837
+    },
+    "fp_per_hour": 6.26
   }
 }

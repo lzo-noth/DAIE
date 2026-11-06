@@ -477,6 +477,34 @@ jobs:
             --target-auc "$TARGET_AUC" \
             --target-fp-per-hour "$TARGET_FP_PER_HOUR" \
             --metrics-out out/learn/metrics.json || true
+      - name: Keep previous calibration if not improved
+        run: |
+          if [ ! -f calibration.json ]; then
+            exit 0
+          fi
+          ENABLED=$(python -c "import json; print(json.load(open('calibration.json')).get('enabled'))")
+          IMPROVED=$(python - <<'PY'
+          import json, subprocess
+          try:
+              new = json.load(open("out/learn/metrics.json", encoding="utf-8"))
+              old = json.loads(subprocess.check_output(["git", "show", "HEAD:calibration.json"]).decode("utf-8"))
+          except Exception:
+              print("yes")
+              raise SystemExit
+          new_learned = new.get("learned") or {}
+          old_learned = ((old.get("metrics") or {}).get("learned")) or {}
+          new_auc = float(new_learned.get("auc") or 0.0)
+          new_precision = float(new_learned.get("precision") or 0.0)
+          old_auc = float(old_learned.get("auc") or 0.0)
+          old_precision = float(old_learned.get("precision") or 0.0)
+          ok = new_auc >= old_auc - 0.005 and new_precision >= old_precision - 0.02
+          print("yes" if ok else "no")
+          PY
+          )
+          if [ "$ENABLED" != "True" ] || [ "$IMPROVED" != "yes" ]; then
+            git checkout -- calibration.json || true
+            echo "kept previous calibration (new model did not improve AUC/precision)"
+          fi
       - name: Update loop state
         run: |
           TARGET_PRECISION="${TARGET_PRECISION:-0.3}"
@@ -486,22 +514,15 @@ jobs:
           python scripts/update_loop_state.py \
             --metrics out/learn/metrics.json \
             --state feedback/state.json \
+            --calibration calibration.json \
             --round "${ROUND:-1}" \
             --max-rounds "${MAX_ROUNDS:-10}" \
             --target-precision "$TARGET_PRECISION" \
             --target-recall "$TARGET_RECALL" \
             --target-auc "$TARGET_AUC" \
-            --target-fp-per-hour "$TARGET_FP_PER_HOUR" || true
+            --target-fp-per-hour "$TARGET_FP_PER_HOUR" \
+            --patience 2 || true
           cat feedback/state.json 2>/dev/null || true
-      - name: Keep previous calibration if not improved
-        run: |
-          if [ -f calibration.json ]; then
-            ENABLED=$(python -c "import json; print(json.load(open('calibration.json')).get('enabled'))")
-            if [ "$ENABLED" != "True" ]; then
-              git checkout -- calibration.json || true
-              echo "new calibration was not better than the heuristic baseline; keeping previous"
-            fi
-          fi
       - name: Commit feedback and calibration
         run: |
           git config user.name "dai-loop"
