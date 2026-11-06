@@ -86,7 +86,8 @@ jobs:
           retention-days: 30
 
   blind-test:
-    if: github.event_name == 'workflow_dispatch'
+    needs: [train]
+    if: always() && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -99,22 +100,41 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
           python -m pip install --quiet numpy
+      - name: Download models trained in this run
+        if: inputs.annotations_path != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: dai-models-${{ github.run_number }}
+          path: out/trained
+      - name: Resolve model paths
+        id: models
+        run: |
+          mkdir -p out
+          if [ -f out/trained/ad_segment_model.json ]; then
+            echo "segment=out/trained/ad_segment_model.json" >> "$GITHUB_OUTPUT"
+            echo "boundary=out/trained/boundary_model.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "segment=${{ inputs.model_path }}" >> "$GITHUB_OUTPUT"
+            echo "boundary=models/boundary_model.json" >> "$GITHUB_OUTPUT"
+          fi
       - name: Archive the exact audio variant
         env:
           AUDIO: ${{ inputs.audio_url }}
           FEED: ${{ inputs.feed }}
           EPISODE: ${{ inputs.episode }}
         run: |
-          mkdir -p out
           python scripts/snapshot_audio.py --source "$AUDIO" \
             --feed "$FEED" --episode "$EPISODE" \
             --out-dir out/snapshots --manifest out/audio_manifest.jsonl
       - name: Blind detection on the snapshot
         env:
-          MODEL: ${{ inputs.model_path }}
+          MODEL: ${{ steps.models.outputs.segment }}
+          BOUNDARY: ${{ steps.models.outputs.boundary }}
         run: |
           SNAP=$(python -c "import json;print(json.loads(open('out/audio_manifest.jsonl').readline())['audio'])")
-          python scripts/blind_test.py --audio "$SNAP" --model "$MODEL" --out out/timeline.json
+          python scripts/blind_test.py --audio "$SNAP" --model "$MODEL" \
+            --boundary-model "$BOUNDARY" --out out/timeline.json
       - name: Download ground truth after detection
         if: inputs.ground_truth_url != ''
         env:
@@ -123,10 +143,12 @@ jobs:
       - name: Score against ground truth
         if: inputs.ground_truth_url != ''
         env:
-          MODEL: ${{ inputs.model_path }}
+          MODEL: ${{ steps.models.outputs.segment }}
+          BOUNDARY: ${{ steps.models.outputs.boundary }}
         run: |
           SNAP=$(python -c "import json;print(json.loads(open('out/audio_manifest.jsonl').readline())['audio'])")
           python scripts/blind_test.py --audio "$SNAP" --model "$MODEL" \
+            --boundary-model "$BOUNDARY" \
             --ground-truth out/ground_truth.json \
             --out out/timeline.json --metrics out/metrics.json
       - uses: actions/upload-artifact@v4
@@ -137,6 +159,7 @@ jobs:
             out/timeline.json
             out/metrics.json
             out/audio_manifest.jsonl
+            out/snapshots/
           if-no-files-found: warn
           retention-days: 30
 

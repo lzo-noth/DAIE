@@ -166,6 +166,8 @@ def analyze_single(
         "model": {
             "classifier": kind,
             "source": getattr(model, "source", ""),
+            "version": getattr(model, "model_version", ""),
+            "data_version": getattr(model, "data_version", ""),
             "threshold": threshold,
             "enter_threshold": round(enter, 3),
             "exit_threshold": round(exit_threshold, 3),

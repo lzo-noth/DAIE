@@ -16,8 +16,23 @@ import numpy as np
 
 WINDOW_HOP_S = 0.5
 WINDOW_SPAN_S = 1.0
+CONTEXT_SPANS_S = (2.0, 4.0)
 
 _BAND_NAMES = [f"band_{index:02d}" for index in range(16)]
+_CONTEXT_NAMES = [
+    f"ctx{int(span)}_{name}"
+    for span in CONTEXT_SPANS_S
+    for name in (
+        "loud_dev",
+        "musicness",
+        "hf_dev",
+        "corr_dev",
+        "width_dev",
+        "floor_dev",
+        "band_dist",
+        "entropy",
+    )
+]
 WINDOW_FEATURES: list[str] = [
     "loud_mean",
     "loud_std",
@@ -65,6 +80,7 @@ WINDOW_FEATURES: list[str] = [
     "d_width_next",
     "d_entropy_prev",
     "d_entropy_next",
+    *_CONTEXT_NAMES,
 ]
 
 
@@ -175,6 +191,38 @@ def build_windows(
         flat_median = float(np.median(window_flat))
         musicness = float(np.clip((flat_base - flat_median) / flat_base, 0.0, 1.0))
 
+        context_values: list[float] = []
+        center = start + span / 2.0
+        for context_span in CONTEXT_SPANS_S:
+            effective = min(float(context_span), duration)
+            c_start = max(0.0, center - effective / 2.0)
+            c_end = min(duration, center + effective / 2.0)
+            cm0 = int(np.clip(round(c_start / grid_m), 0, max(mono_frame_count - 1, 0)))
+            cm1 = int(np.clip(round(c_end / grid_m), cm0 + 1, mono_frame_count))
+            cf0 = int(np.clip(round(c_start / grid_f), 0, max(forensic_frame_count - 1, 0)))
+            cf1 = int(np.clip(round(c_end / grid_f), cf0 + 1, forensic_frame_count))
+            ctx_loud = loud[cm0:cm1]
+            ctx_flat = flat[cm0:cm1]
+            ctx_hf = hf[cf0:cf1]
+            ctx_corr = corr[cf0:cf1]
+            ctx_width = width[cf0:cf1]
+            ctx_entropy = entropy[cf0:cf1]
+            ctx_bands = bands[cf0:cf1]
+            ctx_flat_median = float(np.median(ctx_flat)) if ctx_flat.size else flat_base
+            ctx_band_median = np.median(ctx_bands, axis=0) if ctx_bands.size else band_base
+            context_values.extend(
+                [
+                    float(ctx_loud.mean()) - loud_base if ctx_loud.size else 0.0,
+                    float(np.clip((flat_base - ctx_flat_median) / flat_base, 0.0, 1.0)),
+                    float(ctx_hf.mean()) - hf_base if ctx_hf.size else 0.0,
+                    float(ctx_corr.mean()) - corr_base if ctx_corr.size else 0.0,
+                    float(ctx_width.mean()) - width_base if ctx_width.size else 0.0,
+                    _percentile(ctx_loud, 10) - floor_base if ctx_loud.size else 0.0,
+                    float(np.sqrt(np.mean((ctx_band_median - band_base) ** 2))) if ctx_bands.size else 0.0,
+                    float(ctx_entropy.mean()) - entropy_base if ctx_entropy.size else 0.0,
+                ]
+            )
+
         row = [
             loud_mean,
             float(window_loud.std()),
@@ -207,6 +255,7 @@ def build_windows(
             *[float(value) for value in band_median[:band_count]],
             *[0.0] * (len(_BAND_NAMES) - band_count),
             *[0.0] * 10,  # local deltas, filled below
+            *context_values,
         ]
         matrix[index] = np.nan_to_num(np.asarray(row, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
 

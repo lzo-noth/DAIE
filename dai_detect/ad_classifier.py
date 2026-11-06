@@ -36,6 +36,9 @@ class AdModel:
     threshold: float = 0.5
     kind: str = "logistic"
     source: str = ""
+    model_version: str = ""
+    data_version: str = ""
+    git_commit: str = ""
 
     @classmethod
     def load(cls, path: Optional[str | Path] = None) -> Optional["AdModel"]:
@@ -57,6 +60,9 @@ class AdModel:
                 threshold=float(payload.get("threshold", 0.5)),
                 kind=str(payload.get("kind", "logistic")),
                 source=str(target),
+                model_version=str(payload.get("model_version", "")),
+                data_version=str(payload.get("data_version", "")),
+                git_commit=str(payload.get("git_commit", "")),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -79,6 +85,8 @@ class HeuristicAdModel:
     kind = "heuristic"
     source = ""
     threshold = 0.5
+    model_version = "heuristic"
+    data_version = ""
     features = list(WINDOW_FEATURES)
 
     def predict(self, features: np.ndarray, names: list[str]) -> np.ndarray:

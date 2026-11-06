@@ -4,6 +4,7 @@ import unittest
 
 import numpy as np
 
+from dai_detect.boundary_model import BOUNDARY_FEATURES
 from dai_detect.single_features import WINDOW_FEATURES
 from scripts.blind_test import _identity_checks
 from scripts.train_single_episode import (
@@ -51,6 +52,7 @@ class EventEvaluationAlignmentTest(unittest.TestCase):
             duration_s=10.0,
             change_scores=np.zeros(count),
             change_grid_s=0.01,
+            boundary_features=np.zeros((count, len(BOUNDARY_FEATURES)), dtype=np.float16),
         )
 
     def test_rejects_probabilities_shorter_than_full_timeline(self) -> None:

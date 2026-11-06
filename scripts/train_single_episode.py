@@ -22,8 +22,10 @@ detection time.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -60,6 +62,7 @@ class EpisodeSample:
     duration_s: float
     change_scores: np.ndarray
     change_grid_s: float
+    boundary_features: np.ndarray
 
 
 def _load_annotations(path: Path) -> list[dict]:
@@ -87,35 +90,68 @@ def _resolve_audio(value: str, base: Path) -> str:
     return str(candidate)
 
 
-def _sample_boundaries(change: dict, ads: list[dict], seed: int) -> tuple[np.ndarray, np.ndarray]:
-    features = np.asarray(change.get("features", np.zeros((0, len(BOUNDARY_FEATURES)))))
-    times = np.asarray(change.get("times", []))
-    if len(times) == 0 or len(features) == 0:
-        return np.zeros((0, len(BOUNDARY_FEATURES)), dtype=np.float32), np.zeros(0)
-    rng = np.random.default_rng(seed)
-    half = 0.30
-    positives: list[int] = []
-    edges: list[float] = []
-    for ad in ads:
-        edges.extend([float(ad["start_s"]), float(ad["end_s"])])
+def _positive_frames(times: np.ndarray, edges: list[float], half: float = 0.30) -> list[int]:
+    indices: list[int] = []
     for edge in edges:
         low = int(np.searchsorted(times, edge - half, side="left"))
         high = int(np.searchsorted(times, edge + half, side="right"))
-        positives.extend(range(low, high))
-    positives = sorted({index for index in positives if 0 <= index < len(times)})
-    wanted = max(1, min(len(times), len(positives) * 10))
-    candidates: list[int] = []
+        indices.extend(range(low, high))
+    return sorted({index for index in indices if 0 <= index < len(times)})
+
+
+def _sample_boundary_heads(
+    change: dict,
+    ads: list[dict],
+    seed: int,
+    negative_ratio: int = 5,
+) -> dict:
+    """Return separate onset/offset training matrices and labels."""
+    features = np.asarray(change.get("features", np.zeros((0, len(BOUNDARY_FEATURES)))))
+    times = np.asarray(change.get("times", []))
+    empty = {
+        "onset_X": np.zeros((0, len(BOUNDARY_FEATURES)), dtype=np.float32),
+        "onset_y": np.zeros(0),
+        "offset_X": np.zeros((0, len(BOUNDARY_FEATURES)), dtype=np.float32),
+        "offset_y": np.zeros(0),
+    }
+    if len(times) == 0 or len(features) == 0 or not ads:
+        return empty
+    starts = [float(ad["start_s"]) for ad in ads]
+    ends = [float(ad["end_s"]) for ad in ads]
+    edges = starts + ends
+    onset_positive = _positive_frames(times, starts)
+    offset_positive = _positive_frames(times, ends)
+
+    rng = np.random.default_rng(seed)
+    wanted = min(
+        len(times),
+        max(1, max(len(onset_positive), len(offset_positive)) * negative_ratio),
+    )
+    negatives: list[int] = []
     attempts = 0
-    while len(candidates) < wanted and attempts < wanted * 30:
+    while len(negatives) < wanted and attempts < wanted * 30:
         attempts += 1
         index = int(rng.integers(0, len(times)))
         nearest = min((abs(float(times[index]) - edge) for edge in edges), default=1e9)
         if nearest >= 5.0:
-            candidates.append(index)
-    negatives = sorted(set(candidates))
-    X = np.vstack([features[positives], features[negatives]]).astype(np.float32)
-    y = np.concatenate([np.ones(len(positives)), np.zeros(len(negatives))])
-    return X, y
+            negatives.append(index)
+    negatives = sorted(set(negatives))
+
+    def _build(positives: list[int]) -> tuple[np.ndarray, np.ndarray]:
+        if not positives:
+            return empty["onset_X"], empty["onset_y"]
+        X = np.vstack([features[positives], features[negatives]]).astype(np.float32)
+        y = np.concatenate([np.ones(len(positives)), np.zeros(len(negatives))])
+        return X, y
+
+    onset_X, onset_y = _build(onset_positive)
+    offset_X, offset_y = _build(offset_positive)
+    return {
+        "onset_X": onset_X,
+        "onset_y": onset_y,
+        "offset_X": offset_X,
+        "offset_y": offset_y,
+    }
 
 
 def _weak_labels(windows: dict, labels: list[dict]) -> tuple[np.ndarray, np.ndarray]:
@@ -272,12 +308,36 @@ def _group_folds(groups: list[str]) -> list[list[int]]:
     ]
 
 
+def _gather_boundary(
+    matrices: list[np.ndarray],
+    labels: list[np.ndarray],
+    episode_indices: list[int],
+    allowed: set[int],
+) -> tuple[np.ndarray, np.ndarray]:
+    if not matrices:
+        return np.zeros((0, len(BOUNDARY_FEATURES)), dtype=np.float32), np.zeros(0)
+    chosen_X = [
+        matrix
+        for matrix, episode in zip(matrices, episode_indices)
+        if episode in allowed and len(matrix)
+    ]
+    chosen_y = [
+        values
+        for values, episode in zip(labels, episode_indices)
+        if episode in allowed and len(values)
+    ]
+    if not chosen_X:
+        return np.zeros((0, len(BOUNDARY_FEATURES)), dtype=np.float32), np.zeros(0)
+    return np.vstack(chosen_X).astype(np.float32), np.concatenate(chosen_y)
+
+
 def _event_metrics(
     samples: list[EpisodeSample],
     indices: list[int],
     probabilities: dict[int, np.ndarray],
     threshold: float,
     refine: bool = True,
+    boundary_heads: Optional[dict[int, tuple[dict, dict, float, float]]] = None,
 ) -> dict:
     predictions: list[dict] = []
     ground_truth: list[dict] = []
@@ -303,11 +363,26 @@ def _event_metrics(
             exit_threshold=max(0.15, threshold - 0.15),
         )
         if refine:
-            change = {
-                "times": np.arange(len(sample.change_scores)) * sample.change_grid_s,
-                "scores": sample.change_scores,
-                "kind": "heuristic",
-            }
+            if boundary_heads and index in boundary_heads:
+                onset_head, offset_head, onset_threshold, offset_threshold = boundary_heads[index]
+                features = sample.boundary_features.astype(np.float32)
+                onset_scores = _predict(onset_head, features)
+                offset_scores = _predict(offset_head, features)
+                change = {
+                    "times": np.arange(len(features)) * sample.change_grid_s,
+                    "onset_scores": onset_scores,
+                    "offset_scores": offset_scores,
+                    "scores": np.maximum(onset_scores, offset_scores),
+                    "kind": "learned_onset_offset",
+                    "onset_threshold": onset_threshold,
+                    "offset_threshold": offset_threshold,
+                }
+            else:
+                change = {
+                    "times": np.arange(len(sample.change_scores)) * sample.change_grid_s,
+                    "scores": sample.change_scores,
+                    "kind": "heuristic",
+                }
             refined = refine_events(events, change, search_s=2.5, min_duration=6.0)
         else:
             refined = [
@@ -392,9 +467,12 @@ def main() -> int:
         entries = entries[: args.max_episodes]
 
     samples: list[EpisodeSample] = []
-    boundary_X: list[np.ndarray] = []
-    boundary_y: list[np.ndarray] = []
+    boundary_onset_X: list[np.ndarray] = []
+    boundary_onset_y: list[np.ndarray] = []
+    boundary_offset_X: list[np.ndarray] = []
+    boundary_offset_y: list[np.ndarray] = []
     boundary_groups: list[str] = []
+    boundary_episode_indices: list[int] = []
     audio_index = 0
     for entry in entries:
         audio = _resolve_audio(str(entry["audio"]), base)
@@ -431,12 +509,16 @@ def main() -> int:
             continue
         change = boundary_change_matrix(mono, forensic)
         scores = heuristic_boundary_scores(change["features"])
-        if not weak_mode and not args.skip_boundary:
-            X, y = _sample_boundaries(change, ads or [], seed=audio_index + 7)
-            if len(y):
-                boundary_X.append(X)
-                boundary_y.append(y)
+        if not weak_mode and not args.skip_boundary and ads:
+            heads = _sample_boundary_heads(change, ads, seed=audio_index + 7)
+            if len(heads["onset_y"]) or len(heads["offset_y"]):
+                episode_index = len(samples)
+                boundary_onset_X.append(heads["onset_X"])
+                boundary_onset_y.append(heads["onset_y"])
+                boundary_offset_X.append(heads["offset_X"])
+                boundary_offset_y.append(heads["offset_y"])
                 boundary_groups.append(feed)
+                boundary_episode_indices.append(episode_index)
         samples.append(
             EpisodeSample(
                 feed=feed,
@@ -449,6 +531,7 @@ def main() -> int:
                 duration_s=duration,
                 change_scores=scores,
                 change_grid_s=float(change["times"][1] - change["times"][0]) if len(change["times"]) > 1 else 0.01,
+                boundary_features=change["features"].astype(np.float16),
             )
         )
         audio_index += 1
@@ -480,6 +563,11 @@ def main() -> int:
         offset += len(sample.labels)
     oof = np.zeros(len(y_all), dtype=np.float64)
     full_oof: dict[int, np.ndarray] = {}
+    fold_boundary_heads: dict[int, tuple[dict, dict, float, float]] = {}
+    boundary_onset_oof: list[np.ndarray] = []
+    boundary_onset_labels: list[np.ndarray] = []
+    boundary_offset_oof: list[np.ndarray] = []
+    boundary_offset_labels: list[np.ndarray] = []
     for fold_index, held in enumerate(folds):
         held_rows = np.zeros(len(y_all), dtype=bool)
         for index in held:
@@ -492,19 +580,82 @@ def main() -> int:
         # labelled subset is shorter and would misalign the decoder timeline.
         for index in held:
             full_oof[index] = _predict(model, samples[index].windows["features"])
+
+        allowed = {index for index in range(len(samples)) if index not in set(held)}
+        onset_X, onset_y = _gather_boundary(
+            boundary_onset_X, boundary_onset_y, boundary_episode_indices, allowed
+        )
+        offset_X, offset_y = _gather_boundary(
+            boundary_offset_X, boundary_offset_y, boundary_episode_indices, allowed
+        )
+        onset_head = offset_head = None
+        onset_threshold = offset_threshold = 0.5
+        if len(onset_y) and len(np.unique(onset_y)) >= 2:
+            onset_head = _fit_logistic(*_balance(onset_X, onset_y, ratio=6, seed=fold_index + 11))
+            onset_threshold, _ = best_f1_threshold(onset_y, _predict(onset_head, onset_X))
+        if len(offset_y) and len(np.unique(offset_y)) >= 2:
+            offset_head = _fit_logistic(*_balance(offset_X, offset_y, ratio=6, seed=fold_index + 21))
+            offset_threshold, _ = best_f1_threshold(offset_y, _predict(offset_head, offset_X))
+        if onset_head is not None and offset_head is not None:
+            for index in held:
+                if index in boundary_episode_indices:
+                    fold_boundary_heads[index] = (
+                        onset_head,
+                        offset_head,
+                        onset_threshold,
+                        offset_threshold,
+                    )
+            for entry, episode in enumerate(boundary_episode_indices):
+                if episode not in held:
+                    continue
+                if len(boundary_onset_y[entry]) and onset_head is not None:
+                    boundary_onset_oof.append(_predict(onset_head, boundary_onset_X[entry]))
+                    boundary_onset_labels.append(boundary_onset_y[entry])
+                if len(boundary_offset_y[entry]) and offset_head is not None:
+                    boundary_offset_oof.append(_predict(offset_head, boundary_offset_X[entry]))
+                    boundary_offset_labels.append(boundary_offset_y[entry])
         print(f"[fold {fold_index + 1}/{len(folds)}] 训练完成，留出 {len(held)} 集", flush=True)
 
     threshold, window_metrics = best_f1_threshold(y_all, oof)
     window_metrics["auc"] = round(roc_auc(y_all, oof), 4)
     final_model = _fit_logistic(*_balance(X_all, y_all, ratio=4, seed=101))
     event_metrics = _event_metrics(
-        samples, list(range(len(samples))), full_oof, threshold=threshold, refine=True
+        samples,
+        list(range(len(samples))),
+        full_oof,
+        threshold=threshold,
+        refine=True,
+        boundary_heads=fold_boundary_heads,
     )
     fold_reports = []
     for fold_index, held in enumerate(folds):
-        events = _event_metrics(samples, held, full_oof, threshold=threshold, refine=True)
+        events = _event_metrics(
+            samples,
+            held,
+            full_oof,
+            threshold=threshold,
+            refine=True,
+            boundary_heads=fold_boundary_heads,
+        )
         fold_reports.append({"fold": fold_index, "held": held, "events": events})
         print(f"[fold {fold_index + 1}/{len(folds)}] 留出评测: {events}", flush=True)
+
+    trained_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    identity_rows = [
+        {
+            "feed": entry.get("feed"),
+            "episode": entry.get("episode"),
+            "audio": entry.get("audio"),
+            "audio_id": entry.get("audio_id"),
+            "source_sha256": entry.get("source_sha256"),
+            "ads": entry.get("ads"),
+        }
+        for entry in entries
+    ]
+    data_version = hashlib.sha256(
+        json.dumps(identity_rows, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    model_version = f"ad-{trained_at.replace('-', '').replace(':', '').replace('+', '')}-{data_version[:8]}"
 
     payload = {
         "version": 1,
@@ -512,7 +663,10 @@ def main() -> int:
         "features": list(WINDOW_FEATURES),
         **final_model,
         "threshold": round(threshold, 4),
-        "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "model_version": model_version,
+        "data_version": data_version,
+        "git_commit": os.environ.get("GITHUB_SHA", ""),
+        "trained_at": trained_at,
         "metrics": {
             "episodes": len(samples),
             "feeds": len(set(groups)),
@@ -530,55 +684,64 @@ def main() -> int:
     print(f"[model] {args.model_out}")
     print(json.dumps({key: payload["metrics"][key] for key in ("window", "event")}, ensure_ascii=False))
 
-    if not weak_mode and not args.skip_boundary and boundary_X:
-        X_boundary = np.vstack(boundary_X).astype(np.float32)
-        y_boundary = np.concatenate(boundary_y)
-        if len(np.unique(y_boundary)) >= 2:
-            try:
-                boundary_folds = _group_folds(boundary_groups)
-            except ValueError as exc:
-                print(f"[boundary] 跳过: {exc}")
-                boundary_folds = []
-            if not boundary_folds:
-                print("[boundary] 跳过：没有可用的节目分组折")
+    if not weak_mode and not args.skip_boundary and boundary_episode_indices:
+        allowed_all = set(range(len(samples)))
+        onset_X, onset_y = _gather_boundary(
+            boundary_onset_X, boundary_onset_y, boundary_episode_indices, allowed_all
+        )
+        offset_X, offset_y = _gather_boundary(
+            boundary_offset_X, boundary_offset_y, boundary_episode_indices, allowed_all
+        )
+        if (
+            len(onset_y)
+            and len(offset_y)
+            and len(np.unique(onset_y)) >= 2
+            and len(np.unique(offset_y)) >= 2
+        ):
+            onset_metrics: dict = {}
+            offset_metrics: dict = {}
+            if boundary_onset_oof:
+                on_prob = np.concatenate(boundary_onset_oof)
+                on_labels = np.concatenate(boundary_onset_labels)
+                onset_threshold, onset_metrics = best_f1_threshold(on_labels, on_prob)
+                onset_metrics["auc"] = round(roc_auc(on_labels, on_prob), 4)
             else:
-                boundary_oof = np.zeros(len(y_boundary), dtype=np.float64)
-                # Boundary sample order follows episodes, so reuse the episode
-                # group boundaries through per-episode sample counts.
-                counts = [len(y) for y in boundary_y]
-                starts = np.cumsum([0] + counts[:-1])
-                for fold_index, held in enumerate(boundary_folds):
-                    held_rows = np.zeros(len(y_boundary), dtype=bool)
-                    for index in held:
-                        if index < len(starts):
-                            held_rows[starts[index]: starts[index] + counts[index]] = True
-                    train_X, train_y = _balance(
-                        X_boundary[~held_rows], y_boundary[~held_rows], ratio=6, seed=fold_index + 11
-                    )
-                    boundary_model = _fit_logistic(train_X, train_y)
-                    boundary_oof[held_rows] = _predict(boundary_model, X_boundary[held_rows])
-                boundary_threshold, boundary_metrics = best_f1_threshold(y_boundary, boundary_oof)
-                boundary_metrics["auc"] = round(roc_auc(y_boundary, boundary_oof), 4)
-                final_boundary = _fit_logistic(*_balance(X_boundary, y_boundary, ratio=6, seed=707))
-                boundary_payload = {
-                    "version": 1,
-                    "kind": "logistic",
-                    "features": list(BOUNDARY_FEATURES),
-                    **final_boundary,
-                    "threshold": round(boundary_threshold, 4),
-                    "trained_at": payload["trained_at"],
-                    "metrics": {
-                        "samples": int(len(y_boundary)),
-                        "positives": int(y_boundary.sum()),
-                        "frame": boundary_metrics,
-                    },
-                }
-                args.boundary_out.parent.mkdir(parents=True, exist_ok=True)
-                args.boundary_out.write_text(
-                    json.dumps(boundary_payload, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
-                print(f"[boundary] {args.boundary_out}")
-                print(json.dumps(boundary_metrics, ensure_ascii=False))
+                onset_threshold = 0.5
+            if boundary_offset_oof:
+                off_prob = np.concatenate(boundary_offset_oof)
+                off_labels = np.concatenate(boundary_offset_labels)
+                offset_threshold, offset_metrics = best_f1_threshold(off_labels, off_prob)
+                offset_metrics["auc"] = round(roc_auc(off_labels, off_prob), 4)
+            else:
+                offset_threshold = 0.5
+
+            final_onset = _fit_logistic(*_balance(onset_X, onset_y, ratio=6, seed=707))
+            final_offset = _fit_logistic(*_balance(offset_X, offset_y, ratio=6, seed=808))
+            boundary_payload = {
+                "version": 1,
+                "kind": "onset_offset",
+                "features": list(BOUNDARY_FEATURES),
+                "onset": final_onset,
+                "offset": final_offset,
+                "threshold": round(max(onset_threshold, offset_threshold), 4),
+                "onset_threshold": round(onset_threshold, 4),
+                "offset_threshold": round(offset_threshold, 4),
+                "model_version": f"boundary-{trained_at.replace('-', '').replace(':', '').replace('+', '')}-{data_version[:8]}",
+                "data_version": data_version,
+                "git_commit": payload["git_commit"],
+                "trained_at": trained_at,
+                "metrics": {
+                    "samples": int(len(onset_y) + len(offset_y)),
+                    "onset": onset_metrics,
+                    "offset": offset_metrics,
+                },
+            }
+            args.boundary_out.parent.mkdir(parents=True, exist_ok=True)
+            args.boundary_out.write_text(
+                json.dumps(boundary_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            print(f"[boundary] {args.boundary_out}")
+            print(json.dumps({"onset": onset_metrics, "offset": offset_metrics}, ensure_ascii=False))
     return 0
 
 
