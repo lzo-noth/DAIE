@@ -102,7 +102,7 @@ LLM 在这里承担**推理时复核**和离线标注：检测候选生成仍走
 - `feedback/COMPLETE`：达到目标后的停止标记。
 - `feedback/STOPPED`：达到最大轮数仍未达标时的停止标记。
 
-首次启用：Actions → platforms → Run workflow；确保仓库 Secrets 里有 `GEMINI_API_KEY`。`learn` job 需要 `contents: write` 权限；如果分支保护禁止 Actions 直接 push，校准和标签仍会作为 `dai-learn` artifact 上传，可手动下载后提交。删除 `feedback/COMPLETE` 可重新启动循环。`platforms.json` 里标了 `optional: true` 的 feed（当前是 Substack）失败不会把整轮 run 标红。
+首次启用：Actions → platforms → Run workflow；确保仓库 Secrets 里有 `GEMINI_API_KEY`。`learn` job 需要 `contents: write` 权限；如果分支保护禁止 Actions 直接 push，校准和标签仍会作为 `dai-learn` artifact 上传，可手动下载后提交。删除 `feedback/COMPLETE` 或 `feedback/STOPPED` 并 push 会自动触发新一轮（workflow 的 push paths 包含这两个停止标记）；`round` 计数会重置为 0。`platforms.json` 里标了 `optional: true` 的 feed（当前是 Substack）失败不会把整轮 run 标红。
 
 ### LLM 反馈闭环（手动方式）
 

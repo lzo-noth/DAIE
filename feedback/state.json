@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "round": 4,
+  "round": 0,
   "max_rounds": 10,
-  "complete": true,
+  "complete": false,
   "stopped": false,
   "stop_reason": "",
-  "stale_rounds": 1,
+  "stale_rounds": 0,
   "patience": 2,
   "updated_at": "2026-11-06T14:41:48+00:00",
   "targets": {
