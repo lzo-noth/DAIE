@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "round": 0,
+  "round": 1,
   "max_rounds": 10,
   "complete": false,
   "stopped": false,
-  "updated_at": "2026-11-06T13:17:34+00:00",
+  "updated_at": "2026-11-06T13:33:10+00:00",
   "targets": {
     "precision": 0.3,
     "recall": 0.8,
@@ -14,14 +14,14 @@
   "checks": {
     "precision": false,
     "recall": true,
-    "auc": true,
-    "fp_per_hour": true
+    "auc": false,
+    "fp_per_hour": false
   },
   "metrics": {
     "mode": "filter",
-    "samples": 471,
-    "ads": 16,
-    "non_ads": 455,
+    "samples": 544,
+    "ads": 22,
+    "non_ads": 522,
     "groups": [
       "99% Invisible",
       "ADSP: Algorithms + Data Structures = Programs",
@@ -38,50 +38,50 @@
       "This Week in Tech (Audio)",
       "WTF with Marc Maron Podcast"
     ],
-    "episode_hours": 26.297,
-    "threshold": 0.3,
+    "episode_hours": 26.345,
+    "threshold": 0.34,
     "top_k": 0,
     "learned": {
-      "precision": 0.14,
-      "recall": 0.875,
-      "f1": 0.241,
-      "auc": 0.865
+      "precision": 0.108,
+      "recall": 0.909,
+      "f1": 0.193,
+      "auc": 0.837
     },
     "baseline": {
-      "precision": 0.042,
-      "recall": 0.812,
-      "f1": 0.079,
-      "auc": 0.61
+      "precision": 0.046,
+      "recall": 0.909,
+      "f1": 0.087,
+      "auc": 0.653
     },
     "recall_at": {
-      "1": 0.0,
-      "2": 0.0,
-      "3": 0.125,
-      "5": 0.188,
-      "8": 0.5,
-      "10": 0.562,
-      "12": 0.75,
-      "15": 0.875,
-      "20": 0.875,
-      "24": 0.938,
+      "1": 0.136,
+      "2": 0.273,
+      "3": 0.318,
+      "5": 0.455,
+      "8": 0.636,
+      "10": 0.727,
+      "12": 0.773,
+      "15": 0.909,
+      "20": 0.955,
+      "24": 1.0,
       "30": 1.0,
       "40": 1.0
     },
     "precision_at": {
-      "1": 0.0,
-      "2": 0.0,
-      "3": 0.024,
-      "5": 0.022,
-      "8": 0.039,
-      "10": 0.036,
-      "12": 0.041,
-      "15": 0.04,
-      "20": 0.033,
-      "24": 0.033,
-      "30": 0.034,
-      "40": 0.034
+      "1": 0.103,
+      "2": 0.105,
+      "3": 0.083,
+      "5": 0.074,
+      "8": 0.067,
+      "10": 0.062,
+      "12": 0.056,
+      "15": 0.056,
+      "20": 0.048,
+      "24": 0.046,
+      "30": 0.043,
+      "40": 0.041
     },
-    "fp_per_hour": 3.27,
+    "fp_per_hour": 6.26,
     "targets": {
       "precision": 0.3,
       "recall": 0.8,
