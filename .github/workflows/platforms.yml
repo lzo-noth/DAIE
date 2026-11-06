@@ -47,15 +47,19 @@ jobs:
         with:
           python-version: "3.12"
       - uses: actions/cache@v4
+        id: venv
         with:
           path: |
-            ~/.cache/pip
+            .venv
             ~/.cache/huggingface
-          key: dai-py312-whisper-base-en-v1
+          key: dai-venv-py312-v3
       - name: Prepare ASR dependencies and model
+        if: steps.venv.outputs.cache-hit != 'true'
         run: |
-          python -m pip install --quiet numpy faster-whisper openai
-          python - <<'PY'
+          python -m venv .venv
+          .venv/bin/python -m pip install --quiet --upgrade pip
+          .venv/bin/python -m pip install --quiet numpy faster-whisper openai
+          .venv/bin/python - <<'PY'
           from faster_whisper import WhisperModel
           WhisperModel("base.en", device="cpu", compute_type="int8")
           PY
@@ -128,16 +132,19 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: |
-            ~/.cache/pip
+            .venv
             ~/.cache/huggingface
-          key: dai-py312-whisper-base-en-v1
-      - name: Install dependencies
+          key: dai-venv-py312-v3
+      - name: Ensure dependencies
         run: |
+          if [ ! -x .venv/bin/python ]; then
+            python -m venv .venv
+            .venv/bin/python -m pip install --quiet numpy faster-whisper openai
+          fi
           if ! command -v ffmpeg >/dev/null 2>&1; then
             sudo apt-get update -qq
             sudo apt-get install -y ffmpeg
           fi
-          python -m pip install --quiet numpy faster-whisper openai
       - name: Analyze ${{ matrix.platform }} / ${{ matrix.feed }}
         env:
           EPISODES: ${{ inputs.episodes }}
@@ -149,7 +156,7 @@ jobs:
         run: |
           mkdir -p "out/${{ matrix.slug }}"
           set -o pipefail
-          python -m dai_detect feed "${{ matrix.url }}" \
+          .venv/bin/python -m dai_detect feed "${{ matrix.url }}" \
             -n "$EPISODES" \
             --min-score "$MIN_SCORE" \
             --min-run "$MIN_RUN" \
@@ -157,13 +164,13 @@ jobs:
             --cache-dir "$RUNNER_TEMP/dai-cache" \
             --clips-dir "out/${{ matrix.slug }}/clips" \
             --report "out/${{ matrix.slug }}/report.json" 2>&1 | tee "out/${{ matrix.slug }}/run.log"
-          python scripts/asr_clips.py \
+          .venv/bin/python scripts/asr_clips.py \
             --report "out/${{ matrix.slug }}/report.json" \
             --clips-dir "out/${{ matrix.slug }}/clips" \
             --model base.en \
             --language en
           if [ -n "$GEMINI_API_KEY" ] || [ -n "$OPENAI_API_KEY" ]; then
-            python scripts/classify_ads.py --report "out/${{ matrix.slug }}/report.json"
+            .venv/bin/python scripts/classify_ads.py --report "out/${{ matrix.slug }}/report.json"
           else
             echo "No GEMINI_API_KEY/OPENAI_API_KEY secret; skipping LLM ad classification"
           fi
