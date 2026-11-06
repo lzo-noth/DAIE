@@ -202,6 +202,47 @@ class SingleEpisodeTest(unittest.TestCase):
                 ),
             )
 
+    def test_require_models_rejects_missing_data_version(self) -> None:
+        head = {
+            "mean": [0.0] * len(BOUNDARY_FEATURES),
+            "scale": [1.0] * len(BOUNDARY_FEATURES),
+            "weights": [0.0] * len(BOUNDARY_FEATURES),
+            "intercept": 0.0,
+        }
+        segment = {
+            "version": 1,
+            "kind": "logistic",
+            "features": list(WINDOW_FEATURES),
+            "mean": [0.0] * len(WINDOW_FEATURES),
+            "scale": [1.0] * len(WINDOW_FEATURES),
+            "weights": [0.0] * len(WINDOW_FEATURES),
+            "intercept": 0.0,
+            "threshold": 0.5,
+            "data_version": "a" * 64,
+        }
+        boundary = {
+            "version": 1,
+            "kind": "onset_offset",
+            "features": list(BOUNDARY_FEATURES),
+            "onset": head,
+            "offset": head,
+            "threshold": 0.5,
+        }
+        segment_path = self.directory / "segment_noversion.json"
+        boundary_path = self.directory / "boundary_noversion.json"
+        segment_path.write_text(json.dumps(segment), encoding="utf-8")
+        boundary_path.write_text(json.dumps(boundary), encoding="utf-8")
+        audio = self._episode("versions_missing.wav", 20.0, 40.0, 60.0)
+        with self.assertRaises(ValueError):
+            analyze_single(
+                str(audio),
+                SingleConfig(
+                    model_path=str(segment_path),
+                    boundary_model_path=str(boundary_path),
+                    require_models=True,
+                ),
+            )
+
     def test_audio_identity_binds_the_exact_variant(self) -> None:
         first = self._episode("variant_a.wav", 20.0, 40.0, 60.0)
         timeline_a = analyze_single(str(first), SingleConfig())

@@ -9,10 +9,37 @@ from dai_detect.single_features import WINDOW_FEATURES
 from scripts.blind_test import _identity_checks
 from scripts.train_single_episode import (
     EpisodeSample,
+    _aggregate_fold_window_metrics,
+    _choose_classifier_threshold,
     _event_metrics,
     _group_folds,
     _identity_problems,
+    _inner_folds,
 )
+
+
+def _sample(feed: str, labels: list[int]) -> EpisodeSample:
+    values = np.asarray(labels, dtype=np.float64)
+    features = np.zeros((len(values), len(WINDOW_FEATURES)), dtype=np.float32)
+    features[:, 0] = values * 2.0 - 0.5
+    return EpisodeSample(
+        feed=feed,
+        episode=f"{feed}-{len(values)}",
+        audio="",
+        windows={
+            "times": np.arange(len(values), dtype=np.float64) * 0.5 + 0.5,
+            "hop_s": 0.5,
+            "span_s": 1.0,
+            "features": features,
+        },
+        indices=np.arange(len(values)),
+        labels=values,
+        ads=[],
+        duration_s=len(values) * 0.5,
+        change_scores=np.zeros(len(values)),
+        change_grid_s=0.01,
+        boundary_features=np.zeros((len(values), len(BOUNDARY_FEATURES)), dtype=np.float16),
+    )
 
 
 class GroupedCrossValidationTest(unittest.TestCase):
@@ -31,6 +58,56 @@ class GroupedCrossValidationTest(unittest.TestCase):
     def test_single_feed_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             _group_folds(["A", "A", "A"])
+
+    def _threshold_setup(self, first_labels: list[int]):
+        samples = [
+            _sample("A", first_labels),
+            _sample("B", [0, 1, 1]),
+            _sample("C", [0, 1, 1]),
+        ]
+        X = np.vstack([sample.windows["features"] for sample in samples])
+        y = np.concatenate([sample.labels for sample in samples])
+        offsets = {}
+        cursor = 0
+        for sample in samples:
+            offsets[id(sample)] = (cursor, cursor + len(sample.labels))
+            cursor += len(sample.labels)
+        return samples, X, y, offsets
+
+    def test_negative_only_inner_test_fold_is_kept(self) -> None:
+        samples, X, y, offsets = self._threshold_setup([0, 0, 0])
+        _, metrics = _choose_classifier_threshold([0, 1, 2], samples, X, y, offsets, seed=1)
+        self.assertEqual(metrics["source"], "inner_grouped_cv")
+        self.assertEqual(metrics["folds"], 3)
+
+    def test_positive_only_inner_test_fold_is_kept(self) -> None:
+        samples, X, y, offsets = self._threshold_setup([1, 1, 1])
+        _, metrics = _choose_classifier_threshold([0, 1, 2], samples, X, y, offsets, seed=1)
+        self.assertEqual(metrics["source"], "inner_grouped_cv")
+        self.assertEqual(metrics["folds"], 3)
+
+    def test_within_feed_inner_split_is_labelled(self) -> None:
+        samples = [_sample("A", [0, 1]), _sample("A", [0, 1])]
+        folds, kind = _inner_folds([0, 1], samples)
+        self.assertEqual(len(folds), 2)
+        self.assertEqual(kind, "within_feed_fallback")
+        X = np.vstack([sample.windows["features"] for sample in samples])
+        y = np.concatenate([sample.labels for sample in samples])
+        offsets = {id(samples[0]): (0, 2), id(samples[1]): (2, 4)}
+        _, metrics = _choose_classifier_threshold([0, 1], samples, X, y, offsets, seed=1)
+        self.assertEqual(metrics["source"], "within_feed_fallback")
+
+    def test_window_metrics_use_each_fold_threshold(self) -> None:
+        samples = [_sample("A", [1, 0]), _sample("B", [1, 0])]
+        y = np.asarray([1, 0, 1, 0], dtype=np.float64)
+        oof = np.asarray([0.9, 0.1, 0.9, 0.1])
+        offsets = {id(samples[0]): (0, 2), id(samples[1]): (2, 4)}
+        metrics = _aggregate_fold_window_metrics(
+            y, oof, [[0], [1]], {0: 0.5, 1: 0.95}, samples, offsets
+        )
+        self.assertEqual(metrics["threshold_source"], "per_outer_fold")
+        self.assertEqual(metrics["precision"], 1.0)
+        self.assertEqual(metrics["recall"], 0.5)
 
 
 class EventEvaluationAlignmentTest(unittest.TestCase):

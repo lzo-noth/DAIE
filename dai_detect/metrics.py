@@ -34,21 +34,33 @@ def roc_auc(labels: np.ndarray, scores: np.ndarray) -> float:
     )
 
 
-def threshold_metrics(labels: np.ndarray, scores: np.ndarray, threshold: float) -> dict:
+def threshold_counts(labels: np.ndarray, scores: np.ndarray, threshold: float) -> tuple[int, int, int]:
     labels = np.asarray(labels).reshape(-1)
     scores = np.asarray(scores, dtype=np.float64).reshape(-1)
     predicted = scores >= threshold
     tp = int(np.sum(predicted & (labels == 1)))
     fp = int(np.sum(predicted & (labels == 0)))
     fn = int(np.sum(~predicted & (labels == 1)))
+    return tp, fp, fn
+
+
+def metrics_from_counts(tp: int, fp: int, fn: int) -> dict:
     precision = tp / (tp + fp) if tp + fp else 0.0
     recall = tp / (tp + fn) if tp + fn else 0.0
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
     return {
+        "true_positive": tp,
+        "false_positive": fp,
+        "false_negative": fn,
         "precision": round(precision, 4),
         "recall": round(recall, 4),
         "f1": round(f1, 4),
     }
+
+
+def threshold_metrics(labels: np.ndarray, scores: np.ndarray, threshold: float) -> dict:
+    tp, fp, fn = threshold_counts(labels, scores, threshold)
+    return metrics_from_counts(tp, fp, fn)
 
 
 def best_f1_threshold(labels: np.ndarray, scores: np.ndarray) -> tuple[float, dict]:

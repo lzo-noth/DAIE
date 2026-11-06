@@ -44,7 +44,13 @@ from dai_detect.boundary_model import (
 )
 from dai_detect.decode_config import resolve_thresholds
 from dai_detect.evaluation import evaluate_events
-from dai_detect.metrics import best_f1_threshold, roc_auc, threshold_metrics
+from dai_detect.metrics import (
+    best_f1_threshold,
+    metrics_from_counts,
+    roc_auc,
+    threshold_counts,
+    threshold_metrics,
+)
 from dai_detect.refinement import refine_events
 from dai_detect.single_episode import extract_features
 from dai_detect.single_features import WINDOW_FEATURES, build_windows, window_labels
@@ -317,16 +323,19 @@ def _window_rows(indices: list[int], samples: list[EpisodeSample], offsets: dict
     return mask
 
 
-def _inner_folds(train_indices: list[int], samples: list[EpisodeSample]) -> list[list[int]]:
+def _inner_folds(train_indices: list[int], samples: list[EpisodeSample]) -> tuple[list[list[int]], str]:
     """Folds used only inside an outer training set for threshold selection."""
     feeds = sorted({samples[index].feed for index in train_indices})
     if len(feeds) >= 2:
-        return [[index for index in train_indices if samples[index].feed == feed] for feed in feeds]
+        return (
+            [[index for index in train_indices if samples[index].feed == feed] for feed in feeds],
+            "inner_grouped_cv",
+        )
     ordered = sorted(train_indices)
     if len(ordered) >= 2:
         middle = len(ordered) // 2
-        return [ordered[:middle], ordered[middle:]]
-    return [ordered]
+        return [ordered[:middle], ordered[middle:]], "within_feed_fallback"
+    return [ordered], "within_feed_fallback"
 
 
 def _choose_classifier_threshold(
@@ -339,25 +348,29 @@ def _choose_classifier_threshold(
 ) -> tuple[float, dict]:
     probabilities: list[np.ndarray] = []
     labels: list[np.ndarray] = []
-    for fold_index, held in enumerate(_inner_folds(train_indices, samples)):
+    folds, fold_kind = _inner_folds(train_indices, samples)
+    for fold_index, held in enumerate(folds):
         inner_train = [index for index in train_indices if index not in set(held)]
         train_rows = _window_rows(inner_train, samples, offsets, len(y_all))
         test_rows = _window_rows(held, samples, offsets, len(y_all))
-        if len(np.unique(y_all[train_rows])) < 2 or len(np.unique(y_all[test_rows])) < 2:
+        # Only the training fold needs both classes. A single-class test fold
+        # (all content or all ads) is still informative for threshold choice.
+        if len(np.unique(y_all[train_rows])) < 2:
             continue
         model = _fit_logistic(*_balance(X_all[train_rows], y_all[train_rows], ratio=4, seed=seed + fold_index))
         probabilities.append(_predict(model, X_all[test_rows]))
         labels.append(y_all[test_rows])
     if not probabilities:
-        return 0.5, {"source": "fallback", "reason": "no_valid_inner_fold"}
+        return 0.5, {"source": "fallback", "reason": "no_valid_inner_fold", "fold_kind": fold_kind}
     probabilities_all = np.concatenate(probabilities)
     labels_all = np.concatenate(labels)
     if len(np.unique(labels_all)) < 2:
-        return 0.5, {"source": "fallback", "reason": "single_class_inner_oof"}
+        return 0.5, {"source": "fallback", "reason": "single_class_inner_oof", "fold_kind": fold_kind}
     threshold, metrics = best_f1_threshold(labels_all, probabilities_all)
     metrics["auc"] = round(roc_auc(labels_all, probabilities_all), 4)
-    metrics["source"] = "inner_grouped_cv"
+    metrics["source"] = fold_kind
     metrics["folds"] = len(probabilities)
+    metrics["test_windows"] = int(len(labels_all))
     return threshold, metrics
 
 
@@ -375,38 +388,43 @@ def _choose_boundary_thresholds(
     onset_labels: list[np.ndarray] = []
     offset_probabilities: list[np.ndarray] = []
     offset_labels: list[np.ndarray] = []
-    for fold_index, held in enumerate(_inner_folds(train_indices, samples)):
+    folds, fold_kind = _inner_folds(train_indices, samples)
+    for fold_index, held in enumerate(folds):
         held_set = set(held)
         train_set = {index for index in train_indices if index not in held_set}
         onset_train_X, onset_train_y = _gather_boundary(onset_X, onset_y, episode_indices, train_set)
         onset_test_X, onset_test_y = _gather_boundary(onset_X, onset_y, episode_indices, held_set)
         offset_train_X, offset_train_y = _gather_boundary(offset_X, offset_y, episode_indices, train_set)
         offset_test_X, offset_test_y = _gather_boundary(offset_X, offset_y, episode_indices, held_set)
-        if len(np.unique(onset_train_y)) >= 2 and len(np.unique(onset_test_y)) >= 2:
+        # As with the classifier, only the training fold must contain both
+        # classes; single-class test folds still contribute predictions.
+        if len(np.unique(onset_train_y)) >= 2 and len(onset_test_y):
             head = _fit_logistic(*_balance(onset_train_X, onset_train_y, ratio=6, seed=seed + fold_index))
             onset_probabilities.append(_predict(head, onset_test_X))
             onset_labels.append(onset_test_y)
-        if len(np.unique(offset_train_y)) >= 2 and len(np.unique(offset_test_y)) >= 2:
+        if len(np.unique(offset_train_y)) >= 2 and len(offset_test_y):
             head = _fit_logistic(*_balance(offset_train_X, offset_train_y, ratio=6, seed=seed + 100 + fold_index))
             offset_probabilities.append(_predict(head, offset_test_X))
             offset_labels.append(offset_test_y)
 
-    onset_threshold, onset_metrics = 0.5, {"source": "fallback"}
-    offset_threshold, offset_metrics = 0.5, {"source": "fallback"}
+    onset_threshold, onset_metrics = 0.5, {"source": "fallback", "fold_kind": fold_kind}
+    offset_threshold, offset_metrics = 0.5, {"source": "fallback", "fold_kind": fold_kind}
     if onset_probabilities:
         on_prob = np.concatenate(onset_probabilities)
         on_labels = np.concatenate(onset_labels)
         if len(np.unique(on_labels)) >= 2:
             onset_threshold, onset_metrics = best_f1_threshold(on_labels, on_prob)
             onset_metrics["auc"] = round(roc_auc(on_labels, on_prob), 4)
-            onset_metrics["source"] = "inner_grouped_cv"
+            onset_metrics["source"] = fold_kind
+            onset_metrics["test_frames"] = int(len(on_labels))
     if offset_probabilities:
         off_prob = np.concatenate(offset_probabilities)
         off_labels = np.concatenate(offset_labels)
         if len(np.unique(off_labels)) >= 2:
             offset_threshold, offset_metrics = best_f1_threshold(off_labels, off_prob)
             offset_metrics["auc"] = round(roc_auc(off_labels, off_prob), 4)
-            offset_metrics["source"] = "inner_grouped_cv"
+            offset_metrics["source"] = fold_kind
+            offset_metrics["test_frames"] = int(len(off_labels))
     return onset_threshold, offset_threshold, onset_metrics, offset_metrics
 
 
@@ -431,6 +449,49 @@ def _gather_boundary(
     if not chosen_X:
         return np.zeros((0, len(BOUNDARY_FEATURES)), dtype=np.float32), np.zeros(0)
     return np.vstack(chosen_X).astype(np.float32), np.concatenate(chosen_y)
+
+
+def _aggregate_fold_window_metrics(
+    y_all: np.ndarray,
+    oof: np.ndarray,
+    folds: list[list[int]],
+    fold_thresholds: dict[int, float],
+    samples: list[EpisodeSample],
+    offsets: dict[int, tuple[int, int]],
+) -> dict:
+    tp = fp = fn = 0
+    for held in folds:
+        if not held:
+            continue
+        rows = _window_rows(held, samples, offsets, len(y_all))
+        threshold = fold_thresholds.get(held[0], 0.5)
+        a, b, c = threshold_counts(y_all[rows], oof[rows], threshold)
+        tp += a
+        fp += b
+        fn += c
+    metrics = metrics_from_counts(tp, fp, fn)
+    metrics["threshold_source"] = "per_outer_fold"
+    metrics["folds"] = len(folds)
+    return metrics
+
+
+def _aggregate_head_groups(groups: list[tuple[np.ndarray, np.ndarray, float]]) -> dict:
+    if not groups:
+        return {}
+    tp = fp = fn = 0
+    probability_parts: list[np.ndarray] = []
+    label_parts: list[np.ndarray] = []
+    for probabilities, labels, threshold in groups:
+        a, b, c = threshold_counts(labels, probabilities, threshold)
+        tp += a
+        fp += b
+        fn += c
+        probability_parts.append(probabilities)
+        label_parts.append(labels)
+    metrics = metrics_from_counts(tp, fp, fn)
+    metrics["auc"] = round(roc_auc(np.concatenate(label_parts), np.concatenate(probability_parts)), 4)
+    metrics["threshold_source"] = "per_outer_fold"
+    return metrics
 
 
 def _event_metrics(
@@ -676,10 +737,8 @@ def main() -> int:
     full_oof: dict[int, np.ndarray] = {}
     fold_boundary_heads: dict[int, tuple[dict, dict, float, float]] = {}
     fold_thresholds: dict[int, float] = {}
-    boundary_onset_oof: list[np.ndarray] = []
-    boundary_onset_labels: list[np.ndarray] = []
-    boundary_offset_oof: list[np.ndarray] = []
-    boundary_offset_labels: list[np.ndarray] = []
+    boundary_onset_eval: list[tuple[np.ndarray, np.ndarray, float]] = []
+    boundary_offset_eval: list[tuple[np.ndarray, np.ndarray, float]] = []
     fold_reports: list[dict] = []
     all_indices = list(range(len(samples)))
 
@@ -748,11 +807,21 @@ def main() -> int:
                 if episode not in held_set:
                     continue
                 if len(boundary_onset_y[entry]):
-                    boundary_onset_oof.append(_predict(onset_head, boundary_onset_X[entry]))
-                    boundary_onset_labels.append(boundary_onset_y[entry])
+                    boundary_onset_eval.append(
+                        (
+                            _predict(onset_head, boundary_onset_X[entry]),
+                            boundary_onset_y[entry],
+                            onset_threshold,
+                        )
+                    )
                 if len(boundary_offset_y[entry]):
-                    boundary_offset_oof.append(_predict(offset_head, boundary_offset_X[entry]))
-                    boundary_offset_labels.append(boundary_offset_y[entry])
+                    boundary_offset_eval.append(
+                        (
+                            _predict(offset_head, boundary_offset_X[entry]),
+                            boundary_offset_y[entry],
+                            offset_threshold,
+                        )
+                    )
 
         events = _event_metrics(
             samples,
@@ -777,15 +846,21 @@ def main() -> int:
             flush=True,
         )
 
-    # Threshold used for deployment is also selected without the evaluated
-    # episode's labels: inner grouped CV over the whole training set.
+    # Cross-validation metrics use each outer fold's own threshold. The
+    # deployment threshold is calibrated separately on the full training set
+    # and must not be used to recompute CV metrics.
+    window_metrics = _aggregate_fold_window_metrics(
+        y_all, oof, folds, fold_thresholds, samples, per_episode_offset
+    )
+    window_metrics["auc"] = round(roc_auc(y_all, oof), 4)
     deployment_threshold, deployment_threshold_metrics = _choose_classifier_threshold(
         all_indices, samples, X_all, y_all, per_episode_offset, seed=101
     )
-    window_metrics = threshold_metrics(y_all, oof, deployment_threshold)
-    window_metrics["auc"] = round(roc_auc(y_all, oof), 4)
-    window_metrics["threshold"] = round(deployment_threshold, 4)
-    window_metrics["threshold_selection"] = deployment_threshold_metrics
+    deployment_calibration = {
+        "threshold": round(deployment_threshold, 4),
+        "window": threshold_metrics(y_all, oof, deployment_threshold),
+        "threshold_selection": deployment_threshold_metrics,
+    }
     final_model = _fit_logistic(*_balance(X_all, y_all, ratio=4, seed=101))
     event_metrics = _event_metrics(
         samples,
@@ -832,6 +907,7 @@ def main() -> int:
             "negatives": int(len(y_all) - y_all.sum()),
             "window": window_metrics,
             "event": event_metrics,
+            "deployment_calibration": deployment_calibration,
             "folds": fold_reports,
             "supervision": "weak_llm_candidates" if weak_mode else "full_annotations",
         },
@@ -867,18 +943,27 @@ def main() -> int:
                     seed=909,
                 )
             )
-            onset_metrics: dict = {"threshold_selection": onset_selection}
-            offset_metrics: dict = {"threshold_selection": offset_selection}
-            if boundary_onset_oof:
-                on_prob = np.concatenate(boundary_onset_oof)
-                on_labels = np.concatenate(boundary_onset_labels)
-                onset_metrics.update(threshold_metrics(on_labels, on_prob, onset_threshold))
-                onset_metrics["auc"] = round(roc_auc(on_labels, on_prob), 4)
-            if boundary_offset_oof:
-                off_prob = np.concatenate(boundary_offset_oof)
-                off_labels = np.concatenate(boundary_offset_labels)
-                offset_metrics.update(threshold_metrics(off_labels, off_prob, offset_threshold))
-                offset_metrics["auc"] = round(roc_auc(off_labels, off_prob), 4)
+            onset_metrics = _aggregate_head_groups(boundary_onset_eval)
+            offset_metrics = _aggregate_head_groups(boundary_offset_eval)
+            onset_metrics["threshold_selection"] = onset_selection
+            offset_metrics["threshold_selection"] = offset_selection
+
+            deployment_calibration: dict = {
+                "onset_threshold": round(onset_threshold, 4),
+                "offset_threshold": round(offset_threshold, 4),
+            }
+            if boundary_onset_eval:
+                on_prob = np.concatenate([item[0] for item in boundary_onset_eval])
+                on_labels = np.concatenate([item[1] for item in boundary_onset_eval])
+                deployment_calibration["onset"] = threshold_metrics(
+                    on_labels, on_prob, onset_threshold
+                )
+            if boundary_offset_eval:
+                off_prob = np.concatenate([item[0] for item in boundary_offset_eval])
+                off_labels = np.concatenate([item[1] for item in boundary_offset_eval])
+                deployment_calibration["offset"] = threshold_metrics(
+                    off_labels, off_prob, offset_threshold
+                )
 
             final_onset = _fit_logistic(*_balance(onset_X, onset_y, ratio=6, seed=707))
             final_offset = _fit_logistic(*_balance(offset_X, offset_y, ratio=6, seed=808))
@@ -899,6 +984,7 @@ def main() -> int:
                     "samples": int(len(onset_y) + len(offset_y)),
                     "onset": onset_metrics,
                     "offset": offset_metrics,
+                    "deployment_calibration": deployment_calibration,
                 },
             }
             args.boundary_out.parent.mkdir(parents=True, exist_ok=True)

@@ -21,9 +21,13 @@ on:
         required: false
         default: ""
       model_path:
-        description: "广告分类模型 JSON"
+        description: "广告分类模型 JSON（留空则使用启发式兜底）"
         required: false
-        default: "models/ad_segment_model.json"
+        default: ""
+      boundary_model_path:
+        description: "边界模型 JSON（留空则使用启发式边界）"
+        required: false
+        default: ""
       ground_truth_url:
         description: "可选：人工真值 JSON/URL；检测完成后才下载用于评估"
         required: false
@@ -119,7 +123,7 @@ jobs:
             exit 1
           else
             echo "segment=${{ inputs.model_path }}" >> "$GITHUB_OUTPUT"
-            echo "boundary=models/boundary_model.json" >> "$GITHUB_OUTPUT"
+            echo "boundary=${{ inputs.boundary_model_path }}" >> "$GITHUB_OUTPUT"
             echo "require=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Archive the exact audio variant
@@ -138,10 +142,11 @@ jobs:
           REQUIRE: ${{ steps.models.outputs.require }}
         run: |
           SNAP=$(python -c "import json;print(json.loads(open('out/audio_manifest.jsonl').readline())['audio'])")
-          ARGS=""
-          if [ "$REQUIRE" = "true" ]; then ARGS="--require-models"; fi
-          python scripts/blind_test.py --audio "$SNAP" --model "$MODEL" \
-            --boundary-model "$BOUNDARY" $ARGS --out out/timeline.json
+          args=()
+          if [ -n "$MODEL" ]; then args+=(--model "$MODEL"); fi
+          if [ -n "$BOUNDARY" ]; then args+=(--boundary-model "$BOUNDARY"); fi
+          if [ "$REQUIRE" = "true" ]; then args+=(--require-models); fi
+          python scripts/blind_test.py --audio "$SNAP" "${args[@]}" --out out/timeline.json
       - name: Download ground truth after detection
         if: inputs.ground_truth_url != ''
         env:
@@ -155,10 +160,11 @@ jobs:
           REQUIRE: ${{ steps.models.outputs.require }}
         run: |
           SNAP=$(python -c "import json;print(json.loads(open('out/audio_manifest.jsonl').readline())['audio'])")
-          ARGS=""
-          if [ "$REQUIRE" = "true" ]; then ARGS="--require-models"; fi
-          python scripts/blind_test.py --audio "$SNAP" --model "$MODEL" \
-            --boundary-model "$BOUNDARY" $ARGS \
+          args=()
+          if [ -n "$MODEL" ]; then args+=(--model "$MODEL"); fi
+          if [ -n "$BOUNDARY" ]; then args+=(--boundary-model "$BOUNDARY"); fi
+          if [ "$REQUIRE" = "true" ]; then args+=(--require-models); fi
+          python scripts/blind_test.py --audio "$SNAP" "${args[@]}" \
             --ground-truth out/ground_truth.json \
             --out out/timeline.json --metrics out/metrics.json
       - uses: actions/upload-artifact@v4

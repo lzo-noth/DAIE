@@ -99,11 +99,15 @@ def analyze_single(
             raise ValueError("要求训练模型，但广告分类器回退到了启发式实现")
         if boundary_model is None:
             raise ValueError("要求训练模型，但边界模型缺失")
+        if not getattr(model, "data_version", ""):
+            raise ValueError("要求训练模型，但分类模型缺少 data_version")
+        if not getattr(boundary_model, "data_version", ""):
+            raise ValueError("要求训练模型，但边界模型缺少 data_version")
     if (
         boundary_model is not None
         and not isinstance(model, HeuristicAdModel)
-        and model.data_version
-        and boundary_model.data_version
+        and getattr(model, "data_version", "")
+        and getattr(boundary_model, "data_version", "")
         and model.data_version != boundary_model.data_version
     ):
         raise ValueError(
