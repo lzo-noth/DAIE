@@ -71,6 +71,19 @@ def _boundary_strength(indices: np.ndarray, strengths: np.ndarray, seconds: floa
     return float(strengths[position])
 
 
+def musicness_from_flatness(segment_flatness: np.ndarray, episode_flatness: np.ndarray) -> float:
+    """Relative tonality of a segment versus the episode baseline.
+
+    The old rule compared a segment medians against the same segment, which
+    always produced a rank near 0.5 and mostly measured duplicate values.
+    This compares the segment against the episode, so a tonal/music bed gives
+    a positive value and speech/noise gives a value near zero.
+    """
+    baseline = float(np.median(episode_flatness)) if len(episode_flatness) else 1e-6
+    segment = float(np.median(segment_flatness)) if len(segment_flatness) else baseline
+    return float(np.clip((baseline - segment) / max(abs(baseline), 1e-6), 0.0, 1.0))
+
+
 def segment_evidence(
     features: EpisodeFeatures,
     start_s: float,
@@ -94,8 +107,7 @@ def segment_evidence(
     episode_median = float(np.median(features.loudness_db))
     segment_median = float(np.median(loudness)) if len(loudness) else episode_median
     deviation = abs(segment_median - episode_median)
-    tonality_rank = float(np.mean(features.flatness < (np.median(flatness) if len(flatness) else 0.0)))
-    musicness = float(np.clip((0.5 - tonality_rank) / 0.5, 0.0, 1.0))
+    musicness = musicness_from_flatness(flatness, features.flatness)
     if boundary_indices is None or boundary_strengths is None:
         boundary_indices, boundary_strengths, novelty = detect_boundaries(features)
     edge_start = _boundary_strength(boundary_indices, boundary_strengths, start_s)
@@ -110,7 +122,11 @@ def segment_evidence(
         position = 0.35
     return {
         "musicness": round(musicness, 3),
+        "flatness_median": round(float(np.median(flatness)) if len(flatness) else 0.0, 5),
+        "flatness_baseline": round(float(np.median(features.flatness)) if count else 0.0, 5),
         "loudness_dev_db": round(deviation, 2),
+        "loudness_median": round(segment_median, 2),
+        "loudness_baseline": round(episode_median, 2),
         "boundary_strength": round(boundary, 3),
         "position": position,
     }

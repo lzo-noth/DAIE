@@ -31,6 +31,10 @@ def main() -> int:
     parser.add_argument("--target-auc", type=float, default=0.8)
     parser.add_argument("--target-fp-per-hour", type=float, default=15.0)
     parser.add_argument("--target-candidates-per-hour", type=float, default=30.0)
+    parser.add_argument("--ground-truth-metrics", type=Path)
+    parser.add_argument("--target-event-precision", type=float, default=0.9)
+    parser.add_argument("--target-event-recall", type=float, default=0.9)
+    parser.add_argument("--target-boundary-p95", type=float, default=0.5)
     parser.add_argument("--patience", type=int, default=2)
     args = parser.parse_args()
 
@@ -62,6 +66,21 @@ def main() -> int:
         checks["fp_per_hour"] = float(fp_per_hour) <= args.target_fp_per_hour
     if candidates_per_hour is not None:
         checks["candidates_per_hour"] = float(candidates_per_hour) <= args.target_candidates_per_hour
+
+    ground_truth = _read_json(args.ground_truth_metrics) if args.ground_truth_metrics else {}
+    gt_checks = {}
+    if ground_truth and not ground_truth.get("error"):
+        gt_checks["event_precision"] = (
+            float(ground_truth.get("event_precision") or 0.0) >= args.target_event_precision
+        )
+        gt_checks["event_recall"] = (
+            float(ground_truth.get("event_recall") or 0.0) >= args.target_event_recall
+        )
+        boundary_p95 = ground_truth.get("boundary_p95_s")
+        gt_checks["boundary_p95"] = (
+            boundary_p95 is not None and float(boundary_p95) <= args.target_boundary_p95
+        )
+    checks["ground_truth"] = bool(gt_checks) and all(gt_checks.values())
     complete = bool(metrics) and all(checks.values())
 
     active_metrics = active.get("metrics") or {}
@@ -104,6 +123,7 @@ def main() -> int:
         },
         "checks": checks,
         "metrics": metrics,
+        "ground_truth": ground_truth,
         "active_calibration": {
             "enabled": active.get("enabled"),
             "mode": active.get("mode"),

@@ -20,8 +20,8 @@ def _sigmoid(z: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-np.clip(z, -30.0, 30.0)))
 
 
-def _row_key(feed: str, episode: str, start: float, end: float, tier: str) -> str:
-    return f"{feed}|{episode}|{start:.1f}|{end:.1f}|{tier}"
+def _row_key(run_id: str, feed: str, episode: str, start: float, end: float, tier: str) -> str:
+    return f"{run_id}|{feed}|{episode}|{start:.1f}|{end:.1f}|{tier}"
 
 
 def _load_rows(
@@ -57,10 +57,11 @@ def _load_rows(
                 feed = str(row.get("feed") or "")
                 episode = str(row.get("episode") or "")
                 tier = str(row.get("tier") or "")
+                run_id = str(row.get("run_id") or "")
                 start = float(row.get("start_s") or 0.0)
                 end = float(row.get("end_s") or 0.0)
                 duration = float(row.get("episode_duration_s") or 0.0)
-                key = _row_key(feed, episode, start, end, tier)
+                key = _row_key(run_id, feed, episode, start, end, tier)
                 entries[key] = (
                     label_features(row.get("features") or {}, tier),
                     1 if row.get("is_ad") else 0,
@@ -69,7 +70,7 @@ def _load_rows(
                     f"{feed}|{episode}",
                     duration,
                     str(row.get("asr_text") or ""),
-                    str(row.get("run_id") or ""),
+                    run_id,
                     str(row.get("collected_at") or ""),
                 )
             continue
@@ -89,7 +90,7 @@ def _load_rows(
             start = float(entry.get("start_s") or 0.0)
             end = float(entry.get("end_s") or 0.0)
             duration = episodes.get(episode, 0.0)
-            key = _row_key(group, episode, start, end, tier)
+            key = _row_key("", group, episode, start, end, tier)
             entries[key] = (
                 label_features(features, tier),
                 1 if entry.get("is_ad") else 0,

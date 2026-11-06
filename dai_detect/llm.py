@@ -189,6 +189,7 @@ def apply_classifications(
                     },
                     "asr_text": str(evidence.get("asr_text") or "")[:400],
                     "ad_terms": evidence.get("ad_terms") or [],
+                    "evidence": dict(evidence),
                     "llm": result,
                     "is_ad": is_target,
                 }

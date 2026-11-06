@@ -483,6 +483,17 @@ jobs:
           python scripts/mine_keywords.py \
             --store feedback/labels.jsonl \
             --out feedback/keywords.json
+      - name: Evaluate human ground truth
+        run: |
+          mkdir -p out/learn
+          if [ -d ground_truth ] && ls ground_truth/*.json >/dev/null 2>&1; then
+            python scripts/evaluate_ground_truth.py \
+              --reports-root analysis \
+              --ground-truth ground_truth \
+              --out out/learn/ground_truth.json || true
+          else
+            echo "no ground_truth/*.json; event precision, recall and boundary P95 remain unverified"
+          fi
       - name: Fit calibration
         run: |
           TARGET_RECALL="${TARGET_RECALL:-0.8}"
@@ -549,6 +560,7 @@ jobs:
             --target-auc "$TARGET_AUC" \
             --target-fp-per-hour "$TARGET_FP_PER_HOUR" \
             --target-candidates-per-hour "$TARGET_CANDIDATES_PER_HOUR" \
+            --ground-truth-metrics out/learn/ground_truth.json \
             --patience 2 || true
           cat feedback/state.json 2>/dev/null || true
       - name: Commit feedback and calibration

@@ -90,9 +90,24 @@ LLM 标注也会反馈到检测器：当前样本里 slot 命中主要出现在�
 4. **优化**：`scripts/fit_calibration.py` 按 feed 做留一交叉验证，拟合候选评分器，输出 `calibration.json` 和指标；下一次检测直接加载。`scripts/asr_clips.py` 也会加载 `feedback/keywords.json`，把学到的品牌词作为确定性广告话术特征。
 5. **循环**：`learn` job 自动提交 `feedback/` 与 `calibration.json`（提交信息带 `[skip ci]`），下一轮（每天定时或手动）使用新模型。`feedback/state.json` 记录轮数和指标；达到目标后写入 `feedback/COMPLETE`，`gate` job 之后不再执行分析。默认最多 10 轮，可用 `max_rounds` 调整。
 
-默认目标（手动 dispatch 时可覆盖）：`recall@40 ≥ 0.95`、`candidate recall ≥ 0.8`、`AUC ≥ 0.8`、送复核候选 ≤ 30/小时、预复核误报 ≤ 15/小时。最终 precision 由 LLM 复核保证，不再用声学 precision 作为达标条件。未达标就继续下一轮；达到后自动停止。
+默认目标（手动 dispatch 时可覆盖）：`recall@40 ≥ 0.95`、`candidate recall ≥ 0.8`、`AUC ≥ 0.8`、送复核候选 ≤ 30/小时、预复核误报 ≤ 15/小时。此外，**必须有一份独立人工真值**，事件 precision ≥ 0.9、事件 recall ≥ 0.9、起止误差 P95 ≤ 0.5 秒，才会写 `COMPLETE`。没有 `ground_truth/*.json` 时循环不会宣布完成——LLM 标签只用于候选覆盖和成本控制，不作为真值。
 
 LLM 在这里承担**推理时复核**和离线标注：检测候选生成仍走声学/指纹，最终把候选片段交给 LLM 判定第三方广告并剔除正片、自宣和主播口播。关键词和校准模型是确定性产物，用于保证候选召回并控制 LLM 调用量。
+
+人工真值格式（`ground_truth/<episode>.json`，同一集的多个下载版本必须放在同一数据分组）：
+
+```json
+{
+  "episode": "Episode 001",
+  "episode_id": "abc123",
+  "ads": [
+    {"start_s": 1200.4, "end_s": 1231.1, "type": "third_party_inserted"},
+    {"start_s": 2450.0, "end_s": 2480.0, "type": "third_party_inserted"}
+  ]
+}
+```
+
+`scripts/evaluate_ground_truth.py` 会按候选区间与真值区间的重叠做事件匹配，输出事件 precision/recall、起止误差 P95 和 IoU；`update_loop_state.py` 用这些指标判定 `COMPLETE`。
 
 反馈文件：
 

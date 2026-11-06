@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .boundaries import musicness_from_flatness
 from .models import Candidate, Config, EpisodeFeatures
 
 
@@ -172,9 +173,7 @@ def _segment_stats(features: EpisodeFeatures, start_s: float, end_s: float) -> d
     episode_median = float(np.median(features.loudness_db))
     segment_median = float(np.median(loudness)) if len(loudness) else episode_median
     deviation = abs(segment_median - episode_median)
-    segment_flat = float(np.median(flatness)) if len(flatness) else 0.0
-    tonality_rank = float(np.mean(features.flatness < segment_flat))
-    musicness = float(np.clip((0.5 - tonality_rank) / 0.5, 0.0, 1.0))
+    musicness = musicness_from_flatness(flatness, features.flatness)
     if start_s < 120:
         position = 1.0
     elif end_s > features.duration_s - 150:
@@ -183,7 +182,11 @@ def _segment_stats(features: EpisodeFeatures, start_s: float, end_s: float) -> d
         position = 0.35
     return {
         "musicness": musicness,
+        "flatness_median": float(np.median(flatness)) if len(flatness) else 0.0,
+        "flatness_baseline": float(np.median(features.flatness)) if count else 0.0,
         "loudness_dev_db": deviation,
+        "loudness_median": segment_median,
+        "loudness_baseline": episode_median,
         "position": position,
     }
 
@@ -247,25 +250,11 @@ def insertion_candidates(
         )
         if boundary_strength < 0.35:
             score *= 0.55
-        if (starts_episode or ends_episode) and stats["musicness"] < 0.2 and stats["loudness_dev_db"] < 1.5:
-            score -= 0.15
         host_like = (
             stats["musicness"] < 0.25
             and stats["loudness_dev_db"] < 3.0
             and timbre_min < 0.7
         )
-        if host_like:
-            score -= 0.22
-        # LLM-labeled content showed higher timbre than ads; only music and
-        # loudness are positive acoustic evidence.
-        ad_evidence = (
-            stats["musicness"] >= 0.3
-            or stats["loudness_dev_db"] >= 5.0
-        )
-        if not ad_evidence:
-            score -= 0.10
-        if duration > features.duration_s * 0.6 and stats["musicness"] < 0.3:
-            continue
         if score < cfg.min_insertion_score:
             continue
         kind = "cut"
@@ -285,7 +274,11 @@ def insertion_candidates(
                     "timbre_change": round(timbre_strength, 3),
                     "timbre_min": round(timbre_min, 3),
                     "musicness": round(stats["musicness"], 3),
+                    "flatness_median": round(stats["flatness_median"], 5),
+                    "flatness_baseline": round(stats["flatness_baseline"], 5),
                     "loudness_dev_db": round(stats["loudness_dev_db"], 2),
+                    "loudness_median": round(stats["loudness_median"], 2),
+                    "loudness_baseline": round(stats["loudness_baseline"], 2),
                     "position": stats["position"],
                     "duration_prior": duration_prior,
                     "host_like": host_like,

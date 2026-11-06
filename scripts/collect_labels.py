@@ -37,7 +37,9 @@ def _row(report: dict, label: dict, run_id: str) -> dict | None:
     by_title, episodes = _episode_index(report)
     episode = by_title.get(label.get("episode")) or {}
     candidate = _candidate_for(label, episodes)
-    evidence = candidate.get("evidence") or {}
+    # Prefer the evidence snapshot written at classification time. Re-indexing
+    # the filtered candidate array can attach another candidate's evidence.
+    evidence = label.get("evidence") or candidate.get("evidence") or {}
     features = label.get("features") or {}
     start = label.get("start_s")
     end = label.get("end_s")
@@ -72,6 +74,7 @@ def _row(report: dict, label: dict, run_id: str) -> dict | None:
 def _key(row: dict) -> str:
     return "|".join(
         [
+            str(row.get("run_id") or ""),
             str(row.get("feed") or ""),
             str(row.get("episode") or ""),
             f"{float(row.get('start_s') or 0.0):.1f}",

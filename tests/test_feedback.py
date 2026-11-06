@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from scripts.collect_labels import collect
+from scripts.evaluate_ground_truth import evaluate
 from scripts.fit_calibration import _load_rows
 from scripts.mine_keywords import mine
 from scripts.update_loop_state import main as update_state
@@ -91,9 +92,11 @@ class FeedbackLoopTest(unittest.TestCase):
         ad = next(row for row in rows if row["is_ad"])
         self.assertIn("Coca-Cola", ad["asr_text"])
         self.assertEqual(ad["episode_duration_s"], 1800.0)
-        second = collect(self.directory / "artifacts", store, "run-2")
+        second = collect(self.directory / "artifacts", store, "run-1")
         self.assertEqual(second["added"], 0)
         self.assertEqual(second["store_rows"], first["store_rows"])
+        third = collect(self.directory / "artifacts", store, "run-2")
+        self.assertEqual(third["store_rows"], 4)
 
     def test_mine_keywords_extracts_brand_and_sponsor_phrases(self) -> None:
         rows = [
@@ -158,6 +161,51 @@ class FeedbackLoopTest(unittest.TestCase):
     def test_update_loop_state_writes_complete_marker(self) -> None:
         metrics = self.directory / "metrics.json"
         state = self.directory / "state.json"
+        ground_truth = self.directory / "ground_truth.json"
+        metrics.write_text(
+            json.dumps(
+                {
+                    "learned": {"precision": 0.9, "recall": 0.9, "auc": 0.95},
+                    "recall_at": {"40": 0.99},
+                    "fp_per_hour": 0.5,
+                    "candidates_per_hour": 10.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        ground_truth.write_text(
+            json.dumps(
+                {
+                    "event_precision": 0.95,
+                    "event_recall": 0.95,
+                    "boundary_p95_s": 0.3,
+                }
+            ),
+            encoding="utf-8",
+        )
+        argv = [
+            "update_loop_state.py",
+            "--metrics",
+            str(metrics),
+            "--state",
+            str(state),
+            "--ground-truth-metrics",
+            str(ground_truth),
+            "--round",
+            "1",
+            "--max-rounds",
+            "5",
+        ]
+        with mock.patch.object(sys, "argv", argv):
+            update_state()
+        payload = json.loads(state.read_text(encoding="utf-8"))
+        self.assertTrue(payload["complete"])
+        self.assertTrue(payload["checks"]["ground_truth"])
+        self.assertTrue((self.directory / "COMPLETE").exists())
+
+    def test_loop_cannot_complete_without_human_ground_truth(self) -> None:
+        metrics = self.directory / "metrics.json"
+        state = self.directory / "state.json"
         metrics.write_text(
             json.dumps(
                 {
@@ -183,8 +231,23 @@ class FeedbackLoopTest(unittest.TestCase):
         with mock.patch.object(sys, "argv", argv):
             update_state()
         payload = json.loads(state.read_text(encoding="utf-8"))
-        self.assertTrue(payload["complete"])
-        self.assertTrue((self.directory / "COMPLETE").exists())
+        self.assertFalse(payload["complete"])
+        self.assertFalse(payload["checks"]["ground_truth"])
+
+    def test_ground_truth_event_metrics(self) -> None:
+        candidates = {
+            "Episode One": [
+                {"start_s": 10.0, "end_s": 30.0},
+                {"start_s": 100.0, "end_s": 120.0},
+            ]
+        }
+        gt = [{"episode": "Episode One", "ads": [{"start_s": 10.2, "end_s": 30.5}]}]
+        metrics = evaluate(gt, candidates)
+        self.assertEqual(metrics["true_positive"], 1)
+        self.assertEqual(metrics["false_positive"], 1)
+        self.assertEqual(metrics["false_negative"], 0)
+        self.assertAlmostEqual(metrics["boundary_p95_s"], 0.35, delta=0.02)
+        self.assertGreater(metrics["event_recall"], 0.99)
 
 
 if __name__ == "__main__":
