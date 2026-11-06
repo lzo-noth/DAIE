@@ -36,6 +36,10 @@ on:
         description: "可选：训练标注 JSONL；填写后运行训练 job"
         required: false
         default: ""
+      allow_uncalibrated_models:
+        description: "调试：允许部署 valid=false 的模型（默认拒绝，仍会保留警告）"
+        required: false
+        default: "false"
 
 permissions:
   contents: read
@@ -120,6 +124,11 @@ jobs:
             echo "segment=out/trained/ad_segment_model.json" >> "$GITHUB_OUTPUT"
             echo "boundary=out/trained/boundary_model.json" >> "$GITHUB_OUTPUT"
             echo "require=true" >> "$GITHUB_OUTPUT"
+            if [ "${{ inputs.allow_uncalibrated_models }}" = "true" ]; then
+              echo "calibrated=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "calibrated=true" >> "$GITHUB_OUTPUT"
+            fi
           elif [ "${{ inputs.annotations_path }}" != "" ]; then
             echo "训练模式要求分类模型和边界模型都存在，但 artifact 不完整" >&2
             exit 1
@@ -127,6 +136,7 @@ jobs:
             echo "segment=${{ inputs.model_path }}" >> "$GITHUB_OUTPUT"
             echo "boundary=${{ inputs.boundary_model_path }}" >> "$GITHUB_OUTPUT"
             echo "require=false" >> "$GITHUB_OUTPUT"
+            echo "calibrated=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Archive the exact audio variant
         env:
@@ -142,12 +152,14 @@ jobs:
           MODEL: ${{ steps.models.outputs.segment }}
           BOUNDARY: ${{ steps.models.outputs.boundary }}
           REQUIRE: ${{ steps.models.outputs.require }}
+          CALIBRATED: ${{ steps.models.outputs.calibrated }}
         run: |
           SNAP=$(python -c "import json;print(json.loads(open('out/audio_manifest.jsonl').readline())['audio'])")
           args=()
           if [ -n "$MODEL" ]; then args+=(--model "$MODEL"); fi
           if [ -n "$BOUNDARY" ]; then args+=(--boundary-model "$BOUNDARY"); fi
           if [ "$REQUIRE" = "true" ]; then args+=(--require-models); fi
+          if [ "$CALIBRATED" = "true" ]; then args+=(--require-calibrated-models); fi
           python scripts/blind_test.py --audio "$SNAP" "${args[@]}" --out out/timeline.json
       - name: Download ground truth after detection
         if: inputs.ground_truth_url != ''
@@ -160,12 +172,14 @@ jobs:
           MODEL: ${{ steps.models.outputs.segment }}
           BOUNDARY: ${{ steps.models.outputs.boundary }}
           REQUIRE: ${{ steps.models.outputs.require }}
+          CALIBRATED: ${{ steps.models.outputs.calibrated }}
         run: |
           SNAP=$(python -c "import json;print(json.loads(open('out/audio_manifest.jsonl').readline())['audio'])")
           args=()
           if [ -n "$MODEL" ]; then args+=(--model "$MODEL"); fi
           if [ -n "$BOUNDARY" ]; then args+=(--boundary-model "$BOUNDARY"); fi
           if [ "$REQUIRE" = "true" ]; then args+=(--require-models); fi
+          if [ "$CALIBRATED" = "true" ]; then args+=(--require-calibrated-models); fi
           python scripts/blind_test.py --audio "$SNAP" "${args[@]}" \
             --ground-truth out/ground_truth.json \
             --out out/timeline.json --metrics out/metrics.json

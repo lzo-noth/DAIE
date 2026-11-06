@@ -184,6 +184,7 @@ class BoundaryModel:
     data_version: str = ""
     git_commit: str = ""
     source: str = ""
+    deployment_calibration: dict = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Optional[str | Path] = None) -> Optional["BoundaryModel"]:
@@ -206,6 +207,8 @@ class BoundaryModel:
                 onset = offset = head
                 kind = "legacy_single"
             threshold = float(payload.get("threshold", 0.5))
+            metrics = payload.get("metrics") or {}
+            calibration = metrics.get("deployment_calibration") or {}
             return cls(
                 features=features,
                 onset=onset,
@@ -218,6 +221,7 @@ class BoundaryModel:
                 data_version=str(payload.get("data_version", "")),
                 git_commit=str(payload.get("git_commit", "")),
                 source=str(target),
+                deployment_calibration=calibration if isinstance(calibration, dict) else {},
             )
         except (OSError, ValueError, KeyError, TypeError):
             return None

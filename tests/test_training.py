@@ -60,6 +60,36 @@ def _boundary_episode(feed: str) -> EpisodeSample:
     )
 
 
+def _negative_episode(feed: str) -> EpisodeSample:
+    """Confirmed no-ad episode with consistent window/boundary labels."""
+    duration = 40.0
+    times = np.arange(0.5, duration, 0.5)
+    features = np.zeros((len(times), len(WINDOW_FEATURES)), dtype=np.float32)
+    features[:, 0] = -1.0
+    grid = 0.02
+    count = int(duration / grid)
+    return EpisodeSample(
+        feed=feed,
+        episode=feed,
+        audio="",
+        windows={
+            "times": times,
+            "hop_s": 0.5,
+            "span_s": 1.0,
+            "features": features,
+        },
+        indices=np.arange(len(times)),
+        labels=np.zeros(len(times), dtype=np.float64),
+        ads=[],
+        duration_s=duration,
+        change_scores=np.zeros(len(times)),
+        change_grid_s=grid,
+        boundary_features=np.zeros(
+            (count, len(BOUNDARY_FEATURES)), dtype=np.float16
+        ),
+    )
+
+
 def _boundary_rows(sample: EpisodeSample) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Onset/offset matrices with positives at the real boundaries."""
     features = sample.boundary_features.astype(np.float32)
@@ -398,29 +428,44 @@ class BoundaryThresholdCalibrationTest(unittest.TestCase):
                 require_boundary=True,
             )
 
-    def test_negative_only_holdouts_still_complete_pipeline(self) -> None:
-        for sample in self.samples:
-            sample.ads = []
+    def test_negative_control_holdout_still_completes_pipeline(self) -> None:
+        samples = [
+            _boundary_episode("A"),
+            _boundary_episode("B"),
+            _negative_episode("C"),
+        ]
+        X = np.vstack([sample.windows["features"] for sample in samples])
+        y = np.concatenate([sample.labels for sample in samples])
+        offsets = {
+            id(sample): (index * 80, (index + 1) * 80)
+            for index, sample in enumerate(samples)
+        }
+        rows = [_boundary_rows(sample) for sample in samples[:2]]
+        onset_X = [row[0] for row in rows]
+        onset_y = [row[1] for row in rows]
+        offset_X = [row[2] for row in rows]
+        offset_y = [row[3] for row in rows]
         _, _, onset_metrics, _ = _choose_boundary_thresholds(
             [0, 1, 2],
-            self.samples,
-            self.onset_X,
-            self.onset_y,
-            self.offset_X,
-            self.offset_y,
-            [0, 1, 2],
-            self.X,
-            self.y,
-            self.offsets,
+            samples,
+            onset_X,
+            onset_y,
+            offset_X,
+            offset_y,
+            [0, 1],
+            X,
+            y,
+            offsets,
             seed=3,
         )
         coverage = onset_metrics["coverage"]
         self.assertEqual(coverage["pipeline_folds_completed"], 3)
-        self.assertEqual(coverage["positive_boundary_episodes"], 0)
-        self.assertEqual(coverage["negative_control_episodes"], 3)
-        self.assertEqual(onset_metrics["ground_truth_events"], 0)
-        self.assertFalse(onset_metrics["boundary_calibration_valid"])
-        self.assertGreaterEqual(onset_metrics["false_positives"], 1)
+        self.assertEqual(coverage["classifier_folds_completed"], 3)
+        self.assertEqual(coverage["onset_folds_completed"], 3)
+        self.assertEqual(coverage["offset_folds_completed"], 3)
+        self.assertEqual(coverage["positive_boundary_episodes"], 2)
+        self.assertEqual(coverage["negative_control_episodes"], 1)
+        self.assertEqual(onset_metrics["ground_truth_events"], 2)
 
     def test_nonconverged_run_recalibrates_with_final_boundaries(self) -> None:
         event_values = [0.3, 0.35, 0.4, 0.45, 0.5, 0.65]
@@ -588,6 +633,52 @@ class BoundaryThresholdCalibrationTest(unittest.TestCase):
         )
         self.assertTrue(valid["recall_valid"])
         self.assertEqual(valid["threshold"], 0.5)
+
+    def test_false_positive_limit_is_a_hard_constraint(self) -> None:
+        results = [
+            {
+                "threshold": 0.4,
+                "matched": 5,
+                "ground_truth_events": 5,
+                "p95": 0.10,
+                "false_positives": 8,
+                "false_positives_per_hour": 80.0,
+            },
+            {
+                "threshold": 0.6,
+                "matched": 5,
+                "ground_truth_events": 5,
+                "p95": 0.15,
+                "false_positives": 1,
+                "false_positives_per_hour": 10.0,
+            },
+        ]
+        best = _select_boundary_candidate(
+            results,
+            min_recall_ratio=0.8,
+            min_event_recall=0.8,
+            max_false_positives_per_hour=20.0,
+        )
+        self.assertEqual(best["threshold"], 0.6)
+        self.assertTrue(best["false_positive_rate_valid"])
+
+        all_over_limit = [
+            {**results[0]},
+            {
+                **results[1],
+                "threshold": 0.7,
+                "false_positives": 4,
+                "false_positives_per_hour": 40.0,
+            },
+        ]
+        fallback = _select_boundary_candidate(
+            all_over_limit,
+            min_recall_ratio=0.8,
+            min_event_recall=0.8,
+            max_false_positives_per_hour=20.0,
+        )
+        self.assertFalse(fallback["false_positive_rate_valid"])
+        self.assertEqual(fallback["threshold"], 0.7)
 
     def test_cv_quality_requires_complete_pipeline(self) -> None:
         report = {

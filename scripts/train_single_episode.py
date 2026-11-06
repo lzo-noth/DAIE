@@ -58,6 +58,7 @@ from dai_detect.temporal_decoder import decode_windows
 
 
 MIN_BOUNDARY_EVENT_RECALL = 0.80
+MAX_BOUNDARY_FALSE_POSITIVES_PER_HOUR = 15.0
 MAX_CALIBRATION_ROUNDS = 5
 THRESHOLD_TOLERANCE = 0.01
 
@@ -391,6 +392,7 @@ def _calibration_validity(
     )
     return {
         "valid": final_ok,
+        "calibration_process_valid": final_ok,
         "converged": bool(converged),
         "event_threshold_valid": event_ok,
         "onset_threshold_valid": onset_ok,
@@ -624,30 +626,78 @@ def _select_boundary_candidate(
     results: list[dict],
     min_recall_ratio: float = 0.8,
     min_event_recall: float = MIN_BOUNDARY_EVENT_RECALL,
+    max_false_positives_per_hour: Optional[float] = None,
 ) -> dict:
-    """Pick a threshold by P95 without trading away event coverage.
+    """Pick a threshold by P95 without trading away event coverage or FPs.
 
     P95 only sees matched events, so a candidate with one or two easy matches
     can look perfect while missing most ads. Candidates must first retain
-    ``min_recall_ratio`` of the best achievable match count and also reach the
-    absolute ``min_event_recall`` target; P95 then breaks ties, followed by
-    match count. When no candidate reaches the absolute target, the best
-    coverage candidate is returned with ``recall_valid=False`` so callers do
-    not report an optimized P95 as a valid calibration.
+    ``min_recall_ratio`` of the best achievable match count and reach the
+    absolute ``min_event_recall`` target. When enabled, candidates above
+    ``max_false_positives_per_hour`` are excluded before P95 is compared.
+    Invalid dimensions are reported separately so a low P95 is never presented
+    as a valid calibration by itself.
     """
     if not results:
-        return {"threshold": 0.5, "matched": 0, "p95": None, "recall_valid": False}
-    best_matched = max(int(result.get("matched") or 0) for result in results)
+        return {
+            "threshold": 0.5,
+            "matched": 0,
+            "p95": None,
+            "recall_valid": False,
+            "false_positive_rate_valid": False,
+        }
+
+    def fp_rate(result: dict) -> Optional[float]:
+        value = result.get("false_positives_per_hour")
+        return float(value) if value is not None else None
+
+    limit = max_false_positives_per_hour
+    if limit is not None and limit > 0:
+        fp_ok_results = [
+            result
+            for result in results
+            if fp_rate(result) is not None and fp_rate(result) <= limit
+        ]
+    else:
+        fp_ok_results = list(results)
+
+    if not fp_ok_results:
+        fallback = min(
+            results,
+            key=lambda result: (
+                fp_rate(result) if fp_rate(result) is not None else float("inf"),
+                result.get("p95") if result.get("p95") is not None else float("inf"),
+                abs(float(result["threshold"]) - 0.5),
+            ),
+        )
+        return {
+            **fallback,
+            "recall_valid": False,
+            "false_positive_rate_valid": False,
+        }
+
+    best_matched = max(int(result.get("matched") or 0) for result in fp_ok_results)
+    ground_truth = max(
+        int(result.get("ground_truth_events") or 0) for result in fp_ok_results
+    )
     if best_matched <= 0:
-        chosen = min(results, key=lambda result: abs(float(result["threshold"]) - 0.5))
-        return {**chosen, "recall_valid": False}
-    ground_truth = max(int(result.get("ground_truth_events") or 0) for result in results)
+        chosen = min(
+            fp_ok_results, key=lambda result: abs(float(result["threshold"]) - 0.5)
+        )
+        return {
+            **chosen,
+            "recall_valid": False,
+            "false_positive_rate_valid": True,
+        }
+
     required = max(1, int(math.ceil(min_recall_ratio * best_matched)))
     required_absolute = (
         max(1, int(math.ceil(min_event_recall * ground_truth))) if ground_truth else None
     )
     within_range = [
-        result for result in results if int(result.get("matched") or 0) >= required
+        result
+        for result in fp_ok_results
+        if int(result.get("matched") or 0) >= required
     ]
     eligible = [
         result
@@ -669,17 +719,26 @@ def _select_boundary_candidate(
         )
 
     if eligible:
-        return {**min(eligible, key=key), "recall_valid": True}
+        return {
+            **min(eligible, key=key),
+            "recall_valid": True,
+            "false_positive_rate_valid": True,
+        }
 
     fallback = min(
-        within_range or results,
+        within_range or fp_ok_results,
         key=lambda result: (
             -int(result.get("matched") or 0),
             p95_value(result),
+            int(result.get("false_positives") or 0),
             abs(float(result["threshold"]) - 0.5),
         ),
     )
-    return {**fallback, "recall_valid": False}
+    return {
+        **fallback,
+        "recall_valid": False,
+        "false_positive_rate_valid": True,
+    }
 
 
 def _choose_boundary_thresholds(
@@ -697,6 +756,7 @@ def _choose_boundary_thresholds(
     provisional_threshold: float = 0.5,
     min_recall_ratio: float = 0.8,
     min_event_recall: float = MIN_BOUNDARY_EVENT_RECALL,
+    max_false_positives_per_hour: Optional[float] = MAX_BOUNDARY_FALSE_POSITIVES_PER_HOUR,
 ) -> tuple[float, float, dict, dict]:
     """Calibrate onset/offset thresholds against final refined boundaries.
 
@@ -786,6 +846,7 @@ def _choose_boundary_thresholds(
                     "offset_scores": _predict(offset_head, features) if events else None,
                     "times": np.arange(len(features)) * sample.change_grid_s,
                     "gt": ground_truth,
+                    "duration_s": float(sample.duration_s),
                 }
             )
             contributed = True
@@ -807,6 +868,7 @@ def _choose_boundary_thresholds(
         "ground_truth_events": ground_truth_events,
         "provisional_classifier_threshold": round(float(provisional_threshold), 4),
     }
+    total_duration = sum(item["duration_s"] for item in stored)
 
     def evaluate(
         onset_threshold: float, offset_threshold: float
@@ -844,11 +906,17 @@ def _choose_boundary_thresholds(
         else:
             _, end_errors, matched, false_positives = evaluate(other, value)
             errors = end_errors
+        fp_rate = (
+            round(false_positives / (total_duration / 3600.0), 3)
+            if total_duration > 0
+            else None
+        )
         return {
             "threshold": round(float(value), 4),
             "matched": matched,
             "ground_truth_events": ground_truth_events,
             "false_positives": false_positives,
+            "false_positives_per_hour": fp_rate,
             "p95": float(np.percentile(errors, 95)) if errors else None,
         }
 
@@ -856,12 +924,18 @@ def _choose_boundary_thresholds(
         coarse, _ = _boundary_candidates(center=0.5)
         results = [measure(kind, value, other) for value in coarse]
         best = _select_boundary_candidate(
-            results, min_recall_ratio, min_event_recall
+            results,
+            min_recall_ratio,
+            min_event_recall,
+            max_false_positives_per_hour,
         )
         _, fine = _boundary_candidates(center=float(best["threshold"]))
         results.extend(measure(kind, value, other) for value in fine)
         best = _select_boundary_candidate(
-            results, min_recall_ratio, min_event_recall
+            results,
+            min_recall_ratio,
+            min_event_recall,
+            max_false_positives_per_hour,
         )
         return float(best["threshold"]), best
 
@@ -882,12 +956,21 @@ def _choose_boundary_thresholds(
     onset_metrics = {
         "source": f"{fold_kind}_boundary_error",
         "objective": "boundary_p95",
-        "boundary_calibration_valid": bool(onset_result.get("recall_valid")),
+        "boundary_calibration_valid": bool(
+            onset_result.get("recall_valid")
+            and onset_result.get("false_positive_rate_valid")
+        ),
+        "recall_valid": bool(onset_result.get("recall_valid")),
+        "false_positive_rate_valid": bool(
+            onset_result.get("false_positive_rate_valid")
+        ),
         "boundary_start_p95_s": (
             round(float(onset_result["p95"]), 3) if onset_result["p95"] is not None else None
         ),
         "matched_events": int(onset_result["matched"]),
         "false_positives": int(onset_result.get("false_positives") or 0),
+        "false_positives_per_hour": onset_result.get("false_positives_per_hour"),
+        "max_false_positives_per_hour": max_false_positives_per_hour,
         "ground_truth_events": ground_truth_events,
         "event_recall": (
             round(float(onset_result["matched"]) / ground_truth_events, 4)
@@ -902,12 +985,21 @@ def _choose_boundary_thresholds(
     offset_metrics = {
         "source": f"{fold_kind}_boundary_error",
         "objective": "boundary_p95",
-        "boundary_calibration_valid": bool(offset_result.get("recall_valid")),
+        "boundary_calibration_valid": bool(
+            offset_result.get("recall_valid")
+            and offset_result.get("false_positive_rate_valid")
+        ),
+        "recall_valid": bool(offset_result.get("recall_valid")),
+        "false_positive_rate_valid": bool(
+            offset_result.get("false_positive_rate_valid")
+        ),
         "boundary_end_p95_s": (
             round(float(offset_result["p95"]), 3) if offset_result["p95"] is not None else None
         ),
         "matched_events": int(offset_result["matched"]),
         "false_positives": int(offset_result.get("false_positives") or 0),
+        "false_positives_per_hour": offset_result.get("false_positives_per_hour"),
+        "max_false_positives_per_hour": max_false_positives_per_hour,
         "ground_truth_events": ground_truth_events,
         "event_recall": (
             round(float(offset_result["matched"]) / ground_truth_events, 4)
@@ -937,6 +1029,7 @@ def _calibrate_thresholds(
     boundary_seed: int,
     min_recall_ratio: float = 0.8,
     min_event_recall: float = MIN_BOUNDARY_EVENT_RECALL,
+    max_false_positives_per_hour: Optional[float] = MAX_BOUNDARY_FALSE_POSITIVES_PER_HOUR,
 ) -> tuple[float, float, float, dict, dict, dict]:
     """Coordinate descent over classifier, onset and offset thresholds.
 
@@ -1004,6 +1097,7 @@ def _calibrate_thresholds(
                 provisional_threshold=event_threshold,
                 min_recall_ratio=min_recall_ratio,
                 min_event_recall=min_event_recall,
+                max_false_positives_per_hour=max_false_positives_per_hour,
             )
         )
         classifier_delta = abs(event_threshold - previous_event)
@@ -1332,6 +1426,12 @@ def main() -> int:
         default=MIN_BOUNDARY_EVENT_RECALL,
         help="边界阈值校准要求的最低事件召回率，未达到时标记校准无效",
     )
+    parser.add_argument(
+        "--max-boundary-fp-per-hour",
+        type=float,
+        default=MAX_BOUNDARY_FALSE_POSITIVES_PER_HOUR,
+        help="边界阈值候选允许的最大每小时误报数；<=0 表示不约束",
+    )
     args = parser.parse_args()
 
     annotations_path = args.annotations
@@ -1518,6 +1618,7 @@ def main() -> int:
             event_seed=fold_index + 1,
             boundary_seed=fold_index + 31,
             min_event_recall=args.min_boundary_event_recall,
+            max_false_positives_per_hour=args.max_boundary_fp_per_hour,
         )
         if not boundary_episode_indices:
             onset_X = onset_y = offset_X = offset_y = None
@@ -1632,6 +1733,7 @@ def main() -> int:
         event_seed=101,
         boundary_seed=909,
         min_event_recall=args.min_boundary_event_recall,
+        max_false_positives_per_hour=args.max_boundary_fp_per_hour,
     )
     deployment_calibration = {
         "threshold": round(deployment_threshold, 4),
@@ -1652,6 +1754,13 @@ def main() -> int:
     )
     deployment_calibration["final_recalibrated"] = bool(
         deployment_calibration_meta.get("final_recalibrated")
+    )
+    # Calibration acceptance is a process check, not a product-level
+    # performance certification. Precision/recall/P95 must come from an
+    # independent blind test, never from thresholds selected on inner folds.
+    deployment_calibration["performance_targets_met"] = None
+    deployment_calibration["performance_targets_source"] = (
+        "independent_blind_test_required"
     )
     if not deployment_calibration["valid"]:
         print(

@@ -127,6 +127,11 @@ def main() -> int:
         action="store_true",
         help="要求分类模型和边界模型都存在且 data_version 一致",
     )
+    parser.add_argument(
+        "--require-calibrated-models",
+        action="store_true",
+        help="要求两个模型都通过 deployment_calibration 校准验收",
+    )
     parser.add_argument("--proxy")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
@@ -138,6 +143,7 @@ def main() -> int:
         boundary_model_path=str(args.boundary_model) if args.boundary_model else None,
         proxy=args.proxy,
         require_models=args.require_models,
+        require_calibrated_models=args.require_calibrated_models,
     )
     progress = None if args.quiet else lambda message: print(message, file=sys.stderr, flush=True)
     timeline = analyze_single(args.audio, cfg, progress=progress)
@@ -193,6 +199,7 @@ def main() -> int:
             and metrics["boundary_p95_s"] <= ACCEPTANCE["boundary_p95_s"]
         ),
     }
+    passed = all(checks.values())
     report = {
         "audio": args.audio,
         "model": timeline["model"],
@@ -210,7 +217,9 @@ def main() -> int:
         )},
         "acceptance": ACCEPTANCE,
         "checks": checks,
-        "passed": all(checks.values()),
+        "passed": passed,
+        "performance_targets_met": passed,
+        "performance_targets_source": "independent_blind_test",
         "matches": metrics["matches"],
         "unmatched_predictions": metrics["unmatched_predictions"],
         "unmatched_ground_truth": metrics["unmatched_ground_truth"],
@@ -219,7 +228,7 @@ def main() -> int:
     if args.metrics:
         args.metrics.parent.mkdir(parents=True, exist_ok=True)
         args.metrics.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    return 0 if report["passed"] else 2
+    return 0 if passed else 2
 
 
 if __name__ == "__main__":

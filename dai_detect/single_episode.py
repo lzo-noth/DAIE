@@ -46,6 +46,7 @@ class SingleConfig:
     boundary_model_path: Optional[str] = None
     proxy: Optional[str] = None
     require_models: bool = False
+    require_calibrated_models: bool = False
 
 
 def extract_features(
@@ -70,6 +71,40 @@ def extract_features(
     mono_payload = collector.finish()
     mono_payload["audio_id_kind"] = "downmix_48k_to_16k"
     return mono_payload, forensic.finish()
+
+
+def _calibration_problems(
+    model: object, boundary_model: Optional[object]
+) -> list[str]:
+    """Return reasons the model artifacts fail strict calibration acceptance."""
+    if isinstance(model, HeuristicAdModel):
+        return ["广告分类器回退到了启发式实现，未通过校准验收"]
+    if boundary_model is None:
+        return ["边界模型缺失，未通过校准验收"]
+    problems: list[str] = []
+    classifier_calibration = getattr(model, "deployment_calibration", {}) or {}
+    boundary_calibration = getattr(boundary_model, "deployment_calibration", {}) or {}
+    for label, calibration in (
+        ("分类模型", classifier_calibration),
+        ("边界模型", boundary_calibration),
+    ):
+        if calibration.get("calibration_process_valid") is not True:
+            problems.append(f"{label}的 calibration_process_valid 不为 true")
+        if calibration.get("final_pipeline_valid") is not True:
+            problems.append(f"{label}的 final_pipeline_valid 不为 true")
+        if calibration.get("converged") is not True:
+            problems.append(f"{label}的阈值校准未收敛")
+    for key in ("onset_threshold", "offset_threshold"):
+        left = classifier_calibration.get(key)
+        right = boundary_calibration.get(key)
+        if left is None or right is None:
+            problems.append(f"分类模型与边界模型缺少一致的 {key}")
+        elif abs(float(left) - float(right)) > 1e-6:
+            problems.append(
+                f"分类模型与边界模型的 {key} 不一致"
+                f"（{float(left):.4f} vs {float(right):.4f}）"
+            )
+    return problems
 
 
 def _slot(start: float, end: float, duration: float) -> str:
@@ -103,6 +138,27 @@ def analyze_single(
             raise ValueError("要求训练模型，但分类模型缺少 data_version")
         if not getattr(boundary_model, "data_version", ""):
             raise ValueError("要求训练模型，但边界模型缺少 data_version")
+    if cfg.require_calibrated_models:
+        problems = _calibration_problems(model, boundary_model)
+        if problems:
+            raise ValueError("严格校准部署检查失败：" + "；".join(problems))
+    elif not isinstance(model, HeuristicAdModel):
+        classifier_calibration = getattr(model, "deployment_calibration", {}) or {}
+        boundary_calibration = (
+            getattr(boundary_model, "deployment_calibration", {}) or {}
+            if boundary_model is not None
+            else {}
+        )
+        invalid = [
+            calibration
+            for calibration in (classifier_calibration, boundary_calibration)
+            if calibration and calibration.get("calibration_process_valid") is not True
+        ]
+        if invalid and progress:
+            progress(
+                "警告: 模型 deployment_calibration 未通过校准验收；"
+                "结果不能作为校准验收依据（严格模式请使用 --require-calibrated-models）"
+            )
     if (
         boundary_model is not None
         and not isinstance(model, HeuristicAdModel)

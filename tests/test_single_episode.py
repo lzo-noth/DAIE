@@ -17,7 +17,9 @@ from dai_detect.boundary_model import BOUNDARY_FEATURES
 from dai_detect.cli import main
 from dai_detect.decode_config import resolve_thresholds
 from dai_detect.evaluation import evaluate_events, match_events
-from dai_detect.single_episode import SingleConfig, analyze_single
+from types import SimpleNamespace
+
+from dai_detect.single_episode import SingleConfig, _calibration_problems, analyze_single
 from dai_detect.single_features import WINDOW_FEATURES, window_labels
 from dai_detect.temporal_decoder import decode_windows
 from tests import synth
@@ -243,6 +245,94 @@ class SingleEpisodeTest(unittest.TestCase):
                 ),
             )
 
+    def test_require_calibrated_models_rejects_invalid_calibration(self) -> None:
+        audio, segment_path, boundary_path = self._calibrated_model_files(
+            classifier_calibration={
+                "calibration_process_valid": False,
+                "final_pipeline_valid": False,
+                "converged": False,
+                "onset_threshold": 0.5,
+                "offset_threshold": 0.5,
+            },
+            boundary_calibration=self._valid_calibration(),
+        )
+        with self.assertRaises(ValueError):
+            analyze_single(
+                str(audio),
+                SingleConfig(
+                    model_path=str(segment_path),
+                    boundary_model_path=str(boundary_path),
+                    require_models=True,
+                    require_calibrated_models=True,
+                ),
+            )
+
+    def test_require_calibrated_models_accepts_valid_calibration(self) -> None:
+        audio, segment_path, boundary_path = self._calibrated_model_files(
+            classifier_calibration=self._valid_calibration(),
+            boundary_calibration=self._valid_calibration(),
+        )
+        timeline = analyze_single(
+            str(audio),
+            SingleConfig(
+                model_path=str(segment_path),
+                boundary_model_path=str(boundary_path),
+                require_models=True,
+                require_calibrated_models=True,
+            ),
+        )
+        self.assertEqual(timeline["model"]["classifier"], "learned")
+
+    @staticmethod
+    def _valid_calibration() -> dict:
+        return {
+            "calibration_process_valid": True,
+            "final_pipeline_valid": True,
+            "converged": True,
+            "onset_threshold": 0.5,
+            "offset_threshold": 0.5,
+        }
+
+    def _calibrated_model_files(
+        self, classifier_calibration: dict, boundary_calibration: dict
+    ) -> tuple[Path, Path, Path]:
+        head = {
+            "mean": [0.0] * len(BOUNDARY_FEATURES),
+            "scale": [1.0] * len(BOUNDARY_FEATURES),
+            "weights": [0.0] * len(BOUNDARY_FEATURES),
+            "intercept": 0.0,
+        }
+        segment = {
+            "version": 1,
+            "kind": "logistic",
+            "features": list(WINDOW_FEATURES),
+            "mean": [0.0] * len(WINDOW_FEATURES),
+            "scale": [1.0] * len(WINDOW_FEATURES),
+            "weights": [0.0] * len(WINDOW_FEATURES),
+            "intercept": 0.0,
+            "threshold": 0.5,
+            "data_version": "a" * 64,
+            "metrics": {"deployment_calibration": classifier_calibration},
+        }
+        boundary = {
+            "version": 1,
+            "kind": "onset_offset",
+            "features": list(BOUNDARY_FEATURES),
+            "onset": head,
+            "offset": head,
+            "threshold": 0.5,
+            "onset_threshold": 0.5,
+            "offset_threshold": 0.5,
+            "data_version": "a" * 64,
+            "metrics": {"deployment_calibration": boundary_calibration},
+        }
+        segment_path = self.directory / "calibrated_segment.json"
+        boundary_path = self.directory / "calibrated_boundary.json"
+        segment_path.write_text(json.dumps(segment), encoding="utf-8")
+        boundary_path.write_text(json.dumps(boundary), encoding="utf-8")
+        audio = self._episode("calibrated.wav", 20.0, 40.0, 60.0)
+        return audio, segment_path, boundary_path
+
     def test_audio_identity_binds_the_exact_variant(self) -> None:
         first = self._episode("variant_a.wav", 20.0, 40.0, 60.0)
         timeline_a = analyze_single(str(first), SingleConfig())
@@ -301,6 +391,57 @@ class SingleEpisodeTest(unittest.TestCase):
         payload = json.loads(report.read_text(encoding="utf-8"))
         self.assertEqual(payload["mode"], "single_recording_blind")
         self.assertTrue(payload["ads"], payload)
+
+
+class StrictCalibrationDeploymentTest(unittest.TestCase):
+    def _calibration(self, **overrides) -> dict:
+        calibration = {
+            "calibration_process_valid": True,
+            "final_pipeline_valid": True,
+            "converged": True,
+            "onset_threshold": 0.5,
+            "offset_threshold": 0.5,
+        }
+        calibration.update(overrides)
+        return calibration
+
+    def _models(self, classifier=None, boundary=None) -> tuple[SimpleNamespace, SimpleNamespace]:
+        return (
+            SimpleNamespace(
+                deployment_calibration=classifier or self._calibration()
+            ),
+            SimpleNamespace(
+                deployment_calibration=boundary or self._calibration()
+            ),
+        )
+
+    def test_accepts_jointly_valid_calibrations(self) -> None:
+        model, boundary = self._models()
+        self.assertEqual(_calibration_problems(model, boundary), [])
+
+    def test_rejects_uncalibrated_classifier(self) -> None:
+        model, boundary = self._models(
+            classifier=self._calibration(calibration_process_valid=False)
+        )
+        problems = _calibration_problems(model, boundary)
+        self.assertTrue(any("calibration_process_valid" in problem for problem in problems))
+
+    def test_rejects_nonconverged_boundary(self) -> None:
+        model, boundary = self._models(boundary=self._calibration(converged=False))
+        problems = _calibration_problems(model, boundary)
+        self.assertTrue(any("未收敛" in problem for problem in problems))
+
+    def test_rejects_threshold_mismatch(self) -> None:
+        model, boundary = self._models(
+            boundary=self._calibration(onset_threshold=0.6)
+        )
+        problems = _calibration_problems(model, boundary)
+        self.assertTrue(any("不一致" in problem for problem in problems))
+
+    def test_rejects_missing_boundary_model(self) -> None:
+        model = SimpleNamespace(deployment_calibration=self._calibration())
+        problems = _calibration_problems(model, None)
+        self.assertTrue(any("边界模型缺失" in problem for problem in problems))
 
 
 if __name__ == "__main__":

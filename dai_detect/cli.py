@@ -110,6 +110,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="要求分类模型和边界模型都存在且版本一致；缺失或回退到启发式时直接报错",
     )
+    single_parser.add_argument(
+        "--require-calibrated-models",
+        action="store_true",
+        help="要求两个模型都通过校准验收；deployment_calibration 无效或阈值不一致时直接报错",
+    )
     single_parser.add_argument("--proxy", help="HTTP(S) 代理，例如 http://127.0.0.1:7890")
     single_parser.add_argument("--quiet", action="store_true")
 
@@ -124,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
             boundary_model_path=str(args.boundary_model) if args.boundary_model else None,
             proxy=args.proxy,
             require_models=args.require_models,
+            require_calibrated_models=args.require_calibrated_models,
         )
         progress = None if args.quiet else _progress
         try:
