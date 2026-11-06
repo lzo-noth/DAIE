@@ -113,6 +113,12 @@ python scripts/annotate_release_episodes.py \
 
 `release-train-blind` 是手动 workflow，需要在仓库 Secrets 中配置 `GEMINI_API_KEY` 或 `OPENAI_API_KEY`。它读取 `train_manifest_url` 和 `blind_manifest_url`，产出 artifact `dai-release-pipeline-<run_number>`，包含模型、LLM 标注、转写、逐集盲测报告和汇总指标。`generate_weak_blind_labels=true` 会用 ASR+LLM 自动生成盲测集真值；`allow_weak_blind_labels=true` 允许这类非人工真值跑通流程。两者都不会把 `performance_targets_met` 标为 true，因为 LLM 标签不是人工验收真值。
 
+### 从历史 report 抽样并上传到 Release
+
+`sample-release-audio` 手动 workflow 会扫描仓库里的 `artifact/**/report.json`，按 seed 随机抽取指定数量的 episode（优先覆盖不同 feed），下载音频、计算 `source_sha256`，上传 artifact，并附加到 `release_tag` 指定的 Release。它还会把清单写入 `datasets/sampled_release_manifest.jsonl`（可关闭提交）。
+
+默认参数：`count=15`、`seed=42`、`max_per_feed=1`、`release_tag=1.0`。生成的清单每行包含 `audio`（Release URL）、`feed`、`episode`、`source_sha256`、`source_url`，可直接作为 `release-train-blind` 的训练清单；盲测音频必须来自未参与训练的 feed。
+
 标注 JSONL 每行一集：
 
 ```json

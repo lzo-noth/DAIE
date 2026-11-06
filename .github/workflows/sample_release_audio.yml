@@ -1,0 +1,97 @@
+name: sample-release-audio
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "采样集数"
+        required: false
+        default: "15"
+      seed:
+        description: "随机种子（可复现）"
+        required: false
+        default: "42"
+      max_per_feed:
+        description: "每个 feed 最多先取几集（默认先保证 feed 多样性）"
+        required: false
+        default: "1"
+      release_tag:
+        description: "附加到的 Release tag"
+        required: false
+        default: "1.0"
+      upload_to_release:
+        description: "是否把音频附加到 Release"
+        required: false
+        default: "true"
+      commit_manifest:
+        description: "是否把采样清单提交到仓库"
+        required: false
+        default: "true"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dai-sample-release-audio
+  cancel-in-progress: false
+
+jobs:
+  sample:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Sample and download audio
+        env:
+          COUNT: ${{ inputs.count }}
+          SEED: ${{ inputs.seed }}
+          MAX_PER_FEED: ${{ inputs.max_per_feed }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          python scripts/sample_report_audio.py \
+            --reports-root artifact \
+            --count "$COUNT" --seed "$SEED" --max-per-feed "$MAX_PER_FEED" \
+            --release-tag "$RELEASE_TAG" \
+            --out-dir out/sample_audio \
+            --manifest out/sample_audio_manifest.jsonl
+          ls -lh out/sample_audio | head -30
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dai-sampled-audio-${{ github.run_number }}
+          path: |
+            out/sample_audio/
+            out/sample_audio_manifest.jsonl
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Attach audio to Release
+        if: inputs.upload_to_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" out/sample_audio/* --clobber
+      - name: Commit sampled manifest
+        if: inputs.commit_manifest == 'true'
+        env:
+          MANIFEST: out/sample_audio_manifest.jsonl
+        run: |
+          set -euo pipefail
+          mkdir -p datasets
+          cp "$MANIFEST" datasets/sampled_release_manifest.jsonl
+          git config user.name "github-actions"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add datasets/sampled_release_manifest.jsonl
+          if git diff --cached --quiet; then
+            echo "manifest unchanged"
+          else
+            git commit -m "Add sampled release audio manifest"
+            git push
+          fi
