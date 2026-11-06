@@ -50,12 +50,12 @@ jobs:
         id: analysis-venv
         with:
           path: .venv-analysis
-          key: dai-analysis-venv-v1
+          key: dai-analysis-venv-v2
       - name: Prepare analysis venv
         if: steps.analysis-venv.outputs.cache-hit != 'true'
         run: |
           python -m venv .venv-analysis
-          .venv-analysis/bin/python -m pip install --quiet numpy
+          .venv-analysis/bin/python -m pip install --quiet numpy imageio-ffmpeg
       - id: matrix
         env:
           PLATFORM_FILTER: ${{ inputs.platform }}
@@ -125,16 +125,12 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: .venv-analysis
-          key: dai-analysis-venv-v1
+          key: dai-analysis-venv-v2
       - name: Ensure analysis environment
         run: |
           if [ ! -x .venv-analysis/bin/python ]; then
             python -m venv .venv-analysis
-            .venv-analysis/bin/python -m pip install --quiet numpy
-          fi
-          if ! command -v ffmpeg >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y ffmpeg
+            .venv-analysis/bin/python -m pip install --quiet numpy imageio-ffmpeg
           fi
       - name: Analyze ${{ matrix.platform }} / ${{ matrix.feed }}
         env:
@@ -177,23 +173,17 @@ jobs:
           path: |
             .venv
             ~/.cache/huggingface
-          key: dai-venv-py312-v3
+          key: dai-venv-py312-v4
       - name: Prepare ASR/LLM environment
         if: steps.venv.outputs.cache-hit != 'true'
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install --quiet --upgrade pip
-          .venv/bin/python -m pip install --quiet numpy faster-whisper openai
+          .venv/bin/python -m pip install --quiet numpy faster-whisper openai imageio-ffmpeg
           .venv/bin/python - <<'PY'
           from faster_whisper import WhisperModel
           WhisperModel("base.en", device="cpu", compute_type="int8")
           PY
-      - name: Ensure ffmpeg
-        run: |
-          if ! command -v ffmpeg >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y ffmpeg
-          fi
       - name: Download analysis artifacts
         continue-on-error: true
         uses: actions/download-artifact@v4

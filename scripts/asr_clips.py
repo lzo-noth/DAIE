@@ -6,9 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from dai_detect.audio import ffmpeg_path
 
 AD_TERMS = [
     "sponsored by",
@@ -48,7 +53,7 @@ def ad_terms(text: str) -> list[str]:
 def load_audio(path: Path) -> np.ndarray:
     result = subprocess.run(
         [
-            "ffmpeg",
+            ffmpeg_path(),
             "-nostdin",
             "-loglevel",
             "error",

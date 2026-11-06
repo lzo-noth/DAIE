@@ -18,6 +18,18 @@ class AudioError(RuntimeError):
     pass
 
 
+def ffmpeg_path() -> str:
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError as exc:
+        raise AudioError("找不到 ffmpeg；请安装 ffmpeg 或 imageio-ffmpeg") from exc
+
+
 def _ffmpeg_env(proxy: Optional[str]) -> dict:
     env = os.environ.copy()
     if proxy:
@@ -49,9 +61,7 @@ def iter_pcm(
     proxy: Optional[str] = None,
     sample_rate: int = SAMPLE_RATE,
 ) -> Iterator[np.ndarray]:
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise AudioError("找不到 ffmpeg，请先安装并加入 PATH")
+    ffmpeg = ffmpeg_path()
     cmd = [
         ffmpeg,
         "-nostdin",

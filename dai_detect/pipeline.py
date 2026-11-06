@@ -11,7 +11,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from .audio import iter_pcm, load_cache, save_cache, source_key
+from .audio import ffmpeg_path, iter_pcm, load_cache, save_cache, source_key
 from .boundaries import segment_evidence
 from .calibration import Calibration, apply_calibration
 from .features import Decimator, FeatureExtractor
@@ -272,7 +272,7 @@ def _write_clips(
             continue
         output = clips_dir / f"{slug}_{index:02d}_{int(candidate.start_s)}s_{candidate.tier}.mp3"
         command = [
-            "ffmpeg",
+            ffmpeg_path(),
             "-y",
             "-loglevel",
             "error",
