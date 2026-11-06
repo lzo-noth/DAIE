@@ -23,6 +23,14 @@ on:
         description: "只跑名称或 slug 包含该子串的 feed（可选）"
         required: false
         default: ""
+      feeds:
+        description: "只跑这些 feed slug/名称子串，逗号分隔（可选）"
+        required: false
+        default: ""
+      max_parallel:
+        description: "并发 job 数（LLM 限流时建议 4）"
+        required: false
+        default: "16"
 
 permissions:
   contents: read
@@ -55,12 +63,14 @@ jobs:
         env:
           PLATFORM_FILTER: ${{ inputs.platform }}
           FEED_FILTER: ${{ inputs.feed }}
+          FEEDS_FILTER: ${{ inputs.feeds }}
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
           data = json.load(open("platforms.json", encoding="utf-8"))
           needle = (os.environ.get("PLATFORM_FILTER") or "").strip().lower()
           feed_needle = (os.environ.get("FEED_FILTER") or "").strip().lower()
+          feeds_needles = [n.strip().lower() for n in (os.environ.get("FEEDS_FILTER") or "").split(",") if n.strip()]
           entries = []
           for platform in data:
               if needle and needle not in (platform.get("platform") or "").lower():
@@ -68,6 +78,8 @@ jobs:
               for feed in platform.get("feeds", []):
                   haystack = f"{feed.get('slug', '')} {feed.get('name', '')}".lower()
                   if feed_needle and feed_needle not in haystack:
+                      continue
+                  if feeds_needles and not any(n in haystack for n in feeds_needles):
                       continue
                   entries.append({
                       "platform": platform["platform"],
@@ -106,7 +118,7 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: 16
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
