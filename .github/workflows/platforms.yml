@@ -26,10 +26,27 @@ permissions:
 jobs:
   setup:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/huggingface
+          key: dai-py312-whisper-base-en-v1
+      - name: Prepare ASR dependencies and model
+        run: |
+          python -m pip install --quiet numpy faster-whisper
+          python - <<'PY'
+          from faster_whisper import WhisperModel
+          WhisperModel("base.en", device="cpu", compute_type="int8")
+          PY
       - id: matrix
         env:
           PLATFORM_FILTER: ${{ inputs.platform }}
@@ -80,17 +97,25 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 16
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/huggingface
+          key: dai-py312-whisper-base-en-v1
       - name: Install dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ffmpeg
+          fi
           python -m pip install --quiet numpy faster-whisper
       - name: Analyze ${{ matrix.platform }} / ${{ matrix.feed }}
         env:
