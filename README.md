@@ -77,6 +77,8 @@ python -m dai_detect verify platforms.json --report feed_verification.json
 
 Actions 配置了 `GEMINI_API_KEY`（或 `OPENAI_API_KEY`）后，会对候选 ASR 文本做 LLM 分类：第三方广告加权并标记 `llm_verified`，正片、自宣和主播口播默认从报告中移除；重复候选若被 LLM 高置信判为正片也会删除（保留可用 `--keep-repeated-content`）。每集最多生成 40 个试听片段，确保候选都能进入 ASR/LLM。未配置 key 时只保留重复指纹、slot 和关键词证据。
 
+LLM 标注也会反馈到检测器：当前样本里 slot 命中主要出现在正片（21/27），timbre 在正片反而更高，因此 slot 只对已有音乐/响度证据的候选小幅加分，timbre 不再作为广告正证据。`scripts/calibrate.py` 可从带 `llm` 字段的报告重算这些统计，输出 `calibration.json`；声学门控 precision 约 0.23，LLM 仍是主要判别层。
+
 ## GitHub Actions
 
 仓库内置两个工作流：

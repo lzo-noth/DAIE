@@ -1,0 +1,19 @@
+{
+  "samples": 35,
+  "ads": 8,
+  "ad_evidence": {
+    "musicness_min": 0.3,
+    "loudness_dev_min": 5.0
+  },
+  "slot_boost": {
+    "ad_like_only": true,
+    "single": 0.05,
+    "multi": 0.08
+  },
+  "observed": {
+    "gate_precision": 0.233,
+    "gate_recall": 0.875,
+    "slot_ads": 1,
+    "slot_non_ads": 21
+  }
+}

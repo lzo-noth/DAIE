@@ -256,13 +256,14 @@ def insertion_candidates(
         )
         if host_like:
             score -= 0.22
+        # LLM-labeled content showed higher timbre than ads; only music and
+        # loudness are positive acoustic evidence.
         ad_evidence = (
             stats["musicness"] >= 0.3
             or stats["loudness_dev_db"] >= 5.0
-            or timbre_min >= 0.55
         )
         if not ad_evidence:
-            score -= 0.08
+            score -= 0.10
         if duration > features.duration_s * 0.6 and stats["musicness"] < 0.3:
             continue
         if score < cfg.min_insertion_score:

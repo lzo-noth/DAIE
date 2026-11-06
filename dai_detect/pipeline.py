@@ -238,11 +238,20 @@ def _apply_slot_consistency(
             ]
             if not matches:
                 continue
-            candidate.score = round(min(0.95, candidate.score + (0.10 if len(matches) == 1 else 0.14)), 3)
             candidate.evidence["slot_matches"] = len(matches)
             candidate.evidence["slot_delta_s"] = round(
                 min(abs(candidate.start_s - other.start_s) for other in matches), 1
             )
+            # LLM labels showed slot matches are common on content. Only boost
+            # a slot-consistent candidate that already has acoustic ad evidence.
+            ad_like = (
+                candidate.evidence.get("musicness", 0.0) >= 0.3
+                or candidate.evidence.get("loudness_dev_db", 0.0) >= 5.0
+            )
+            if ad_like:
+                candidate.score = round(
+                    min(0.95, candidate.score + (0.05 if len(matches) == 1 else 0.08)), 3
+                )
 
 
 def _write_clips(
