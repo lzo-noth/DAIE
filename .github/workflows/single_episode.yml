@@ -102,7 +102,6 @@ jobs:
           python -m pip install --quiet numpy
       - name: Download models trained in this run
         if: inputs.annotations_path != ''
-        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: dai-models-${{ github.run_number }}
@@ -111,12 +110,17 @@ jobs:
         id: models
         run: |
           mkdir -p out
-          if [ -f out/trained/ad_segment_model.json ]; then
+          if [ -f out/trained/ad_segment_model.json ] && [ -f out/trained/boundary_model.json ]; then
             echo "segment=out/trained/ad_segment_model.json" >> "$GITHUB_OUTPUT"
             echo "boundary=out/trained/boundary_model.json" >> "$GITHUB_OUTPUT"
+            echo "require=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ inputs.annotations_path }}" != "" ]; then
+            echo "训练模式要求分类模型和边界模型都存在，但 artifact 不完整" >&2
+            exit 1
           else
             echo "segment=${{ inputs.model_path }}" >> "$GITHUB_OUTPUT"
             echo "boundary=models/boundary_model.json" >> "$GITHUB_OUTPUT"
+            echo "require=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Archive the exact audio variant
         env:
@@ -131,10 +135,13 @@ jobs:
         env:
           MODEL: ${{ steps.models.outputs.segment }}
           BOUNDARY: ${{ steps.models.outputs.boundary }}
+          REQUIRE: ${{ steps.models.outputs.require }}
         run: |
           SNAP=$(python -c "import json;print(json.loads(open('out/audio_manifest.jsonl').readline())['audio'])")
+          ARGS=""
+          if [ "$REQUIRE" = "true" ]; then ARGS="--require-models"; fi
           python scripts/blind_test.py --audio "$SNAP" --model "$MODEL" \
-            --boundary-model "$BOUNDARY" --out out/timeline.json
+            --boundary-model "$BOUNDARY" $ARGS --out out/timeline.json
       - name: Download ground truth after detection
         if: inputs.ground_truth_url != ''
         env:
@@ -145,10 +152,13 @@ jobs:
         env:
           MODEL: ${{ steps.models.outputs.segment }}
           BOUNDARY: ${{ steps.models.outputs.boundary }}
+          REQUIRE: ${{ steps.models.outputs.require }}
         run: |
           SNAP=$(python -c "import json;print(json.loads(open('out/audio_manifest.jsonl').readline())['audio'])")
+          ARGS=""
+          if [ "$REQUIRE" = "true" ]; then ARGS="--require-models"; fi
           python scripts/blind_test.py --audio "$SNAP" --model "$MODEL" \
-            --boundary-model "$BOUNDARY" \
+            --boundary-model "$BOUNDARY" $ARGS \
             --ground-truth out/ground_truth.json \
             --out out/timeline.json --metrics out/metrics.json
       - uses: actions/upload-artifact@v4
@@ -181,6 +191,7 @@ jobs:
         env:
           ANNOTATIONS: ${{ inputs.annotations_path }}
         run: |
+          set -euo pipefail
           mkdir -p out
           python scripts/train_single_episode.py --annotations "$ANNOTATIONS" \
             --model-out out/ad_segment_model.json \

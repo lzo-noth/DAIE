@@ -20,6 +20,7 @@ from typing import Callable, Optional
 from .ad_classifier import HeuristicAdModel, load_ad_model
 from .audio import DownmixResampler, iter_pcm_stereo, source_sha256
 from .boundary_model import load_boundary_model, score_boundaries
+from .decode_config import resolve_thresholds
 from .features import FeatureExtractor
 from .forensic import StereoForensicExtractor
 from .refinement import refine_events
@@ -44,6 +45,7 @@ class SingleConfig:
     model_path: Optional[str] = None
     boundary_model_path: Optional[str] = None
     proxy: Optional[str] = None
+    require_models: bool = False
 
 
 def extract_features(
@@ -91,16 +93,29 @@ def analyze_single(
 
     windows = build_windows(mono, forensic, hop_s=cfg.hop_s, span_s=cfg.span_s)
     model = load_ad_model(cfg.model_path)
+    boundary_model = load_boundary_model(cfg.boundary_model_path)
+    if cfg.require_models:
+        if isinstance(model, HeuristicAdModel):
+            raise ValueError("要求训练模型，但广告分类器回退到了启发式实现")
+        if boundary_model is None:
+            raise ValueError("要求训练模型，但边界模型缺失")
+    if (
+        boundary_model is not None
+        and not isinstance(model, HeuristicAdModel)
+        and model.data_version
+        and boundary_model.data_version
+        and model.data_version != boundary_model.data_version
+    ):
+        raise ValueError(
+            "分类模型与边界模型的 data_version 不一致，拒绝混用不同训练批次"
+        )
     if progress and isinstance(model, HeuristicAdModel):
         progress("警告: 未找到训练模型，使用启发式兜底（指标不可作为验收依据）")
     probabilities = model.predict(windows["features"], windows["names"])
 
     threshold = float(getattr(model, "threshold", 0.5))
-    enter = cfg.enter_threshold if cfg.enter_threshold is not None else min(
-        0.75, max(0.45, threshold + 0.05)
-    )
-    exit_threshold = cfg.exit_threshold if cfg.exit_threshold is not None else max(
-        0.20, enter - 0.15
+    enter, exit_threshold = resolve_thresholds(
+        threshold, cfg.enter_threshold, cfg.exit_threshold
     )
 
     decoded = decode_windows(
@@ -116,7 +131,6 @@ def analyze_single(
     )
 
     if cfg.refine:
-        boundary_model = load_boundary_model(cfg.boundary_model_path)
         change = score_boundaries(mono, forensic, boundary_model)
         events = refine_events(decoded, change, search_s=cfg.search_s, min_duration=cfg.min_ad_s)
     else:
@@ -168,9 +182,19 @@ def analyze_single(
             "source": getattr(model, "source", ""),
             "version": getattr(model, "model_version", ""),
             "data_version": getattr(model, "data_version", ""),
+            "git_commit": getattr(model, "git_commit", ""),
             "threshold": threshold,
             "enter_threshold": round(enter, 3),
             "exit_threshold": round(exit_threshold, 3),
+            "boundary": {
+                "source": getattr(boundary_model, "source", ""),
+                "version": getattr(boundary_model, "version", ""),
+                "data_version": getattr(boundary_model, "data_version", ""),
+                "git_commit": getattr(boundary_model, "git_commit", ""),
+                "kind": getattr(boundary_model, "kind", "heuristic" if boundary_model is None else ""),
+                "onset_threshold": getattr(boundary_model, "onset_threshold", None),
+                "offset_threshold": getattr(boundary_model, "offset_threshold", None),
+            },
         },
         "ads": ads,
         "stats": {

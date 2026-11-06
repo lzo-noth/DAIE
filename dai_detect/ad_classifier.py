@@ -116,5 +116,10 @@ class HeuristicAdModel:
 
 
 def load_ad_model(path: Optional[str | Path] = None) -> AdModel | HeuristicAdModel:
-    model = AdModel.load(path)
+    if path is not None:
+        model = AdModel.load(path)
+        if model is None:
+            raise ValueError(f"无法加载广告分类模型: {path}（文件缺失、损坏或特征不兼容）")
+        return model
+    model = AdModel.load(None)
     return model if model is not None else HeuristicAdModel()

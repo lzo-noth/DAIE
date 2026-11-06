@@ -105,6 +105,11 @@ def main(argv: list[str] | None = None) -> int:
     single_parser.add_argument("--threshold", type=float, help="覆盖模型进入阈值")
     single_parser.add_argument("--min-ad", type=float, default=6.0, help="广告最短秒数（默认 6）")
     single_parser.add_argument("--min-confidence", type=float, default=0.0, help="输出最低置信度（默认 0）")
+    single_parser.add_argument(
+        "--require-models",
+        action="store_true",
+        help="要求分类模型和边界模型都存在且版本一致；缺失或回退到启发式时直接报错",
+    )
     single_parser.add_argument("--proxy", help="HTTP(S) 代理，例如 http://127.0.0.1:7890")
     single_parser.add_argument("--quiet", action="store_true")
 
@@ -118,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
             model_path=str(args.model) if args.model else None,
             boundary_model_path=str(args.boundary_model) if args.boundary_model else None,
             proxy=args.proxy,
+            require_models=args.require_models,
         )
         progress = None if args.quiet else _progress
         try:

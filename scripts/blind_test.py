@@ -122,6 +122,11 @@ def main() -> int:
         action="store_true",
         help="真值缺少音频身份字段时仍评分（默认拒绝，仅用于调试）",
     )
+    parser.add_argument(
+        "--require-models",
+        action="store_true",
+        help="要求分类模型和边界模型都存在且 data_version 一致",
+    )
     parser.add_argument("--proxy")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
@@ -132,6 +137,7 @@ def main() -> int:
         model_path=str(args.model) if args.model else None,
         boundary_model_path=str(args.boundary_model) if args.boundary_model else None,
         proxy=args.proxy,
+        require_models=args.require_models,
     )
     progress = None if args.quiet else lambda message: print(message, file=sys.stderr, flush=True)
     timeline = analyze_single(args.audio, cfg, progress=progress)
@@ -174,8 +180,14 @@ def main() -> int:
         duration_s=timeline["duration_s"] or gt_duration,
     )
     checks = {
-        "event_precision": metrics["event_precision"] >= ACCEPTANCE["event_precision"],
-        "event_recall": metrics["event_recall"] >= ACCEPTANCE["event_recall"],
+        "event_precision": (
+            metrics["event_precision"] is not None
+            and metrics["event_precision"] >= ACCEPTANCE["event_precision"]
+        ),
+        "event_recall": (
+            metrics["event_recall"] is not None
+            and metrics["event_recall"] >= ACCEPTANCE["event_recall"]
+        ),
         "boundary_p95_s": (
             metrics["boundary_p95_s"] is not None
             and metrics["boundary_p95_s"] <= ACCEPTANCE["boundary_p95_s"]

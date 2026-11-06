@@ -57,13 +57,25 @@ class EventEvaluationAlignmentTest(unittest.TestCase):
 
     def test_rejects_probabilities_shorter_than_full_timeline(self) -> None:
         with self.assertRaises(ValueError):
-            _event_metrics([self._sample()], [0], {0: np.zeros(5)}, threshold=0.5)
+            _event_metrics([self._sample()], [0], {0: np.zeros(5)}, thresholds=0.5)
 
     def test_accepts_full_length_probabilities(self) -> None:
         metrics = _event_metrics(
-            [self._sample()], [0], {0: np.zeros(20)}, threshold=0.5, refine=False
+            [self._sample()], [0], {0: np.zeros(20)}, thresholds=0.5, refine=False
         )
         self.assertIn("event_precision", metrics)
+
+    def test_empty_ground_truth_feed_still_reports_false_positives(self) -> None:
+        sample = self._sample()
+        sample.ads = []
+        probabilities = np.full(20, 0.95)
+        metrics = _event_metrics(
+            [sample], [0], {0: probabilities}, thresholds=0.5, refine=False
+        )
+        self.assertEqual(metrics["event_precision"], 0.0)
+        self.assertIsNone(metrics["event_recall"])
+        self.assertGreaterEqual(metrics["false_positives"], 1)
+        self.assertIsNotNone(metrics["false_positives_per_hour"])
 
 
 class AudioIdentityTest(unittest.TestCase):

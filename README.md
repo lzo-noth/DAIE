@@ -23,7 +23,7 @@
   -> 时间轴 JSON
 ```
 
-训练产物可直接用于同一工作流的盲测：`train` job 上传模型 artifact，`blind-test` job 通过 `needs` 下载并使用；如果本次没有训练，则回退到 `models/ad_segment_model.json`。模型文件记录 `model_version`、`data_version`（标注与音频身份的哈希）和 `git_commit`，时间轴会原样输出这些字段。盲测 artifact 同时包含归档的原始音频快照，便于之后人工标注和复现。
+训练产物可直接用于同一工作流的盲测：`train` job 上传模型 artifact，`blind-test` job 通过 `needs` 下载并使用；如果本次没有训练，则回退到 `models/ad_segment_model.json`。训练模式下两个模型必须都存在，否则 job 失败。分类器和边界模型各自记录 `model_version`、`data_version`（标注与音频身份的哈希）和 `git_commit`，时间轴会输出两份元信息；两者 `data_version` 不一致时拒绝使用。盲测 artifact 同时包含归档的原始音频快照，便于之后人工标注和复现。
 
 单集检测：
 
@@ -54,7 +54,9 @@ python scripts/train_single_episode.py \
   --boundary-out models/boundary_model.json
 ```
 
-训练输出广告分类模型和 onset/offset 双头边界模型。事件指标使用留出节目的完整窗口概率序列，并由该折的边界模型精修后计算事件 P/R 和两侧边界误差 P95。
+训练输出广告分类模型和 onset/offset 双头边界模型。阈值在每折训练集内部再做分组交叉验证选择，留出节目只参与最终评估；没有广告的留出集仍输出误报数和每小时误报。训练评估与实际推理共用 [decode_config.py](file:///d:/DAI/dai_detect/decode_config.py) 的 enter/exit 阈值规则。
+
+训练模式下 workflow 强制要求分类模型和边界模型都成功下载；任一缺失都会让 job 失败，不会静默回退到启发式。手动运行时可加 `--require-models` 做同样的强制检查。时间轴同时记录分类器和边界模型的 `version`、`data_version`、`git_commit`，两者 `data_version` 不一致时拒绝混用。
 
 标注 JSONL 每行一集：
 
@@ -79,7 +81,7 @@ python scripts/blind_test.py --audio episode.mp3 \
   --out timeline.json --metrics metrics.json
 ```
 
-盲测脚本只有在时间轴生成后才读取真值，并按事件 IoU ≥ 0.3 匹配，输出事件 precision/recall、边界误差 P95 和每小时误报。验收目标：事件 precision ≥ 0.90、recall ≥ 0.90、边界 P95 ≤ 0.5 s。没有人工真值时检测器只输出时间轴，不宣称达标。
+盲测脚本只有在时间轴生成后才读取真值，并按事件 IoU ≥ 0.3 做最大基数匹配（再最大化总 IoU），而不是贪心匹配，输出事件 precision/recall、边界误差 P95 和每小时误报。空真值集仍统计误报数和每小时误报，此时 recall 记为未定义。验收目标：事件 precision ≥ 0.90、recall ≥ 0.90、边界 P95 ≤ 0.5 s。没有人工真值时检测器只输出时间轴，不宣称达标。
 
 ### 怎么保证标注音频和训练/评测音频是同一份
 

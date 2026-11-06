@@ -181,6 +181,8 @@ class BoundaryModel:
     offset_threshold: float = 0.5
     kind: str = "onset_offset"
     version: str = ""
+    data_version: str = ""
+    git_commit: str = ""
     source: str = ""
 
     @classmethod
@@ -213,6 +215,8 @@ class BoundaryModel:
                 offset_threshold=float(payload.get("offset_threshold", threshold)),
                 kind=kind,
                 version=str(payload.get("model_version", "")),
+                data_version=str(payload.get("data_version", "")),
+                git_commit=str(payload.get("git_commit", "")),
                 source=str(target),
             )
         except (OSError, ValueError, KeyError, TypeError):
@@ -292,4 +296,9 @@ def score_boundaries(
 
 
 def load_boundary_model(path: Optional[str | Path] = None) -> Optional[BoundaryModel]:
-    return BoundaryModel.load(path)
+    if path is not None:
+        model = BoundaryModel.load(path)
+        if model is None:
+            raise ValueError(f"无法加载边界模型: {path}（文件缺失、损坏或特征不兼容）")
+        return model
+    return BoundaryModel.load(None)

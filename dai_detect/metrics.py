@@ -34,6 +34,23 @@ def roc_auc(labels: np.ndarray, scores: np.ndarray) -> float:
     )
 
 
+def threshold_metrics(labels: np.ndarray, scores: np.ndarray, threshold: float) -> dict:
+    labels = np.asarray(labels).reshape(-1)
+    scores = np.asarray(scores, dtype=np.float64).reshape(-1)
+    predicted = scores >= threshold
+    tp = int(np.sum(predicted & (labels == 1)))
+    fp = int(np.sum(predicted & (labels == 0)))
+    fn = int(np.sum(~predicted & (labels == 1)))
+    precision = tp / (tp + fp) if tp + fp else 0.0
+    recall = tp / (tp + fn) if tp + fn else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return {
+        "precision": round(precision, 4),
+        "recall": round(recall, 4),
+        "f1": round(f1, 4),
+    }
+
+
 def best_f1_threshold(labels: np.ndarray, scores: np.ndarray) -> tuple[float, dict]:
     """Pick the F1-maximising threshold; ties prefer the value closest to 0.5."""
     labels = np.asarray(labels).reshape(-1)

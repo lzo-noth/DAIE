@@ -13,8 +13,10 @@ import numpy as np
 
 from dai_detect.ad_classifier import AdModel
 from dai_detect.audio import PcmHasher, file_sha256
+from dai_detect.boundary_model import BOUNDARY_FEATURES
 from dai_detect.cli import main
-from dai_detect.evaluation import evaluate_events
+from dai_detect.decode_config import resolve_thresholds
+from dai_detect.evaluation import evaluate_events, match_events
 from dai_detect.single_episode import SingleConfig, analyze_single
 from dai_detect.single_features import WINDOW_FEATURES, window_labels
 from dai_detect.temporal_decoder import decode_windows
@@ -68,6 +70,7 @@ class SingleEpisodeTest(unittest.TestCase):
         self.assertLessEqual(abs(best["start"] - 20.0), 2.0, best)
         self.assertLessEqual(abs(best["end"] - 40.0), 2.0, best)
         self.assertTrue(best["type"] == "third_party_inserted")
+        self.assertEqual(timeline["model"]["boundary"]["kind"], "heuristic")
 
     def test_plain_speech_has_no_ad(self) -> None:
         frames = synth.stereo(synth.speech(60.0, 211, sr=SR48), 4, sr=SR48)
@@ -127,6 +130,77 @@ class SingleEpisodeTest(unittest.TestCase):
         self.assertEqual(metrics["event_precision"], 1.0)
         self.assertEqual(metrics["event_recall"], 1.0)
         self.assertAlmostEqual(metrics["boundary_p95_s"], 0.295, places=3)
+
+    def test_max_matching_beats_greedy_iou(self) -> None:
+        # Greedy picks P1-G1 (IoU 0.83) and leaves P2 unmatched.
+        # Maximum matching instead uses P1-G2 (0.47) and P2-G1 (0.80).
+        predictions = [
+            {"start_s": 0.0, "end_s": 12.0},
+            {"start_s": 0.0, "end_s": 8.0},
+        ]
+        truths = [
+            {"start_s": 0.0, "end_s": 10.0},
+            {"start_s": 5.0, "end_s": 15.0},
+        ]
+        result = match_events(predictions, truths)
+        self.assertEqual(len(result["matches"]), 2, result)
+        metrics = evaluate_events(predictions, truths)
+        self.assertEqual(metrics["event_recall"], 1.0)
+        self.assertEqual(metrics["event_precision"], 1.0)
+
+    def test_decode_thresholds_are_shared_with_inference(self) -> None:
+        self.assertEqual(resolve_thresholds(0.5), (0.55, 0.4))
+        self.assertEqual(resolve_thresholds(0.8), (0.75, 0.6))
+        enter, exit_value = resolve_thresholds(0.1)
+        self.assertAlmostEqual(enter, 0.45)
+        self.assertAlmostEqual(exit_value, 0.3)
+
+    def test_require_models_rejects_heuristic_fallback(self) -> None:
+        path = self._episode("require.wav", 20.0, 40.0, 60.0)
+        with self.assertRaises(ValueError):
+            analyze_single(str(path), SingleConfig(require_models=True))
+
+    def test_rejects_mismatched_classifier_and_boundary_versions(self) -> None:
+        head = {
+            "mean": [0.0] * len(BOUNDARY_FEATURES),
+            "scale": [1.0] * len(BOUNDARY_FEATURES),
+            "weights": [0.0] * len(BOUNDARY_FEATURES),
+            "intercept": 0.0,
+        }
+        segment = {
+            "version": 1,
+            "kind": "logistic",
+            "features": list(WINDOW_FEATURES),
+            "mean": [0.0] * len(WINDOW_FEATURES),
+            "scale": [1.0] * len(WINDOW_FEATURES),
+            "weights": [0.0] * len(WINDOW_FEATURES),
+            "intercept": 0.0,
+            "threshold": 0.5,
+            "data_version": "a" * 64,
+        }
+        boundary = {
+            "version": 1,
+            "kind": "onset_offset",
+            "features": list(BOUNDARY_FEATURES),
+            "onset": head,
+            "offset": head,
+            "threshold": 0.5,
+            "data_version": "b" * 64,
+        }
+        segment_path = self.directory / "segment.json"
+        boundary_path = self.directory / "boundary.json"
+        segment_path.write_text(json.dumps(segment), encoding="utf-8")
+        boundary_path.write_text(json.dumps(boundary), encoding="utf-8")
+        audio = self._episode("versions.wav", 20.0, 40.0, 60.0)
+        with self.assertRaises(ValueError):
+            analyze_single(
+                str(audio),
+                SingleConfig(
+                    model_path=str(segment_path),
+                    boundary_model_path=str(boundary_path),
+                    require_models=True,
+                ),
+            )
 
     def test_audio_identity_binds_the_exact_variant(self) -> None:
         first = self._episode("variant_a.wav", 20.0, 40.0, 60.0)

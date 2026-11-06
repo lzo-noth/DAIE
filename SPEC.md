@@ -70,14 +70,18 @@
 - 边界模型：onset 与 offset 两个独立逻辑回归头，特征同时包含绝对变化量和带方向的有符号变化量（`models/boundary_model.json`）；旧版单头模型仍可加载。
 - 边界精修：用 onset 头搜开始、offset 头搜结束；先对约 0.2 s 的取证分数做平滑以覆盖淡入淡出，再在 ±0.35 s 内回到原始峰值；内部变化强度显著高于两端时拒绝这组边界。
 - 时间解码：滑动中值/均值平滑后做滞回状态机，合并短间隙、过滤过短事件、拆分超长事件。
-- 模型文件记录 `model_version`、`data_version`（标注与音频身份的哈希）和 `git_commit`；时间轴输出同一组字段。
+- 模型文件记录 `model_version`、`data_version`（标注与音频身份的哈希）和 `git_commit`；时间轴分别输出分类器和边界模型的元信息，两者 `data_version` 不一致时拒绝使用。
+- 运行模式显式区分：`trained`（两个模型都已加载并通过版本校验）、`heuristic`（调试兜底）、`invalid`（模型缺失/损坏/版本冲突时报错退出）。`--require-models` 或工作流训练模式必须走 `trained`，不得静默降级。
 - 预留升级位：可用预训练音频编码器（PANNs/AST/WavLM/HuBERT）+ TCN/BiGRU 替换分类器，只要保持窗口特征接口和“单音频输入”约束即可。
 
 ### 3.4 训练与弱监督
 
 - 训练数据来自人工标注（`datasets/annotations.jsonl`）和 LLM 候选标注（`feedback/labels.jsonl` + 音频清单）。
 - 数据划分必须按节目（feed）分组，禁止同一节目跨训练/测试集。分组交叉验证为留一节目：每折的测试集是该节目的全部剧集，训练集是其余节目；不足两个节目时训练直接拒绝，避免过于乐观的单节目评测。
-- 事件级评估必须使用该折模型对**完整窗口序列**的预测，不能把筛选后的窗口概率与完整时间轴混用。
+- 阈值选择采用嵌套分组交叉验证：外层留出节目只参与最终评估，阈值只用外层训练集内部的内层折选择；训练评估和实际推理共用同一 enter/exit 阈值函数。
+- 每个外层训练折必须同时包含正负窗口，否则中止训练；边界 onset/offset 训练折同样独立检查类别。
+- 事件级评估必须使用该折模型对**完整窗口序列**的预测，不能把筛选后的窗口概率与完整时间轴混用。没有广告的留出集仍统计误报和每小时误报，recall 记为未定义。
+- 事件匹配使用最大基数二分图匹配，再在最大基数下最大化总 IoU；不使用贪心 IoU 排序。
 - 边界评估使用同一折的 onset/offset 边界头对留出集精修，并分别报告两个头的帧级 P/R/AUC 与事件边界误差 P95，而不是只看启发式变化分数。
 - 音频增强：多次 MP3/AAC 重编码、响度归一化、混响与底噪叠加、音乐床混合、交叉淡入淡出、不同拼接边界类型。
 - 训练脚本输出模型 JSON 与分组交叉验证指标；不把 LLM 标签当人工真值。
@@ -163,8 +167,9 @@ DAI 会在同一 URL 背后按请求替换广告，因此 URL、文件名、RSS 
 | `dai_detect/boundary_model.py` | 帧级边界变化特征与模型 |
 | `dai_detect/temporal_decoder.py` | 时序解码 |
 | `dai_detect/refinement.py` | 边界精修 |
+| `dai_detect/decode_config.py` | 训练评估与推理共用的 enter/exit 阈值 |
 | `dai_detect/single_episode.py` | 单音频端到端检测 |
-| `dai_detect/evaluation.py` | 事件级指标 |
+| `dai_detect/evaluation.py` | 事件级最大匹配指标 |
 | `scripts/train_single_episode.py` | 训练广告/边界模型 |
 | `scripts/blind_test.py` | 盲测与真值评估 |
 | `scripts/snapshot_audio.py` | 按字节归档音频快照，产出身份清单 |
