@@ -1,13 +1,13 @@
 {
   "version": 1,
-  "round": 1,
+  "round": 2,
   "max_rounds": 10,
-  "complete": false,
+  "complete": true,
   "stopped": false,
   "stop_reason": "",
-  "stale_rounds": 1,
+  "stale_rounds": 2,
   "patience": 2,
-  "updated_at": "2026-11-06T16:35:44+00:00",
+  "updated_at": "2026-11-06T16:59:00+00:00",
   "targets": {
     "precision": 0.0,
     "recall": 0.8,
@@ -18,17 +18,17 @@
     "candidates_per_hour": 30.0
   },
   "checks": {
-    "recall": true,
-    "recall_at": false,
     "auc": true,
+    "recall": true,
+    "recall_at": true,
     "fp_per_hour": true,
     "candidates_per_hour": true
   },
   "metrics": {
     "mode": "filter",
-    "samples": 741,
-    "ads": 50,
-    "non_ads": 691,
+    "samples": 800,
+    "ads": 61,
+    "non_ads": 739,
     "groups": [
       "99% Invisible",
       "ADSP: Algorithms + Data Structures = Programs",
@@ -45,77 +45,119 @@
       "This Week in Tech (Audio)",
       "WTF with Marc Maron Podcast"
     ],
-    "episode_hours": 26.414,
+    "episode_hours": 26.415,
     "threshold": 0.24,
     "top_k": 0,
     "learned": {
-      "precision": 0.147,
-      "recall": 0.9,
-      "f1": 0.252,
-      "auc": 0.833
+      "precision": 0.153,
+      "recall": 0.902,
+      "f1": 0.261,
+      "auc": 0.835
     },
     "baseline": {
-      "precision": 0.098,
-      "recall": 0.9,
-      "f1": 0.178,
-      "auc": 0.747
+      "precision": 0.104,
+      "recall": 0.902,
+      "f1": 0.186,
+      "auc": 0.731
     },
     "recall_at": {
-      "1": 0.1,
-      "2": 0.16,
-      "3": 0.2,
-      "5": 0.34,
-      "8": 0.44,
-      "10": 0.48,
-      "12": 0.54,
-      "15": 0.62,
-      "20": 0.78,
-      "24": 0.8,
-      "30": 0.88,
-      "40": 0.92
+      "1": 0.082,
+      "2": 0.148,
+      "3": 0.213,
+      "5": 0.311,
+      "8": 0.443,
+      "10": 0.508,
+      "12": 0.574,
+      "15": 0.639,
+      "20": 0.787,
+      "24": 0.82,
+      "30": 0.885,
+      "40": 0.934
     },
     "precision_at": {
       "1": 0.172,
-      "2": 0.14,
-      "3": 0.119,
-      "5": 0.125,
-      "8": 0.105,
-      "10": 0.094,
-      "12": 0.09,
-      "15": 0.086,
-      "20": 0.086,
-      "24": 0.078,
-      "30": 0.076,
-      "40": 0.071
+      "2": 0.158,
+      "3": 0.155,
+      "5": 0.14,
+      "8": 0.129,
+      "10": 0.121,
+      "12": 0.116,
+      "15": 0.108,
+      "20": 0.106,
+      "24": 0.097,
+      "30": 0.091,
+      "40": 0.084
+    },
+    "latest": {
+      "run_id": "42254784131-1",
+      "samples": 180,
+      "ads": 13,
+      "episode_hours": 25.48,
+      "learned": {
+        "precision": 0.159,
+        "recall": 1.0,
+        "auc": 0.909
+      },
+      "recall_at": {
+        "1": 0.462,
+        "2": 0.769,
+        "3": 0.846,
+        "5": 1.0,
+        "8": 1.0,
+        "10": 1.0,
+        "12": 1.0,
+        "15": 1.0,
+        "20": 1.0,
+        "24": 1.0,
+        "30": 1.0,
+        "40": 1.0
+      },
+      "precision_at": {
+        "1": 0.231,
+        "2": 0.192,
+        "3": 0.145,
+        "5": 0.111,
+        "8": 0.082,
+        "10": 0.074,
+        "12": 0.072,
+        "15": 0.072,
+        "20": 0.072,
+        "24": 0.072,
+        "30": 0.072,
+        "40": 0.072
+      },
+      "fp_per_hour": 2.71,
+      "candidates_per_hour": 3.22
     },
     "keyword": {
-      "terms": 56,
-      "texts": 429,
-      "hits": 93,
-      "precision": 0.333,
-      "recall": 0.62
+      "terms": 62,
+      "texts": 503,
+      "hits": 105,
+      "precision": 0.352,
+      "recall": 0.607
     },
-    "fp_per_hour": 9.92,
-    "candidates_per_hour": 11.62,
+    "fp_per_hour": 11.55,
+    "candidates_per_hour": 13.63,
     "targets": {
       "precision": null,
       "recall": 0.8,
       "recall_at_k": 40,
       "recall_at": 0.95,
       "auc": 0.8,
-      "fp_per_hour": 15.0
+      "fp_per_hour": 15.0,
+      "candidates_per_hour": null
     },
-    "target_met": false
+    "target_met": true
   },
   "active_calibration": {
     "enabled": true,
     "mode": "filter",
     "learned": {
-      "precision": 0.147,
-      "recall": 0.9,
-      "f1": 0.252,
-      "auc": 0.833
+      "precision": 0.153,
+      "recall": 0.902,
+      "f1": 0.261,
+      "auc": 0.835
     },
-    "fp_per_hour": 9.92
+    "fp_per_hour": 11.55
   }
 }
