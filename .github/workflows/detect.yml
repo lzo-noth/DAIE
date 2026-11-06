@@ -1,0 +1,85 @@
+name: dai-detect
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+    inputs:
+      feed_url:
+        description: "播客 RSS 地址"
+        required: true
+        default: "https://feeds.simplecast.com/hNaFxXpO"
+      episodes:
+        description: "分析最新几集（至少 2 集）"
+        required: false
+        default: "3"
+      min_score:
+        description: "最低候选分数"
+        required: false
+        default: "0.5"
+      min_run:
+        description: "重复区间最短秒数"
+        required: false
+        default: "8"
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          python -m pip install --quiet numpy
+      - name: Run tests
+        run: python -m unittest discover -s tests -t . -v
+
+  detect:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          python -m pip install --quiet numpy
+      - name: Analyze feed
+        env:
+          FEED_URL: ${{ inputs.feed_url }}
+          EPISODES: ${{ inputs.episodes }}
+          MIN_SCORE: ${{ inputs.min_score }}
+          MIN_RUN: ${{ inputs.min_run }}
+        run: |
+          mkdir -p out
+          set -o pipefail
+          python -m dai_detect feed "$FEED_URL" \
+            -n "$EPISODES" \
+            --min-score "$MIN_SCORE" \
+            --min-run "$MIN_RUN" \
+            --fresh \
+            --cache-dir out/cache \
+            --report out/report.json 2>&1 | tee out/run.log
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dai-report-${{ github.run_number }}
+          path: |
+            out/report.json
+            out/run.log
+          if-no-files-found: warn
+          retention-days: 30
