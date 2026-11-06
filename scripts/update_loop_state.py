@@ -37,21 +37,27 @@ def main() -> int:
     metrics = _read_json(args.metrics)
     previous = _read_json(args.state)
     active = _read_json(args.calibration)
+    latest = metrics.get("latest") or {}
     learned = metrics.get("learned") or {}
+    latest_learned = latest.get("learned") or learned
     precision = float(learned.get("precision") or 0.0)
-    recall = float(learned.get("recall") or 0.0)
+    recall = float(latest_learned.get("recall") or learned.get("recall") or 0.0)
     auc = float(learned.get("auc") or 0.0)
-    fp_per_hour = metrics.get("fp_per_hour")
-    candidates_per_hour = metrics.get("candidates_per_hour")
-    recall_at = metrics.get("recall_at") or {}
+    fp_per_hour = latest.get("fp_per_hour", metrics.get("fp_per_hour"))
+    candidates_per_hour = latest.get("candidates_per_hour", metrics.get("candidates_per_hour"))
+    recall_at = latest.get("recall_at") or metrics.get("recall_at") or {}
     recall_at_value = float(recall_at.get(str(args.target_recall_at_k)) or 0.0)
+    latest_ads = int(latest.get("ads") or 0)
     checks = {
-        "recall": recall >= args.target_recall,
-        "recall_at": recall_at_value >= args.target_recall_at,
         "auc": auc >= args.target_auc,
     }
-    if args.target_precision > 0:
-        checks["precision"] = precision >= args.target_precision
+    if latest_ads > 0:
+        checks["recall"] = recall >= args.target_recall
+        checks["recall_at"] = recall_at_value >= args.target_recall_at
+        if args.target_precision > 0:
+            checks["precision"] = (
+                float(latest_learned.get("precision") or precision) >= args.target_precision
+            )
     if fp_per_hour is not None:
         checks["fp_per_hour"] = float(fp_per_hour) <= args.target_fp_per_hour
     if candidates_per_hour is not None:

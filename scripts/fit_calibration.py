@@ -26,8 +26,18 @@ def _row_key(feed: str, episode: str, start: float, end: float, tier: str) -> st
 
 def _load_rows(
     paths: list[Path],
-) -> tuple[list[list[float]], np.ndarray, np.ndarray, list[str], list[str], list[float], list[str]]:
-    entries: dict[str, tuple[list[float], int, float, str, str, float, str]] = {}
+) -> tuple[
+    list[list[float]],
+    np.ndarray,
+    np.ndarray,
+    list[str],
+    list[str],
+    list[float],
+    list[str],
+    list[str],
+    list[str],
+]:
+    entries: dict[str, tuple[list[float], int, float, str, str, float, str, str, str]] = {}
     for path in paths:
         if path.suffix.lower() == ".jsonl":
             try:
@@ -59,6 +69,8 @@ def _load_rows(
                     f"{feed}|{episode}",
                     duration,
                     str(row.get("asr_text") or ""),
+                    str(row.get("run_id") or ""),
+                    str(row.get("collected_at") or ""),
                 )
             continue
         try:
@@ -90,6 +102,8 @@ def _load_rows(
                 f"{group}|{episode}",
                 duration,
                 str(entry.get("asr_text") or features.get("asr_text") or ""),
+                "",
+                "",
             )
     rows = [item[0] for item in entries.values()]
     labels = np.asarray([item[1] for item in entries.values()], dtype=np.float64)
@@ -98,7 +112,9 @@ def _load_rows(
     episodes = [item[4] for item in entries.values()]
     durations = [item[5] for item in entries.values()]
     texts = [item[6] for item in entries.values()]
-    return rows, labels, baselines, groups, episodes, durations, texts
+    run_ids = [item[7] for item in entries.values()]
+    timestamps = [item[8] for item in entries.values()]
+    return rows, labels, baselines, groups, episodes, durations, texts, run_ids, timestamps
 
 
 def _standardize(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -228,6 +244,7 @@ def main() -> int:
     parser.add_argument("--target-recall-at", type=float, default=0.95)
     parser.add_argument("--target-auc", type=float)
     parser.add_argument("--target-fp-per-hour", type=float)
+    parser.add_argument("--target-candidates-per-hour", type=float)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -238,7 +255,17 @@ def main() -> int:
             paths.extend(path.rglob("*.jsonl"))
         else:
             paths.append(path)
-    rows, labels, baselines, groups, episodes, durations, texts = _load_rows(sorted(set(paths)))
+    (
+        rows,
+        labels,
+        baselines,
+        groups,
+        episodes,
+        durations,
+        texts,
+        run_ids,
+        timestamps,
+    ) = _load_rows(sorted(set(paths)))
     if len(rows) == 0 or labels.sum() == 0 or (len(labels) - labels.sum()) == 0:
         print(f"not enough labels: samples={len(rows)} ads={int(labels.sum())}")
         metrics = {
@@ -311,6 +338,73 @@ def main() -> int:
     fp_per_hour = round(false_positives / hours, 2) if hours > 0 else None
     candidates_per_hour = round(selected / hours, 2) if hours > 0 else None
 
+    # The gate must measure the round that is actually reviewed. Older rounds
+    # accumulate different DAI creatives for the same episode, which inflates
+    # the per-episode candidate count and makes recall@K meaningless.
+    latest_run = ""
+    latest_timestamp = ""
+    for run_id, timestamp in zip(run_ids, timestamps):
+        if timestamp and timestamp > latest_timestamp:
+            latest_timestamp = timestamp
+            latest_run = run_id
+    latest_indices = (
+        [index for index, run_id in enumerate(run_ids) if run_id == latest_run]
+        if latest_run
+        else list(range(len(rows)))
+    )
+    if not latest_indices:
+        latest_indices = list(range(len(rows)))
+    latest_scores = learned_cv[latest_indices]
+    latest_labels = labels[latest_indices]
+    latest_episodes = [episodes[index] for index in latest_indices]
+    latest_durations = [durations[index] for index in latest_indices]
+    latest_recall_at, latest_precision_at, latest_fp_at, latest_selected_at = _at_k(
+        latest_scores, latest_labels, latest_episodes, ks
+    )
+    latest_hours = _episode_hours(latest_episodes, latest_durations)
+    if args.mode == "rank":
+        latest_selected = latest_selected_at[top_k]
+        latest_false_positives = latest_fp_at[top_k]
+        latest_precision = latest_precision_at[top_k]
+        latest_recall = latest_recall_at[top_k]
+    else:
+        latest_predicted = latest_scores >= learned_threshold
+        latest_selected = int(latest_predicted.sum())
+        latest_false_positives = int((latest_predicted & (latest_labels == 0)).sum())
+        latest_true_positive = int((latest_predicted & (latest_labels == 1)).sum())
+        latest_precision = latest_true_positive / max(1, latest_selected)
+        latest_recall = latest_true_positive / max(1, int(latest_labels.sum()))
+    latest_ads = int(latest_labels.sum())
+    if latest_ads == 0:
+        latest_recall = 1.0
+        latest_recall_at = {k: 1.0 for k in ks}
+    latest_fp_per_hour = (
+        round(latest_false_positives / latest_hours, 2) if latest_hours > 0 else None
+    )
+    latest_candidates_per_hour = (
+        round(latest_selected / latest_hours, 2) if latest_hours > 0 else None
+    )
+    latest = {
+        "run_id": latest_run,
+        "samples": len(latest_indices),
+        "ads": latest_ads,
+        "episode_hours": round(latest_hours, 3),
+        "learned": {
+            "precision": round(latest_precision, 3),
+            "recall": round(latest_recall, 3),
+            "auc": round(_auc(latest_scores, latest_labels), 3),
+        },
+        "recall_at": {str(k): round(v, 3) for k, v in latest_recall_at.items()},
+        "precision_at": {str(k): round(v, 3) for k, v in latest_precision_at.items()},
+        "fp_per_hour": latest_fp_per_hour,
+        "candidates_per_hour": latest_candidates_per_hour,
+    }
+    print(
+        f"latest run={latest_run} samples={latest['samples']} ads={latest_ads} "
+        f"recall@{args.target_recall_at_k}={latest_recall_at.get(args.target_recall_at_k)} "
+        f"candidates/hour={latest_candidates_per_hour}"
+    )
+
     terms = load_terms(Path("feedback/keywords.json"))
     hits = [bool(match_terms(text, terms)) for text in texts]
     total_ads = int(labels.sum())
@@ -331,16 +425,24 @@ def main() -> int:
         "recall_at": args.target_recall_at,
         "auc": args.target_auc,
         "fp_per_hour": args.target_fp_per_hour,
+        "candidates_per_hour": args.target_candidates_per_hour,
     }
     checks = []
     if args.target_auc is not None:
         checks.append(learned_auc >= args.target_auc)
-    if args.target_recall_at_k and args.target_recall_at is not None:
-        checks.append(recall_at.get(args.target_recall_at_k, 0.0) >= args.target_recall_at)
-    if args.target_recall is not None:
-        checks.append(recall >= args.target_recall)
-    if args.target_fp_per_hour is not None and fp_per_hour is not None:
-        checks.append(fp_per_hour <= args.target_fp_per_hour)
+    if latest_ads > 0:
+        if args.target_recall_at_k and args.target_recall_at is not None:
+            checks.append(
+                latest_recall_at.get(args.target_recall_at_k, 0.0) >= args.target_recall_at
+            )
+        if args.target_recall is not None:
+            checks.append(latest_recall >= args.target_recall)
+        if args.target_precision is not None and args.target_precision > 0:
+            checks.append(latest_precision >= args.target_precision)
+    if args.target_fp_per_hour is not None and latest_fp_per_hour is not None:
+        checks.append(latest_fp_per_hour <= args.target_fp_per_hour)
+    if args.target_candidates_per_hour is not None and latest_candidates_per_hour is not None:
+        checks.append(latest_candidates_per_hour <= args.target_candidates_per_hour)
     target_met = bool(checks) and all(checks)
 
     improved = learned_auc > baseline_auc + 0.01
@@ -357,13 +459,18 @@ def main() -> int:
         "baseline": {**baseline_metrics, "auc": round(baseline_auc, 3)},
         "recall_at": {str(k): round(v, 3) for k, v in recall_at.items()},
         "precision_at": {str(k): round(v, 3) for k, v in precision_at.items()},
+        "latest": latest,
         "keyword": keyword_metrics,
         "fp_per_hour": fp_per_hour,
         "candidates_per_hour": candidates_per_hour,
         "targets": targets,
         "target_met": target_met,
     }
-    print(f"fp/hour={fp_per_hour} candidates/hour={candidates_per_hour} target_met={target_met} targets={targets}")
+    print(
+        f"fp/hour={fp_per_hour} candidates/hour={candidates_per_hour} "
+        f"latest_fp/hour={latest_fp_per_hour} latest_candidates/hour={latest_candidates_per_hour} "
+        f"target_met={target_met} targets={targets}"
+    )
     print(f"keyword={keyword_metrics}")
 
     standardized, mean, scale = _standardize(x)

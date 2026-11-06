@@ -136,12 +136,24 @@ class FeedbackLoopTest(unittest.TestCase):
             json.dumps(row) + "\n" + json.dumps({**row, "is_ad": False}) + "\n",
             encoding="utf-8",
         )
-        rows, labels, baselines, groups, episodes, durations, texts = _load_rows([store])
+        (
+            rows,
+            labels,
+            baselines,
+            groups,
+            episodes,
+            durations,
+            texts,
+            run_ids,
+            timestamps,
+        ) = _load_rows([store])
         self.assertEqual(len(rows), 1)
         self.assertEqual(int(labels.sum()), 0)
         self.assertEqual(groups, ["F"])
         self.assertEqual(durations, [100.0])
         self.assertEqual(texts, [""])
+        self.assertEqual(run_ids, [""])
+        self.assertEqual(timestamps, [""])
 
     def test_update_loop_state_writes_complete_marker(self) -> None:
         metrics = self.directory / "metrics.json"
