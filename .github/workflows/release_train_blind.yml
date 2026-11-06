@@ -1,0 +1,106 @@
+name: release-train-blind
+
+on:
+  workflow_dispatch:
+    inputs:
+      train_manifest_url:
+        description: "训练清单 URL/仓库路径（每行: audio_url, feed, episode）"
+        required: true
+      blind_manifest_url:
+        description: "盲测清单 URL/仓库路径（每行: audio, feed, episode, ground_truth）"
+        required: true
+      whisper_model:
+        description: "faster-whisper 模型"
+        required: false
+        default: "base.en"
+      language:
+        description: "转写语言"
+        required: false
+        default: "en"
+      min_events:
+        description: "批量盲测最少真值广告数"
+        required: false
+        default: "10"
+      min_feeds:
+        description: "批量盲测最少未见 feed 数"
+        required: false
+        default: "3"
+      allow_weak_blind_labels:
+        description: "允许 LLM_weak/unverified 真值跑通流程（不会标记性能达标）"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  release-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          python -m pip install --quiet numpy openai faster-whisper
+      - name: Fetch release manifests
+        env:
+          TRAIN_URL: ${{ inputs.train_manifest_url }}
+          BLIND_URL: ${{ inputs.blind_manifest_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/release
+          if [[ "$TRAIN_URL" == http* ]]; then curl -fsSL "$TRAIN_URL" -o out/release/train_manifest.jsonl; else cp "$TRAIN_URL" out/release/train_manifest.jsonl; fi
+          if [[ "$BLIND_URL" == http* ]]; then curl -fsSL "$BLIND_URL" -o out/release/blind_manifest.jsonl; else cp "$BLIND_URL" out/release/blind_manifest.jsonl; fi
+      - name: Transcribe and LLM-annotate training release audio
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          WHISPER_MODEL: ${{ inputs.whisper_model }}
+          LANGUAGE: ${{ inputs.language }}
+        run: |
+          set -euo pipefail
+          python scripts/annotate_release_episodes.py \
+            --manifest out/release/train_manifest.jsonl \
+            --annotations-out out/release/annotations.jsonl \
+            --transcripts-out out/release/transcripts.jsonl \
+            --snapshot-dir out/release/snapshots \
+            --whisper-model "$WHISPER_MODEL" --language "$LANGUAGE" \
+            --labels-source llm_weak
+      - name: Train single-recording models
+        run: |
+          set -euo pipefail
+          python scripts/train_single_episode.py \
+            --annotations out/release/annotations.jsonl \
+            --model-out out/release/ad_model.json \
+            --boundary-out out/release/boundary_model.json \
+            --require-ad-type
+      - name: Blind test release audio batch
+        env:
+          ALLOW_WEAK: ${{ inputs.allow_weak_blind_labels }}
+          MIN_EVENTS: ${{ inputs.min_events }}
+          MIN_FEEDS: ${{ inputs.min_feeds }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "$ALLOW_WEAK" = "true" ]; then args+=(--allow-nonhuman-ground-truth); fi
+          python scripts/blind_test_batch.py \
+            --manifest out/release/blind_manifest.jsonl \
+            --model out/release/ad_model.json \
+            --boundary-model out/release/boundary_model.json \
+            --require-models --require-calibrated-models --require-independent-test \
+            --min-events "$MIN_EVENTS" --min-feeds "$MIN_FEEDS" \
+            "${args[@]}" \
+            --reports-out-dir out/release/blind_reports \
+            --out out/release/blind_summary.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dai-release-pipeline-${{ github.run_number }}
+          path: out/release/
+          if-no-files-found: warn
+          retention-days: 30

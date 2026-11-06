@@ -19,6 +19,90 @@ Output JSON must look like {"results":[{"id":"0:1","is_ad":false,"ad_type":"cont
 Include exactly one result per input id."""
 
 
+SEGMENT_SYSTEM_PROMPT = """You classify timestamped transcript segments from a podcast episode.
+Return strict JSON only. For every segment decide:
+- is_ad: true only for a paid advertisement or sponsorship. Ordinary episode content and unpaid self-promotion are false.
+- ad_type: "third_party_ad" for a paid sponsor/ad, "self_promo" for the show's own products/other episodes, "content" for normal content, "uncertain" when unclear.
+- host_read: true when the ad is read by the show host in their own voice; false for produced or separately inserted creatives.
+- confidence: 0.0 to 1.0.
+- brand: sponsor/brand name if identifiable, else "".
+- reason: at most 120 characters.
+Input JSON looks like {"items":[{"id":"0","start_s":10.0,"end_s":20.0,"text":"..."}]}.
+Output JSON must look like {"results":[{"id":"0","is_ad":false,"ad_type":"content","host_read":false,"confidence":0.9,"brand":"","reason":"..."}]}.
+Include exactly one result per input id."""
+
+
+def classify_transcript_segments(
+    segments: list[dict],
+    client,
+    model: str,
+    batch_size: int = 12,
+) -> dict[str, dict[str, Any]]:
+    """Classify full-episode transcript segments as ads or content."""
+    results: dict[str, dict[str, Any]] = {}
+    for start in range(0, len(segments), batch_size):
+        batch = []
+        for index in range(start, min(start + batch_size, len(segments))):
+            segment = segments[index]
+            batch.append(
+                {
+                    "id": str(index),
+                    "start_s": round(float(segment.get("start_s", 0.0)), 2),
+                    "end_s": round(float(segment.get("end_s", 0.0)), 2),
+                    "text": str(segment.get("text") or "")[:800],
+                }
+            )
+        expected = {item["id"] for item in batch}
+        for parse_attempt in range(2):
+            response = _create_with_retry(
+                client,
+                model=model,
+                messages=[
+                    {"role": "system", "content": SEGMENT_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": json.dumps({"items": batch}, ensure_ascii=False),
+                    },
+                ],
+                temperature=0,
+            )
+            try:
+                results.update(parse_response(response.choices[0].message.content or "", expected))
+                break
+            except ValueError:
+                if parse_attempt == 1:
+                    raise
+    return results
+
+
+def merge_ad_segments(
+    segments: list[dict],
+    results: dict[str, dict[str, Any]],
+    max_gap_s: float = 1.0,
+    min_confidence: float = 0.5,
+) -> list[dict]:
+    """Merge consecutive third-party ad segments into start/end intervals."""
+    spans: list[list[float]] = []
+    for index, segment in enumerate(segments):
+        result = results.get(str(index))
+        if not result:
+            continue
+        if (
+            result.get("is_ad") is not True
+            or result.get("ad_type") != "third_party_ad"
+            or result.get("host_read")
+            or float(result.get("confidence") or 0.0) < min_confidence
+        ):
+            continue
+        start = float(segment.get("start_s", 0.0))
+        end = float(segment.get("end_s", 0.0))
+        if spans and start - spans[-1][1] <= max_gap_s:
+            spans[-1][1] = max(spans[-1][1], end)
+        else:
+            spans.append([start, end])
+    return [{"start_s": round(start, 3), "end_s": round(end, 3)} for start, end in spans]
+
+
 def build_items(report: dict, max_text: int = 600) -> list[dict[str, str]]:
     items = []
     for episode_index, episode in enumerate(report.get("episodes", [])):

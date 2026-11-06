@@ -19,10 +19,11 @@ from dai_detect.decode_config import resolve_thresholds
 from dai_detect.evaluation import evaluate_events, match_events
 from types import SimpleNamespace
 
+from dai_detect.llm import merge_ad_segments
 from dai_detect.single_episode import SingleConfig, _calibration_problems, analyze_single
 from dai_detect.single_features import WINDOW_FEATURES, window_labels
 from dai_detect.temporal_decoder import decode_windows
-from scripts.blind_test import _independence_check
+from scripts.blind_test import _independence_check, _load_ground_truth
 from tests import synth
 
 SR48 = 48000
@@ -505,6 +506,53 @@ class BlindIndependenceTest(unittest.TestCase):
         )
         self.assertFalse(independence["independent"])
         self.assertTrue(any("training_identity" in problem for problem in problems))
+
+
+class ReleaseLabelTest(unittest.TestCase):
+    def test_ground_truth_label_source_is_preserved(self) -> None:
+        directory = Path(tempfile.mkdtemp(prefix="dai-labels-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        for source in ("llm_weak", "human"):
+            path = directory / f"{source}.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "duration_s": 60.0,
+                        "ads": [{"start_s": 10.0, "end_s": 20.0}],
+                        "source_sha256": "s" * 64,
+                        "audio_id": "a" * 64,
+                        "audio_id_kind": "downmix_48k_to_16k",
+                        "labels_source": source,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            _, _, _, label_source = _load_ground_truth(path)
+            self.assertEqual(label_source, source)
+
+    def test_ground_truth_without_label_source_is_unverified(self) -> None:
+        directory = Path(tempfile.mkdtemp(prefix="dai-labels-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        path = directory / "plain.json"
+        path.write_text(json.dumps({"ads": []}), encoding="utf-8")
+        _, _, _, label_source = _load_ground_truth(path)
+        self.assertEqual(label_source, "unverified")
+
+    def test_merge_ad_segments_merges_adjacent_third_party_ads(self) -> None:
+        segments = [
+            {"start_s": 10.0, "end_s": 12.0, "text": "a"},
+            {"start_s": 12.5, "end_s": 15.0, "text": "b"},
+            {"start_s": 15.5, "end_s": 18.0, "text": "c"},
+            {"start_s": 30.0, "end_s": 32.0, "text": "content"},
+        ]
+        results = {
+            "0": {"is_ad": True, "ad_type": "third_party_ad", "host_read": False, "confidence": 0.9},
+            "1": {"is_ad": True, "ad_type": "third_party_ad", "host_read": False, "confidence": 0.9},
+            "2": {"is_ad": True, "ad_type": "third_party_ad", "host_read": True, "confidence": 0.9},
+            "3": {"is_ad": False, "ad_type": "content", "host_read": False, "confidence": 0.9},
+        }
+        merged = merge_ad_segments(segments, results, max_gap_s=1.0, min_confidence=0.5)
+        self.assertEqual(merged, [{"start_s": 10.0, "end_s": 15.0}])
 
 
 if __name__ == "__main__":

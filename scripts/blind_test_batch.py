@@ -20,6 +20,7 @@ import math
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,10 +70,12 @@ def _aggregate(reports: list[dict]) -> dict:
     tp = fp = fn = predicted = ground_truth = 0
     total_duration = 0.0
     boundary_errors: list[float] = []
+    label_sources: set[str] = set()
     feeds: dict[str, dict] = {}
     for report in reports:
         metrics = report["metrics"]
         feed = report.get("feed") or "unknown"
+        label_sources.add(str(report.get("labels_source") or "unverified"))
         bucket = feeds.setdefault(
             feed,
             {
@@ -162,19 +165,32 @@ def _aggregate(reports: list[dict]) -> dict:
         "boundary_p95_s": _percentile(boundary_errors, 95),
         "per_feed": per_feed,
         "all_independent": all(bucket["independent"] for bucket in feeds.values()),
+        "labels_sources": sorted(label_sources),
+        "all_human_labels": label_sources == {"human"},
     }
+
+
+def _download(url: str, target: Path) -> None:
+    request = urllib.request.Request(url, headers={"User-Agent": "dai-batch"})
+    with urllib.request.urlopen(request, timeout=120) as response, target.open("wb") as handle:
+        handle.write(response.read())
 
 
 def _run_row(row: dict, args: argparse.Namespace) -> dict:
     with tempfile.TemporaryDirectory(prefix="dai-batch-") as directory:
         metrics_path = Path(directory) / "metrics.json"
+        ground_truth = str(row["ground_truth"])
+        if ground_truth.startswith(("http://", "https://")):
+            local_truth = Path(directory) / "ground_truth.json"
+            _download(ground_truth, local_truth)
+            ground_truth = str(local_truth)
         command = [
             sys.executable,
             str(BLIND_TEST),
             "--audio",
             str(row["audio"]),
             "--ground-truth",
-            str(row["ground_truth"]),
+            ground_truth,
             "--feed",
             str(row.get("feed") or ""),
             "--metrics",
@@ -223,6 +239,7 @@ def main() -> int:
     parser.add_argument("--model", type=Path)
     parser.add_argument("--boundary-model", type=Path)
     parser.add_argument("--out", type=Path, help="汇总报告 JSON")
+    parser.add_argument("--reports-out-dir", type=Path, help="逐集盲测报告目录")
     parser.add_argument("--require-models", action="store_true")
     parser.add_argument("--require-calibrated-models", action="store_true")
     parser.add_argument("--require-independent-test", action="store_true")
@@ -231,6 +248,11 @@ def main() -> int:
     parser.add_argument("--max-fp-per-hour", type=float, default=ACCEPTANCE["false_positives_per_hour"])
     parser.add_argument("--min-events", type=int, default=10)
     parser.add_argument("--min-feeds", type=int, default=3)
+    parser.add_argument(
+        "--allow-nonhuman-ground-truth",
+        action="store_true",
+        help="允许 LLM_weak/unverified 真值跑通流程，但不写 performance_targets_met=true",
+    )
     args = parser.parse_args()
 
     rows = [
@@ -239,6 +261,16 @@ def main() -> int:
         if line.strip()
     ]
     reports = [_run_row(row, args) for row in rows]
+    if args.reports_out_dir:
+        args.reports_out_dir.mkdir(parents=True, exist_ok=True)
+        for index, report in enumerate(reports):
+            safe = "".join(
+                character if character.isalnum() or character in "-_." else "_"
+                for character in f"{report.get('feed', 'unknown')}_{report.get('episode', index)}"
+            )
+            (args.reports_out_dir / f"{safe}.json").write_text(
+                json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
     failures = [report for report in reports if "error" in report]
     successful = [report for report in reports if "error" not in report]
     if not successful:
@@ -276,6 +308,9 @@ def main() -> int:
         "minimum_events": aggregate["ground_truth_events"] >= args.min_events,
         "minimum_feeds": aggregate["feeds"] >= args.min_feeds,
         "all_independent": bool(aggregate["all_independent"]),
+        "human_ground_truth": bool(
+            aggregate["all_human_labels"] or args.allow_nonhuman_ground_truth
+        ),
         "no_failed_episodes": not failures,
     }
     passed = all(checks.values())
@@ -287,8 +322,16 @@ def main() -> int:
         "metrics": aggregate,
         "checks": checks,
         "passed": passed,
-        "performance_targets_met": passed,
-        "performance_targets_source": "independent_blind_test_batch",
+        "performance_targets_met": bool(
+            passed
+            and aggregate["all_human_labels"]
+            and aggregate["all_independent"]
+        ),
+        "performance_targets_source": (
+            "independent_human_ground_truth_batch"
+            if passed and aggregate["all_human_labels"]
+            else "not_independent_or_non_human_labels"
+        ),
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if args.out:

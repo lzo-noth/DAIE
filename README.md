@@ -73,6 +73,46 @@ python scripts/blind_test_batch.py --manifest blind.jsonl \
 
 清单每行包含 `audio`、`feed`、`episode`、`ground_truth`；报告输出全局和逐 feed 的 event P/R、FP/hour、边界 P50/P90/P95，以及 precision/recall 的 Wilson 95% 区间。
 
+### Release 音频 + ASR/LLM 标注
+
+把真实音频作为 GitHub Release asset 后，可以用 `release-train-blind` workflow 自动完成：
+
+1. 下载/快照 release 音频，得到 `source_sha256`、`audio_id`、`audio_id_kind`；
+2. faster-whisper 转写整集；
+3. LLM 判断第三方插入广告并合并相邻片段；
+4. 写出带音频身份的 `annotations.jsonl`；
+5. 训练模型；
+6. 用盲测 release 清单做批量严格盲测。
+
+本地命令：
+
+```
+python scripts/annotate_release_episodes.py \
+  --manifest train_manifest.jsonl \
+  --annotations-out out/release/annotations.jsonl \
+  --transcripts-out out/release/transcripts.jsonl \
+  --snapshot-dir out/release/snapshots \
+  --labels-source llm_weak
+```
+
+训练时再加 `--require-ad-type`。
+
+训练清单每行：
+
+```json
+{"audio_url":"https://github.com/<owner>/<repo>/releases/download/<tag>/show_a_ep1.mp3","feed":"Show A","episode":"Ep 1"}
+```
+
+盲测清单每行：
+
+```json
+{"audio":"https://github.com/<owner>/<repo>/releases/download/<tag>/show_b_ep1.mp3","feed":"Show B","episode":"Ep 1","ground_truth":"https://raw.githubusercontent.com/.../show_b_ep1.json"}
+```
+
+重要：ASR + LLM 生成的是 `labels_source=llm_weak` 的弱标签，可用于训练或人工预标注，但**不是人工真值**。只有盲测真值显式包含 `"labels_source": "human"` 时，`performance_targets_met` 才可能为 true；否则 workflow 仍可跑通，但结果只用于流程验证，不能作为产品验收。
+
+`release-train-blind` 是手动 workflow，需要在仓库 Secrets 中配置 `GEMINI_API_KEY` 或 `OPENAI_API_KEY`。它读取 `train_manifest_url` 和 `blind_manifest_url`，产出 artifact `dai-release-pipeline-<run_number>`，包含模型、LLM 标注、转写、逐集盲测报告和汇总指标。`allow_weak_blind_labels=true` 只用于让弱标签流程跑通，不会把结果标为性能达标。
+
 标注 JSONL 每行一集：
 
 ```json

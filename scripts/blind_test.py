@@ -26,12 +26,13 @@ ACCEPTANCE = {
 }
 
 
-def _load_ground_truth(path: Path) -> tuple[list[dict], float | None, dict]:
+def _load_ground_truth(path: Path) -> tuple[list[dict], float | None, dict, str]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, list):
         ads = payload
         duration = None
         identity: dict = {}
+        label_source = "unverified"
     else:
         ads = payload.get("ads") or []
         duration = payload.get("duration_s")
@@ -45,6 +46,7 @@ def _load_ground_truth(path: Path) -> tuple[list[dict], float | None, dict]:
                 payload.get("audio_id_kind") or audio_meta.get("id_kind") or ""
             ),
         }
+        label_source = str(payload.get("labels_source") or "unverified")
     rows = []
     for ad in ads:
         rows.append(
@@ -53,7 +55,7 @@ def _load_ground_truth(path: Path) -> tuple[list[dict], float | None, dict]:
                 "end_s": float(ad["end_s"] if "end_s" in ad else ad["end"]),
             }
         )
-    return rows, float(duration) if duration else None, identity
+    return rows, float(duration) if duration else None, identity, label_source
 
 
 def _identity_checks(
@@ -258,7 +260,9 @@ def main() -> int:
         return 0
 
     # Ground truth is read only after the timeline above is fixed.
-    ground_truth, gt_duration, gt_identity = _load_ground_truth(args.ground_truth)
+    ground_truth, gt_duration, gt_identity, label_source = _load_ground_truth(
+        args.ground_truth
+    )
     input_is_local = bool(timeline_audio.get("source_sha256"))
     missing, mismatches = _identity_checks(timeline_audio, gt_identity, input_is_local)
     if missing:
@@ -337,11 +341,16 @@ def main() -> int:
         "checks": checks,
         "passed": passed,
         "independence": independence,
-        "performance_targets_met": passed if independence["independent"] else None,
+        "labels_source": label_source,
+        "performance_targets_met": (
+            passed
+            if independence["independent"] and label_source == "human"
+            else None
+        ),
         "performance_targets_source": (
-            "independent_blind_test"
-            if independence["independent"]
-            else "not_independent"
+            "independent_human_ground_truth"
+            if independence["independent"] and label_source == "human"
+            else "not_independent_or_non_human_labels"
         ),
         "matches": metrics["matches"],
         "unmatched_predictions": metrics["unmatched_predictions"],
