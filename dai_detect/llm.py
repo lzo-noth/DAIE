@@ -156,12 +156,7 @@ def apply_classifications(
             candidate["score"] = round(min(0.99, max(0.0, score)), 3)
             if drop_host_read and result.get("host_read"):
                 continue
-            if (
-                drop_content
-                and not is_target
-                and candidate.get("tier") == "inserted"
-                and not evidence.get("slot_matches")
-            ):
+            if drop_content and not is_target and candidate.get("tier") == "inserted":
                 continue
             kept.append(candidate)
         episode["candidates"] = sorted(

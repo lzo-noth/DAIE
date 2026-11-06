@@ -249,7 +249,7 @@ def _write_clips(
     result: EpisodeResult,
     audio_path: Path,
     clips_dir: Path,
-    limit: int = 12,
+    limit: int = 20,
 ) -> None:
     if not audio_path.exists():
         return

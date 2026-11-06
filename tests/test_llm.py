@@ -53,12 +53,10 @@ class LlmTest(unittest.TestCase):
         }
         apply_classifications(report, results)
         candidates = report["episodes"][0]["candidates"]
-        self.assertEqual(len(candidates), 2)
+        self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["evidence"]["llm"]["brand"], "Acme")
         self.assertTrue(candidates[0]["evidence"]["llm_verified"])
         self.assertGreater(candidates[0]["score"], 0.6)
-        self.assertEqual(candidates[1]["evidence"]["slot_matches"], 1)
-        self.assertFalse(candidates[1]["evidence"]["llm_verified"])
         self.assertEqual(report["llm"]["verified_third_party_ads"], 1)
         self.assertEqual(report["llm"]["host_read"], 1)
 
