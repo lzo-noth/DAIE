@@ -91,7 +91,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
-          python -m pip install --quiet numpy
+          python -m pip install --quiet numpy faster-whisper
       - name: Analyze ${{ matrix.platform }} / ${{ matrix.feed }}
         env:
           EPISODES: ${{ inputs.episodes }}
@@ -108,6 +108,11 @@ jobs:
             --cache-dir "$RUNNER_TEMP/dai-cache" \
             --clips-dir "out/${{ matrix.slug }}/clips" \
             --report "out/${{ matrix.slug }}/report.json" 2>&1 | tee "out/${{ matrix.slug }}/run.log"
+          python scripts/asr_clips.py \
+            --report "out/${{ matrix.slug }}/report.json" \
+            --clips-dir "out/${{ matrix.slug }}/clips" \
+            --model base.en \
+            --language en
       - name: Upload result
         if: always()
         uses: actions/upload-artifact@v4
@@ -169,6 +174,9 @@ jobs:
                           1 for c in candidates
                           if c.get("tier") == "inserted" and c.get("evidence", {}).get("slot_matches")
                       ),
+                      "ad_language": sum(
+                          1 for c in candidates if c.get("evidence", {}).get("ad_language")
+                      ),
                       "top": [
                           {
                               "episode": episode.get("title"),
@@ -178,6 +186,8 @@ jobs:
                               "score": c.get("score"),
                               "slot_matches": c.get("evidence", {}).get("slot_matches"),
                               "clip": c.get("evidence", {}).get("clip"),
+                              "ad_language": c.get("evidence", {}).get("ad_language"),
+                              "ad_terms": c.get("evidence", {}).get("ad_terms"),
                           }
                           for episode in episodes
                           for c in episode.get("candidates", [])
@@ -194,15 +204,15 @@ jobs:
           pathlib.Path("out/summary/summary.json").write_text(
               json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
           )
-          lines = ["# DAI platform matrix", "", "| Platform | Feed | Episodes | Repeated | Inserted | Slot-confirmed | Failed | Top |",
-                   "|---|---|---:|---:|---:|---:|---:|---|"]
+          lines = ["# DAI platform matrix", "", "| Platform | Feed | Episodes | Repeated | Inserted | Slot-confirmed | Ad-language | Failed | Top |",
+                   "|---|---|---:|---:|---:|---:|---:|---:|---|"]
           for entry in feeds:
               top = entry.get("top", [{}])[0] if entry.get("top") else {}
               top_text = f"{top.get('start')}–{top.get('end')} ({top.get('tier')}, {top.get('score')})" if top else "-"
               lines.append(
                   f"| {entry.get('platform')} | {entry.get('feed')} | {entry.get('episodes', 0)} | "
                   f"{entry.get('repeated', 0)} | {entry.get('inserted', 0)} | {entry.get('inserted_slot', 0)} | "
-                  f"{entry.get('failed', 0)} | {top_text} |"
+                  f"{entry.get('ad_language', 0)} | {entry.get('failed', 0)} | {top_text} |"
               )
           pathlib.Path("out/summary/summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
           PY

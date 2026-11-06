@@ -70,10 +70,10 @@ python -m dai_detect verify platforms.json --report feed_verification.json
 - `start_s` / `end_s`：广告区间（秒）；`start` / `end`：时钟格式
 - `score`：0–1，跨集重复候选通常 ≥ 0.7
 - `tier`：`repeated`（跨集指纹命中）或 `inserted`（拼接边界 + 广告先验）
-- `evidence`：边界强度/类型、音色变化、音乐性、响度偏差、位置先验、匹配票数
+- `evidence`：边界强度/类型、音色变化、音乐性、响度偏差、位置先验、匹配票数；Actions 里还会附 `slot_matches`、`clip`、`asr_text`、`ad_language`
 - `matches`：匹配到的其他剧集与时间区间
 
-`inserted` 只覆盖预录音频插入的广告；主播口播广告不会被刻意检出。
+`inserted` 只覆盖预录音频插入的广告；主播口播广告不会被刻意检出。跨集广告位一致（`slot_matches`）用于识别“同一广告位、不同 creative”。
 
 ## GitHub Actions
 
@@ -82,8 +82,10 @@ python -m dai_detect verify platforms.json --report feed_verification.json
 - `.github/workflows/detect.yml`：push 跑单元测试；手动触发单个 RSS 分析，报告上传为 `dai-report-<run>` artifact。
 - `.github/workflows/platforms.yml`：手动触发平台矩阵。按 `platforms.json` 的每个 feed 并行分析（每个 feed 2 集），上传：
   - `feed-verification`：每个平台 feed 的可达性、标题、集数、最新一集（只抓 RSS）
-  - `dai-<slug>`：单个 feed 的 `report.json` 与 `run.log`
-  - `dai-matrix-summary`：所有平台的汇总 JSON / Markdown
+  - `dai-<slug>`：单个 feed 的 `report.json`、`run.log` 和候选 10 秒试听片段 `clips/*.mp3`
+  - `dai-matrix-summary`：所有平台的汇总 JSON / Markdown（含 slot-confirmed、ASR ad-language 计数）
+
+矩阵任务会在候选片段上跑 `faster-whisper`（`base.en`），把“sponsored by / use code / 优惠码”等话术写入 `evidence.asr_text` 与 `evidence.ad_language`，用于区分插入广告和普通内容。
 
 用法：Actions → platforms → Run workflow，可填 `platform` 只跑某个平台。所有联网验证都在 runner 上完成；本机网络结果不作数。
 
