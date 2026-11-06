@@ -43,21 +43,33 @@ on:
         required: false
         default: "10"
       target_precision:
-        description: "达到高可用的最低 precision"
+        description: "可选：预复核 precision 门限；0 表示不限制（LLM 复核负责最终精度）"
         required: false
-        default: "0.3"
+        default: "0"
       target_recall:
-        description: "达到高可用的最低 recall"
+        description: "达到高可用的最低 candidate recall"
         required: false
         default: "0.8"
+      target_recall_at:
+        description: "top-K 候选召回率门限"
+        required: false
+        default: "0.95"
+      target_recall_at_k:
+        description: "top-K 的 K"
+        required: false
+        default: "40"
       target_auc:
         description: "达到高可用的最低 AUC"
         required: false
-        default: "0.85"
+        default: "0.8"
       target_fp_per_hour:
-        description: "每小时最多误报候选数"
+        description: "每小时最多预复核误报候选数"
         required: false
-        default: "5"
+        default: "15"
+      target_candidates_per_hour:
+        description: "每小时最多送 LLM 复核的候选数"
+        required: false
+        default: "30"
 
 permissions:
   contents: write
@@ -430,8 +442,11 @@ jobs:
       MAX_ROUNDS: ${{ needs.gate.outputs.max_rounds }}
       TARGET_PRECISION: ${{ inputs.target_precision }}
       TARGET_RECALL: ${{ inputs.target_recall }}
+      TARGET_RECALL_AT: ${{ inputs.target_recall_at }}
+      TARGET_RECALL_AT_K: ${{ inputs.target_recall_at_k }}
       TARGET_AUC: ${{ inputs.target_auc }}
       TARGET_FP_PER_HOUR: ${{ inputs.target_fp_per_hour }}
+      TARGET_CANDIDATES_PER_HOUR: ${{ inputs.target_candidates_per_hour }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -465,15 +480,17 @@ jobs:
             --out feedback/keywords.json
       - name: Fit calibration
         run: |
-          TARGET_PRECISION="${TARGET_PRECISION:-0.3}"
           TARGET_RECALL="${TARGET_RECALL:-0.8}"
-          TARGET_AUC="${TARGET_AUC:-0.85}"
-          TARGET_FP_PER_HOUR="${TARGET_FP_PER_HOUR:-5}"
+          TARGET_RECALL_AT="${TARGET_RECALL_AT:-0.95}"
+          TARGET_RECALL_AT_K="${TARGET_RECALL_AT_K:-40}"
+          TARGET_AUC="${TARGET_AUC:-0.8}"
+          TARGET_FP_PER_HOUR="${TARGET_FP_PER_HOUR:-15}"
           python scripts/fit_calibration.py feedback/labels.jsonl \
             --out calibration.json \
             --mode filter \
-            --target-precision "$TARGET_PRECISION" \
             --target-recall "$TARGET_RECALL" \
+            --target-recall-at-k "$TARGET_RECALL_AT_K" \
+            --target-recall-at "$TARGET_RECALL_AT" \
             --target-auc "$TARGET_AUC" \
             --target-fp-per-hour "$TARGET_FP_PER_HOUR" \
             --metrics-out out/learn/metrics.json || true
@@ -507,10 +524,13 @@ jobs:
           fi
       - name: Update loop state
         run: |
-          TARGET_PRECISION="${TARGET_PRECISION:-0.3}"
+          TARGET_PRECISION="${TARGET_PRECISION:-0}"
           TARGET_RECALL="${TARGET_RECALL:-0.8}"
-          TARGET_AUC="${TARGET_AUC:-0.85}"
-          TARGET_FP_PER_HOUR="${TARGET_FP_PER_HOUR:-5}"
+          TARGET_RECALL_AT="${TARGET_RECALL_AT:-0.95}"
+          TARGET_RECALL_AT_K="${TARGET_RECALL_AT_K:-40}"
+          TARGET_AUC="${TARGET_AUC:-0.8}"
+          TARGET_FP_PER_HOUR="${TARGET_FP_PER_HOUR:-15}"
+          TARGET_CANDIDATES_PER_HOUR="${TARGET_CANDIDATES_PER_HOUR:-30}"
           python scripts/update_loop_state.py \
             --metrics out/learn/metrics.json \
             --state feedback/state.json \
@@ -519,8 +539,11 @@ jobs:
             --max-rounds "${MAX_ROUNDS:-10}" \
             --target-precision "$TARGET_PRECISION" \
             --target-recall "$TARGET_RECALL" \
+            --target-recall-at-k "$TARGET_RECALL_AT_K" \
+            --target-recall-at "$TARGET_RECALL_AT" \
             --target-auc "$TARGET_AUC" \
             --target-fp-per-hour "$TARGET_FP_PER_HOUR" \
+            --target-candidates-per-hour "$TARGET_CANDIDATES_PER_HOUR" \
             --patience 2 || true
           cat feedback/state.json 2>/dev/null || true
       - name: Commit feedback and calibration

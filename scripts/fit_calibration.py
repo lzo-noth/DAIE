@@ -180,7 +180,7 @@ def _at_k(
     labels: np.ndarray,
     episodes: list[str],
     ks: tuple[int, ...],
-) -> tuple[dict[int, float], dict[int, float], dict[int, int]]:
+) -> tuple[dict[int, float], dict[int, float], dict[int, int], dict[int, int]]:
     from collections import defaultdict
 
     buckets: dict[str, list[tuple[float, int]]] = defaultdict(list)
@@ -190,6 +190,7 @@ def _at_k(
     recall_at: dict[int, float] = {}
     precision_at: dict[int, float] = {}
     false_positive_at: dict[int, int] = {}
+    selected_at: dict[int, int] = {}
     for k in ks:
         hits = 0
         selected = 0
@@ -202,7 +203,8 @@ def _at_k(
         recall_at[k] = hits / max(1, total_ads)
         precision_at[k] = hits / max(1, selected)
         false_positive_at[k] = false_positives
-    return recall_at, precision_at, false_positive_at
+        selected_at[k] = selected
+    return recall_at, precision_at, false_positive_at, selected_at
 
 
 def _episode_hours(episodes: list[str], durations: list[float]) -> float:
@@ -222,6 +224,8 @@ def main() -> int:
     parser.add_argument("--min-recall", type=float, default=0.9)
     parser.add_argument("--target-precision", type=float)
     parser.add_argument("--target-recall", type=float)
+    parser.add_argument("--target-recall-at-k", type=int, default=40)
+    parser.add_argument("--target-recall-at", type=float, default=0.95)
     parser.add_argument("--target-auc", type=float)
     parser.add_argument("--target-fp-per-hour", type=float)
     parser.add_argument("--dry-run", action="store_true")
@@ -280,7 +284,7 @@ def main() -> int:
     print(f"baseline auc={baseline_auc:.3f} threshold={baseline_threshold:.2f} {baseline_metrics}")
 
     ks = (1, 2, 3, 5, 8, 10, 12, 15, 20, 24, 30, 40)
-    recall_at, precision_at, false_positive_at = _at_k(learned_cv, labels, episodes, ks)
+    recall_at, precision_at, false_positive_at, selected_at = _at_k(learned_cv, labels, episodes, ks)
     print("recall@k:", {k: round(v, 2) for k, v in recall_at.items()})
     print("precision@k:", {k: round(v, 2) for k, v in precision_at.items()})
     if args.mode == "rank":
@@ -294,15 +298,18 @@ def main() -> int:
         precision = precision_at[top_k]
         recall = recall_at[top_k]
         false_positives = false_positive_at[top_k]
+        selected = selected_at[top_k]
     else:
         top_k = 0
         predicted = learned_cv >= learned_threshold
         precision = learned_metrics["precision"]
         recall = learned_metrics["recall"]
         false_positives = int((predicted & (labels == 0)).sum())
+        selected = int(predicted.sum())
 
     hours = _episode_hours(episodes, durations)
     fp_per_hour = round(false_positives / hours, 2) if hours > 0 else None
+    candidates_per_hour = round(selected / hours, 2) if hours > 0 else None
 
     terms = load_terms(Path("feedback/keywords.json"))
     hits = [bool(match_terms(text, terms)) for text in texts]
@@ -320,14 +327,16 @@ def main() -> int:
     targets = {
         "precision": args.target_precision,
         "recall": args.target_recall,
+        "recall_at_k": args.target_recall_at_k,
+        "recall_at": args.target_recall_at,
         "auc": args.target_auc,
         "fp_per_hour": args.target_fp_per_hour,
     }
     checks = []
     if args.target_auc is not None:
         checks.append(learned_auc >= args.target_auc)
-    if args.target_precision is not None:
-        checks.append(precision >= args.target_precision)
+    if args.target_recall_at_k and args.target_recall_at is not None:
+        checks.append(recall_at.get(args.target_recall_at_k, 0.0) >= args.target_recall_at)
     if args.target_recall is not None:
         checks.append(recall >= args.target_recall)
     if args.target_fp_per_hour is not None and fp_per_hour is not None:
@@ -350,10 +359,11 @@ def main() -> int:
         "precision_at": {str(k): round(v, 3) for k, v in precision_at.items()},
         "keyword": keyword_metrics,
         "fp_per_hour": fp_per_hour,
+        "candidates_per_hour": candidates_per_hour,
         "targets": targets,
         "target_met": target_met,
     }
-    print(f"fp/hour={fp_per_hour} target_met={target_met} targets={targets}")
+    print(f"fp/hour={fp_per_hour} candidates/hour={candidates_per_hour} target_met={target_met} targets={targets}")
     print(f"keyword={keyword_metrics}")
 
     standardized, mean, scale = _standardize(x)

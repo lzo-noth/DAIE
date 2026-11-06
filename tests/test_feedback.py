@@ -147,7 +147,14 @@ class FeedbackLoopTest(unittest.TestCase):
         metrics = self.directory / "metrics.json"
         state = self.directory / "state.json"
         metrics.write_text(
-            json.dumps({"learned": {"precision": 0.9, "recall": 0.9, "auc": 0.95}, "fp_per_hour": 0.5}),
+            json.dumps(
+                {
+                    "learned": {"precision": 0.9, "recall": 0.9, "auc": 0.95},
+                    "recall_at": {"40": 0.99},
+                    "fp_per_hour": 0.5,
+                    "candidates_per_hour": 10.0,
+                }
+            ),
             encoding="utf-8",
         )
         argv = [

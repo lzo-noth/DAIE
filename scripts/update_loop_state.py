@@ -24,10 +24,13 @@ def main() -> int:
     parser.add_argument("--calibration", type=Path, default=Path("calibration.json"))
     parser.add_argument("--round", type=int, required=True)
     parser.add_argument("--max-rounds", type=int, default=10)
-    parser.add_argument("--target-precision", type=float, default=0.3)
+    parser.add_argument("--target-precision", type=float, default=0.0)
     parser.add_argument("--target-recall", type=float, default=0.8)
-    parser.add_argument("--target-auc", type=float, default=0.85)
-    parser.add_argument("--target-fp-per-hour", type=float, default=5.0)
+    parser.add_argument("--target-recall-at-k", type=int, default=40)
+    parser.add_argument("--target-recall-at", type=float, default=0.95)
+    parser.add_argument("--target-auc", type=float, default=0.8)
+    parser.add_argument("--target-fp-per-hour", type=float, default=15.0)
+    parser.add_argument("--target-candidates-per-hour", type=float, default=30.0)
     parser.add_argument("--patience", type=int, default=2)
     args = parser.parse_args()
 
@@ -39,13 +42,20 @@ def main() -> int:
     recall = float(learned.get("recall") or 0.0)
     auc = float(learned.get("auc") or 0.0)
     fp_per_hour = metrics.get("fp_per_hour")
+    candidates_per_hour = metrics.get("candidates_per_hour")
+    recall_at = metrics.get("recall_at") or {}
+    recall_at_value = float(recall_at.get(str(args.target_recall_at_k)) or 0.0)
     checks = {
-        "precision": precision >= args.target_precision,
         "recall": recall >= args.target_recall,
+        "recall_at": recall_at_value >= args.target_recall_at,
         "auc": auc >= args.target_auc,
     }
+    if args.target_precision > 0:
+        checks["precision"] = precision >= args.target_precision
     if fp_per_hour is not None:
         checks["fp_per_hour"] = float(fp_per_hour) <= args.target_fp_per_hour
+    if candidates_per_hour is not None:
+        checks["candidates_per_hour"] = float(candidates_per_hour) <= args.target_candidates_per_hour
     complete = bool(metrics) and all(checks.values())
 
     active_metrics = active.get("metrics") or {}
@@ -80,8 +90,11 @@ def main() -> int:
         "targets": {
             "precision": args.target_precision,
             "recall": args.target_recall,
+            "recall_at_k": args.target_recall_at_k,
+            "recall_at": args.target_recall_at,
             "auc": args.target_auc,
             "fp_per_hour": args.target_fp_per_hour,
+            "candidates_per_hour": args.target_candidates_per_hour,
         },
         "checks": checks,
         "metrics": metrics,

@@ -90,9 +90,9 @@ LLM 标注也会反馈到检测器：当前样本里 slot 命中主要出现在�
 4. **优化**：`scripts/fit_calibration.py` 按 feed 做留一交叉验证，拟合候选评分器，输出 `calibration.json` 和指标；下一次检测直接加载。`scripts/asr_clips.py` 也会加载 `feedback/keywords.json`，把学到的品牌词作为确定性广告话术特征。
 5. **循环**：`learn` job 自动提交 `feedback/` 与 `calibration.json`（提交信息带 `[skip ci]`），下一轮（每天定时或手动）使用新模型。`feedback/state.json` 记录轮数和指标；达到目标后写入 `feedback/COMPLETE`，`gate` job 之后不再执行分析。默认最多 10 轮，可用 `max_rounds` 调整。
 
-默认目标（手动 dispatch 时可覆盖）：`precision ≥ 0.3`、`recall ≥ 0.8`、`AUC ≥ 0.85`、每小时误报 ≤ 5。未达标就继续下一轮；达到后自动停止。
+默认目标（手动 dispatch 时可覆盖）：`recall@40 ≥ 0.95`、`candidate recall ≥ 0.8`、`AUC ≥ 0.8`、送复核候选 ≤ 30/小时、预复核误报 ≤ 15/小时。最终 precision 由 LLM 复核保证，不再用声学 precision 作为达标条件。未达标就继续下一轮；达到后自动停止。
 
-LLM 只用于离线标注，检测/播放链路本身不调用 LLM。关键词和校准模型是确定性产物：下一轮检测、ASR 后处理都不依赖 LLM。
+LLM 在这里承担**推理时复核**和离线标注：检测候选生成仍走声学/指纹，最终把候选片段交给 LLM 判定第三方广告并剔除正片、自宣和主播口播。关键词和校准模型是确定性产物，用于保证候选召回并控制 LLM 调用量。
 
 反馈文件：
 

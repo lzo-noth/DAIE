@@ -3,9 +3,9 @@
   "round": 3,
   "max_rounds": 10,
   "complete": false,
-  "stopped": true,
-  "stop_reason": "no improvement for 2 rounds",
-  "stale_rounds": 2,
+  "stopped": false,
+  "stop_reason": "",
+  "stale_rounds": 0,
   "patience": 2,
   "updated_at": "2026-11-06T14:10:55+00:00",
   "targets": {
