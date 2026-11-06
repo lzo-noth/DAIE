@@ -10,6 +10,7 @@ from scripts.blind_test import _identity_checks
 from scripts.train_single_episode import (
     EpisodeSample,
     _aggregate_fold_window_metrics,
+    _aggregate_head_groups,
     _choose_classifier_threshold,
     _choose_event_threshold,
     _event_metrics,
@@ -127,6 +128,36 @@ class GroupedCrossValidationTest(unittest.TestCase):
 
         self.assertEqual(roc_auc(y, oof), 0.75)
 
+    def test_boundary_auc_is_aggregated_per_fold(self) -> None:
+        groups = [
+            (np.asarray([0.6, 0.5]), np.asarray([1, 0]), 0.5, 0),
+            (np.asarray([0.2, 0.1]), np.asarray([1, 0]), 0.5, 1),
+        ]
+        metrics = _aggregate_head_groups(groups)
+        self.assertEqual(metrics["auc_fold"], [1.0, 1.0])
+        self.assertEqual(metrics["auc_macro"], 1.0)
+        self.assertEqual(metrics["auc"], 1.0)
+        self.assertEqual(metrics["auc_pooled"], 0.75)
+
+    def test_auc_is_null_when_no_fold_has_both_classes(self) -> None:
+        groups = [
+            (np.asarray([0.7, 0.6]), np.asarray([1, 1]), 0.5, 0),
+            (np.asarray([0.3, 0.2]), np.asarray([0, 0]), 0.5, 1),
+        ]
+        metrics = _aggregate_head_groups(groups)
+        self.assertIsNone(metrics["auc_macro"])
+        self.assertIsNone(metrics["auc"])
+
+    def test_window_auc_is_null_without_mixed_folds(self) -> None:
+        samples = [_sample("A", [1, 1]), _sample("B", [0, 0])]
+        y = np.asarray([1, 1, 0, 0], dtype=np.float64)
+        oof = np.asarray([0.9, 0.8, 0.2, 0.1])
+        offsets = {id(samples[0]): (0, 2), id(samples[1]): (2, 4)}
+        metrics = _aggregate_fold_window_metrics(
+            y, oof, [[0], [1]], {0: 0.5, 1: 0.5}, samples, offsets
+        )
+        self.assertIsNone(metrics["auc_macro"])
+
     def test_outer_held_labels_do_not_change_threshold(self) -> None:
         samples = [_sample("A", [0, 1]), _sample("B", [0, 1]), _sample("C", [0, 1])]
         X = np.vstack([sample.windows["features"] for sample in samples])
@@ -135,6 +166,26 @@ class GroupedCrossValidationTest(unittest.TestCase):
         first, _ = _choose_event_threshold([0, 1], samples, X, y, offsets, seed=1)
         mutated = y.copy()
         mutated[4:6] = 1.0 - mutated[4:6]
+        second, _ = _choose_event_threshold([0, 1], samples, X, mutated, offsets, seed=1)
+        self.assertEqual(first, second)
+
+    def test_outer_held_event_annotations_do_not_change_threshold(self) -> None:
+        samples = [_sample("A", [0, 1, 1, 0]), _sample("B", [0, 1, 1, 0]), _sample("C", [0, 1, 1, 0])]
+        for sample in samples:
+            sample.ads = [{"start_s": 1.0, "end_s": 2.0}]
+            sample.duration_s = 2.0
+        X = np.vstack([sample.windows["features"] for sample in samples])
+        y = np.concatenate([sample.labels for sample in samples])
+        offsets = {
+            id(samples[0]): (0, 4),
+            id(samples[1]): (4, 8),
+            id(samples[2]): (8, 12),
+        }
+        first, metrics = _choose_event_threshold([0, 1], samples, X, y, offsets, seed=1)
+        self.assertEqual(metrics["objective"], "event_f1")
+        mutated = y.copy()
+        mutated[8:12] = 1.0 - mutated[8:12]
+        samples[2].ads = []
         second, _ = _choose_event_threshold([0, 1], samples, X, mutated, offsets, seed=1)
         self.assertEqual(first, second)
 

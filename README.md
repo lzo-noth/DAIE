@@ -58,7 +58,7 @@ python scripts/train_single_episode.py \
 
 训练要求边界模型时，如果最终没有写出 `boundary_model.json`，脚本返回非零退出码；只有显式 `--skip-boundary` 或弱监督模式允许跳过边界模型。训练结束会打印 `artifacts` 摘要。
 
-训练评估与实际推理共用 [decode_config.py](file:///d:/DAI/dai_detect/decode_config.py) 的 enter/exit 阈值规则。训练模式下 workflow 强制要求分类模型和边界模型都成功下载；任一缺失都会让 job 失败，不会静默回退到启发式。`--require-models` 还要求两个模型都有非空 `data_version` 且完全一致。时间轴同时记录分类器和边界模型的 `version`、`data_version`、`git_commit`。
+训练评估与实际推理共用 [decode_config.py](dai_detect/decode_config.py) 的 enter/exit 阈值规则。阈值选择在内层留出集上运行完整的 decode → refine → evaluate 流程；onset/offset 阈值按最终边界误差 P95 校准，而不是帧级 F1。训练模式下 workflow 强制要求分类模型和边界模型都成功下载；任一缺失都会让 job 失败，不会静默回退到启发式。`--require-models` 还要求两个模型都有非空 `data_version` 且完全一致。时间轴同时记录分类器和边界模型的 `version`、`data_version`、`git_commit`。
 
 标注 JSONL 每行一集：
 
