@@ -1,19 +1,92 @@
 {
-  "samples": 35,
-  "ads": 8,
-  "ad_evidence": {
-    "musicness_min": 0.3,
-    "loudness_dev_min": 5.0
-  },
-  "slot_boost": {
-    "ad_like_only": true,
-    "single": 0.05,
-    "multi": 0.08
-  },
-  "observed": {
-    "gate_precision": 0.233,
-    "gate_recall": 0.875,
-    "slot_ads": 1,
-    "slot_non_ads": 21
+  "enabled": true,
+  "mode": "rank",
+  "top_k": 20,
+  "features": [
+    "musicness",
+    "loudness_dev",
+    "boundary",
+    "timbre",
+    "position",
+    "duration",
+    "slot",
+    "repeated"
+  ],
+  "mean": [
+    0.17214962593516206,
+    0.9574023275145476,
+    0.7276583541147124,
+    0.26184039900249384,
+    0.45448877805486027,
+    2.7457883548352333,
+    0.39900249376558605,
+    0.11471321695760599
+  ],
+  "scale": [
+    0.20222229825449858,
+    0.7496155700488368,
+    0.19227755677453962,
+    0.1468128211455275,
+    0.2281713065569662,
+    0.5718244921435471,
+    0.6813504285443537,
+    0.31867553218413824
+  ],
+  "weights": [
+    0.33223608921319914,
+    0.6500591691172499,
+    -0.22209302194384165,
+    -0.7517846854037787,
+    0.1712226619202107,
+    0.5182674255909545,
+    -0.9290767480469991,
+    -0.4523843962749269
+  ],
+  "intercept": -0.819179776478509,
+  "threshold": 0.05,
+  "min_recall": 0.9,
+  "samples": 401,
+  "ads": 6,
+  "groups": [
+    "99% Invisible",
+    "ADSP: Algorithms + Data Structures = Programs",
+    "Love Your Work",
+    "Now You Know Podcasts",
+    "Office Ladies",
+    "Programming Throwdown",
+    "SmartLess",
+    "Stillness in the Storms",
+    "THE ADAM BUXTON PODCAST",
+    "Tech Zero",
+    "The Dollop with Dave Anthony and Gareth Reynolds",
+    "The Rest Is History",
+    "This Week in Tech (Audio)",
+    "WTF with Marc Maron Podcast"
+  ],
+  "metrics": {
+    "learned": {
+      "precision": 0.035,
+      "recall": 0.5,
+      "f1": 0.066,
+      "auc": 0.84,
+      "recall_at_k": 1.0
+    },
+    "baseline": {
+      "precision": 0.028,
+      "recall": 1.0,
+      "f1": 0.055,
+      "auc": 0.65
+    },
+    "recall_at": {
+      "5": 0.167,
+      "8": 0.5,
+      "10": 0.5,
+      "12": 0.667,
+      "15": 0.833,
+      "20": 1.0,
+      "24": 1.0,
+      "30": 1.0,
+      "40": 1.0
+    }
   }
 }
