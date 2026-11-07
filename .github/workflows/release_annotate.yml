@@ -41,7 +41,7 @@ on:
         default: ""
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 jobs:
@@ -139,6 +139,23 @@ jobs:
             --labels-source "$LABELS_SOURCE" --allow-empty-ads \
             --batch-size "$BATCH_SIZE" --request-interval "$REQUEST_INTERVAL" \
             --resume
+      - name: Publish annotation data to repo
+        if: always()
+        run: |
+          set -euo pipefail
+          python scripts/publish_annotation_data.py \
+            --source out/release \
+            --dest datasets/release_annotations \
+            --run-id "$GITHUB_RUN_ID" --model "${LLM_MODEL:-}"
+          git config user.name "github-actions"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add datasets/release_annotations
+          if git diff --cached --quiet; then
+            echo "annotation data unchanged"
+            exit 0
+          fi
+          git commit -m "Update release annotation data (run $GITHUB_RUN_ID)"
+          git push || { git pull --rebase origin "${GITHUB_REF_NAME}"; git push; }
       - uses: actions/upload-artifact@v4
         if: always()
         with:

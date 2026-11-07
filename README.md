@@ -77,7 +77,7 @@ python scripts/blind_test_batch.py --manifest blind.jsonl \
 
 把真实音频作为 GitHub Release asset 后，标注和盲测分成两个手动 workflow：
 
-1. `release-annotate`：只做数据获取，不训练、不评测。它下载/快照 release 音频，得到 `source_sha256`、`audio_id`、`audio_id_kind`；faster-whisper 转写整集；LLM 判断第三方插入广告并合并相邻片段；写出带音频身份的 `annotations.jsonl`、盲测集 `blind_gt/` 和 `blind_generated.jsonl`。产出 artifact `dai-release-annotations-<run_number>`，供人工校对。
+1. `release-annotate`：只做数据获取，不训练、不评测。它下载/快照 release 音频，得到 `source_sha256`、`audio_id`、`audio_id_kind`；faster-whisper 转写整集；LLM 判断第三方插入广告并合并相邻片段；写出带音频身份的 `annotations.jsonl`、盲测集 `blind_gt/` 和 `blind_generated.jsonl`。产出 artifact `dai-release-annotations-<run_number>`，供人工校对；其中**非音频数据会自动提交到 `datasets/release_annotations/`**（`annotations.jsonl`、`transcripts.jsonl`、`blind_*.jsonl`、`blind_gt/`、`index.json`），音频快照只留在 artifact 里供训练解码。
 2. `release-train-blind`：只做训练和盲测，不再调用 ASR/LLM。它通过 `annotation_run_id` 读取上一步（人工校对后重新上传/重新标注的）artifact，训练模型，再用 `blind_generated.jsonl` 做批量严格盲测，产出 `dai-release-blind-<run_number>`。
 
 本地命令：
