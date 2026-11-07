@@ -79,6 +79,21 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
           python -m pip install --quiet numpy openai faster-whisper "av<14"
+      - name: Seed annotation cache from repo dataset
+        run: |
+          set -euo pipefail
+          mkdir -p out/release
+          if [ -d datasets/release_annotations ]; then
+            for name in annotations.jsonl transcripts.jsonl blind_annotations.jsonl \
+                        blind_transcripts.jsonl blind_generated.jsonl; do
+              [ -f "datasets/release_annotations/$name" ] && cp "datasets/release_annotations/$name" "out/release/$name"
+            done
+            if [ -d datasets/release_annotations/blind_gt ]; then
+              mkdir -p out/release/blind_gt
+              cp datasets/release_annotations/blind_gt/*.json out/release/blind_gt/ 2>/dev/null || true
+            fi
+          fi
+          wc -l out/release/*.jsonl 2>/dev/null || true
       - name: Restore partial annotation output from previous run
         if: inputs.resume_run_id != ''
         env:
@@ -86,7 +101,7 @@ jobs:
           RESUME_RUN: ${{ inputs.resume_run_id }}
         run: |
           set -euo pipefail
-          mkdir -p out/release
+          mkdir -p out/base
           name=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_RUN/artifacts" \
             --jq '.artifacts[] | select(.name | test("^(dai-release-annotations-[0-9]+$|dai-release-pipeline-)")) | .name' \
             | tail -1)
@@ -94,8 +109,8 @@ jobs:
             echo "run $RESUME_RUN 没有可复用的标注 artifact" >&2
             exit 1
           fi
-          gh run download "$RESUME_RUN" -n "$name" -D out/release --repo "$GITHUB_REPOSITORY"
-          ls -la out/release | head -40
+          gh run download "$RESUME_RUN" -n "$name" -D out/base --repo "$GITHUB_REPOSITORY"
+          ls -la out/base | head -40
       - name: Fetch release manifests
         env:
           TRAIN_URL: ${{ inputs.train_manifest_url }}
@@ -192,17 +207,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Download shard artifacts
+      - name: Download base and shard artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RESUME_RUN: ${{ inputs.resume_run_id }}
         run: |
           set -euo pipefail
           mkdir -p out/shards
+          if [ -n "$RESUME_RUN" ]; then
+            base=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_RUN/artifacts" \
+              --jq '.artifacts[] | select(.name | test("^(dai-release-annotations-[0-9]+$|dai-release-pipeline-)")) | .name' \
+              | tail -1)
+            if [ -n "$base" ]; then
+              gh run download "$RESUME_RUN" -n "$base" -D out/base --repo "$GITHUB_REPOSITORY"
+            fi
+          fi
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" \
-            --jq '.artifacts[] | select(.name | startswith("dai-release-annotations-")) | .name' \
+            --jq '.artifacts[] | select(.name | contains("-shard")) | .name' \
             > shard_names.txt
-          count=$(wc -l < shard_names.txt)
-          test "$count" -gt 0
+          test -s shard_names.txt
           i=0
           while read -r name; do
             i=$((i + 1))
@@ -212,8 +235,16 @@ jobs:
       - name: Merge shards
         run: |
           set -euo pipefail
-          python scripts/merge_release_shards.py \
-            --shards-dir out/shards --out-dir out/release
+          inputs=()
+          if [ -d out/base ]; then
+            inputs+=(--input out/base)
+          fi
+          for dir in out/shards/shard-*; do
+            if [ -d "$dir" ]; then
+              inputs+=(--input "$dir")
+            fi
+          done
+          python scripts/merge_release_shards.py "${inputs[@]}" --out-dir out/release
       - name: Apply label review decisions
         run: |
           set -euo pipefail
