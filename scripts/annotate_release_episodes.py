@@ -53,6 +53,7 @@ def _client_and_model(model: str):
 
 
 GEMINI_MODEL_CANDIDATES = (
+    "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
     "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
