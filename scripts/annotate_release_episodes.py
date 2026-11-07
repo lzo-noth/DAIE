@@ -124,7 +124,7 @@ def _existing_snapshot(snapshot_dir: Path, digest: str) -> Path | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--manifest", type=Path, required=True, help="release 音频清单 JSONL")
+    parser.add_argument("--manifest", type=Path, help="release 音频清单 JSONL（--pick-model 时可省略）")
     parser.add_argument("--annotations-out", type=Path, default=Path("out/release_annotations.jsonl"))
     parser.add_argument("--transcripts-out", type=Path, default=Path("out/release_transcripts.jsonl"))
     parser.add_argument("--snapshot-dir", type=Path, default=Path("out/release_snapshots"))
@@ -150,11 +150,6 @@ def main() -> int:
     parser.add_argument("--allow-empty-ads", action="store_true")
     args = parser.parse_args()
 
-    rows = [
-        json.loads(line)
-        for line in args.manifest.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
     client, llm_model = _client_and_model(args.model)
     if client is None:
         print("缺少 GEMINI_API_KEY/OPENAI_API_KEY，无法生成 LLM 标注", file=sys.stderr)
@@ -172,6 +167,14 @@ def main() -> int:
             print(f"model {candidate}: {error}", flush=True)
         print("没有可用的 LLM 模型", file=sys.stderr)
         return 1
+    if args.manifest is None:
+        parser.error("--manifest 必填")
+
+    rows = [
+        json.loads(line)
+        for line in args.manifest.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
     from faster_whisper import WhisperModel
 
