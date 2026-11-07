@@ -62,22 +62,29 @@ def _identity_checks(
     timeline_audio: dict,
     ground_truth: dict,
     input_is_local: bool,
-) -> tuple[list[str], list[str]]:
-    """Return ``(missing_fields, value_mismatches)``.
+    strict_audio_id: bool = False,
+) -> tuple[list[str], list[str], list[str]]:
+    """Return ``(missing_fields, value_mismatches, warnings)``.
 
     Missing identity is a different failure from a mismatched identity: the
     former means the label cannot be proven to belong to any audio, the latter
     means it belongs to a different one. Neither is silently accepted.
+
+    ``audio_id`` is a hash of decoded PCM, so it depends on the decoder build.
+    When ``source_sha256`` proves the bytes are identical, a PCM-only drift is
+    reported as a warning instead of a fatal mismatch (``strict_audio_id``
+    restores the hard failure).
     """
     missing: list[str] = []
     mismatches: list[str] = []
+    warnings: list[str] = []
     has_identity = bool(ground_truth.get("source_sha256") or ground_truth.get("audio_id"))
     if not has_identity:
         required = "audio_id 与 audio_id_kind"
         if input_is_local:
             required += "，以及 source_sha256"
         missing.append(f"真值缺少音频身份：必须提供 {required}")
-        return missing, mismatches
+        return missing, mismatches, warnings
 
     if not ground_truth.get("audio_id"):
         missing.append("真值缺少 audio_id（解码 PCM 内容指纹）")
@@ -88,8 +95,15 @@ def _identity_checks(
 
     gt_source = ground_truth.get("source_sha256") or ""
     input_source = timeline_audio.get("source_sha256") or ""
-    if gt_source and input_source and gt_source != input_source:
+    source_verified = bool(gt_source) and gt_source == input_source
+    if gt_source and input_source and not source_verified:
         mismatches.append("source_sha256 不匹配：输入音频与标注音频不是同一份")
+
+    def record(message: str) -> None:
+        if source_verified and not strict_audio_id:
+            warnings.append(f"{message}（source_sha256 已确认字节一致，按解码器差异处理）")
+        else:
+            mismatches.append(message)
 
     gt_audio_id = ground_truth.get("audio_id") or ""
     input_audio_id = timeline_audio.get("id") or ""
@@ -97,12 +111,12 @@ def _identity_checks(
         if not input_audio_id:
             mismatches.append("时间轴缺少 audio_id，无法校验音频内容")
         elif gt_audio_id != input_audio_id:
-            mismatches.append("audio_id 不匹配：输入音频是另一个 DAI 变体")
+            record("audio_id 不匹配：输入音频是另一个 DAI 变体")
     gt_kind = ground_truth.get("audio_id_kind") or ""
     input_kind = timeline_audio.get("id_kind") or ""
     if gt_kind and input_kind and gt_kind != input_kind:
-        mismatches.append(f"audio_id_kind 不一致（真值 {gt_kind}, 输入 {input_kind}）")
-    return missing, mismatches
+        record(f"audio_id_kind 不一致（真值 {gt_kind}, 输入 {input_kind}）")
+    return missing, mismatches, warnings
 
 
 def _independence_check(
@@ -264,7 +278,11 @@ def main() -> int:
         args.ground_truth
     )
     input_is_local = bool(timeline_audio.get("source_sha256"))
-    missing, mismatches = _identity_checks(timeline_audio, gt_identity, input_is_local)
+    missing, mismatches, identity_warnings = _identity_checks(
+        timeline_audio, gt_identity, input_is_local
+    )
+    for warning in identity_warnings:
+        print(f"[identity-warn] {warning}", file=sys.stderr)
     if missing:
         for problem in missing:
             print(f"[identity] {problem}", file=sys.stderr)

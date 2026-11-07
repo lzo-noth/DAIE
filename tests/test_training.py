@@ -5,6 +5,7 @@ from unittest import mock
 
 import numpy as np
 
+from dai_detect.audio import file_sha256
 from dai_detect.boundary_model import BOUNDARY_FEATURES
 from dai_detect.single_features import WINDOW_FEATURES
 from scripts.blind_test import _identity_checks
@@ -855,29 +856,58 @@ class EventEvaluationAlignmentTest(unittest.TestCase):
 
 class AudioIdentityTest(unittest.TestCase):
     def test_training_requires_identity_by_default(self) -> None:
-        problems = _identity_problems({}, "episode.wav", {"audio_id": "a" * 64}, allow_unverified=False)
+        problems, _ = _identity_problems(
+            {}, "episode.wav", {"audio_id": "a" * 64}, allow_unverified=False
+        )
         self.assertTrue(problems)
 
     def test_training_allows_unverified_only_explicitly(self) -> None:
-        problems = _identity_problems({}, "episode.wav", {"audio_id": "a" * 64}, allow_unverified=True)
+        problems, _ = _identity_problems(
+            {}, "episode.wav", {"audio_id": "a" * 64}, allow_unverified=True
+        )
         self.assertEqual(problems, [])
 
     def test_training_rejects_mismatched_pcm_id(self) -> None:
         entry = {"audio_id": "a" * 64, "audio_id_kind": "downmix_48k_to_16k"}
         mono = {"audio_id": "b" * 64, "audio_id_kind": "downmix_48k_to_16k"}
-        problems = _identity_problems(entry, "episode.wav", mono, allow_unverified=False)
+        problems, _ = _identity_problems(entry, "episode.wav", mono, allow_unverified=False)
+        self.assertTrue(any("audio_id" in problem for problem in problems))
+
+    def test_training_downgrades_pcm_id_drift_when_bytes_match(self) -> None:
+        entry = {
+            "audio_id": "a" * 64,
+            "audio_id_kind": "downmix_48k_to_16k",
+            "source_sha256": file_sha256(__file__),
+        }
+        mono = {"audio_id": "b" * 64, "audio_id_kind": "downmix_48k_to_16k"}
+        problems, warnings = _identity_problems(
+            entry, __file__, mono, allow_unverified=False
+        )
+        self.assertEqual(problems, [])
+        self.assertTrue(any("audio_id" in warning for warning in warnings))
+
+    def test_training_strict_mode_keeps_pcm_drift_fatal(self) -> None:
+        entry = {
+            "audio_id": "a" * 64,
+            "audio_id_kind": "downmix_48k_to_16k",
+            "source_sha256": file_sha256(__file__),
+        }
+        mono = {"audio_id": "b" * 64, "audio_id_kind": "downmix_48k_to_16k"}
+        problems, _ = _identity_problems(
+            entry, __file__, mono, allow_unverified=False, strict_audio_id=True
+        )
         self.assertTrue(any("audio_id" in problem for problem in problems))
 
     def test_training_rejects_local_audio_without_source_hash(self) -> None:
         entry = {"audio_id": "a" * 64, "audio_id_kind": "k"}
         mono = {"audio_id": "a" * 64, "audio_id_kind": "k"}
-        problems = _identity_problems(entry, "episode.wav", mono, allow_unverified=False)
+        problems, _ = _identity_problems(entry, "episode.wav", mono, allow_unverified=False)
         self.assertTrue(any("source_sha256" in problem for problem in problems))
 
     def test_training_rejects_missing_audio_kind(self) -> None:
         entry = {"audio_id": "a" * 64, "source_sha256": "s" * 64}
         mono = {"audio_id": "a" * 64, "audio_id_kind": "downmix_48k_to_16k"}
-        problems = _identity_problems(entry, "episode.wav", mono, allow_unverified=False)
+        problems, _ = _identity_problems(entry, "episode.wav", mono, allow_unverified=False)
         self.assertTrue(any("audio_id_kind" in problem for problem in problems))
 
     def test_annotation_structure_validation(self) -> None:
@@ -916,12 +946,13 @@ class AudioIdentityTest(unittest.TestCase):
         )
 
     def test_ground_truth_requires_identity(self) -> None:
-        missing, mismatches = _identity_checks({}, {}, input_is_local=True)
+        missing, mismatches, warnings = _identity_checks({}, {}, input_is_local=True)
         self.assertTrue(missing)
         self.assertEqual(mismatches, [])
+        self.assertEqual(warnings, [])
 
     def test_ground_truth_local_requires_byte_hash_and_pcm_id(self) -> None:
-        missing, _ = _identity_checks(
+        missing, _, _ = _identity_checks(
             {"source_sha256": "s" * 64, "id": "a" * 64, "id_kind": "k"},
             {"source_sha256": "s" * 64},
             input_is_local=True,
@@ -930,13 +961,23 @@ class AudioIdentityTest(unittest.TestCase):
         self.assertTrue(any("audio_id_kind" in problem for problem in missing))
 
     def test_ground_truth_mismatch_is_reported(self) -> None:
-        missing, mismatches = _identity_checks(
+        missing, mismatches, _ = _identity_checks(
             {"source_sha256": "s" * 64, "id": "a" * 64, "id_kind": "k"},
             {"source_sha256": "x" * 64, "audio_id": "b" * 64, "audio_id_kind": "k"},
             input_is_local=True,
         )
         self.assertEqual(missing, [])
         self.assertEqual(len(mismatches), 2)
+
+    def test_ground_truth_pcm_drift_with_same_bytes_is_a_warning(self) -> None:
+        missing, mismatches, warnings = _identity_checks(
+            {"source_sha256": "s" * 64, "id": "a" * 64, "id_kind": "k"},
+            {"source_sha256": "s" * 64, "audio_id": "b" * 64, "audio_id_kind": "k"},
+            input_is_local=True,
+        )
+        self.assertEqual(missing, [])
+        self.assertEqual(mismatches, [])
+        self.assertTrue(any("audio_id" in warning for warning in warnings))
 
 
 if __name__ == "__main__":

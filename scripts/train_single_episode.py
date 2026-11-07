@@ -246,38 +246,54 @@ def _load_weak(path: Path, manifest: Path, max_episodes: int) -> tuple[list[tupl
     return manifest_rows, skipped
 
 
-def _identity_problems(entry: dict, audio: str, mono: dict, allow_unverified: bool) -> list[str]:
+def _identity_problems(
+    entry: dict,
+    audio: str,
+    mono: dict,
+    allow_unverified: bool,
+    strict_audio_id: bool = False,
+) -> tuple[list[str], list[str]]:
     problems: list[str] = []
+    warnings: list[str] = []
     source_hash = str(entry.get("source_sha256") or "")
     audio_id = str(entry.get("audio_id") or "")
     remote = audio.startswith(("http://", "https://"))
+    source_verified = False
     if source_hash and not remote:
         actual = file_sha256(audio)
         if actual != source_hash:
             problems.append(
                 f"source_sha256 不匹配（标注 {source_hash[:12]}…, 文件 {actual[:12] or 'unreadable'}…）"
             )
+        else:
+            source_verified = True
+
+    def record(message: str) -> None:
+        # PCM 指纹依赖解码器实现；字节一致时把它降级为警告。
+        if source_verified and not strict_audio_id:
+            warnings.append(f"{message}（source_sha256 已确认字节一致，按解码器差异处理）")
+        else:
+            problems.append(message)
+
     kind = str(entry.get("audio_id_kind") or "")
     if audio_id:
         actual_id = str(mono.get("audio_id") or "")
         if actual_id != audio_id:
-            problems.append(
-                f"audio_id 不匹配（标注 {audio_id[:12]}…, 解码 {actual_id[:12] or 'empty'}…）"
-            )
+            record(f"audio_id 不匹配（标注 {audio_id[:12]}…, 解码 {actual_id[:12] or 'empty'}…）")
         actual_kind = str(mono.get("audio_id_kind") or "")
         if not kind:
             problems.append("标注缺少 audio_id_kind（必须标明 PCM 指纹的生成方式）")
         elif not actual_kind:
             problems.append("解码结果缺少 audio_id_kind，无法校验音频身份")
         elif kind != actual_kind:
-            problems.append(f"audio_id_kind 不一致（标注 {kind}, 解码 {actual_kind}）")
+            record(f"audio_id_kind 不一致（标注 {kind}, 解码 {actual_kind}）")
     elif not allow_unverified:
         problems.append("标注缺少 audio_id（解码 PCM 内容指纹）")
     if not remote and not source_hash and not allow_unverified:
         problems.append("本地音频标注缺少 source_sha256，无法证明标注用的原始字节")
     if remote and source_hash and not audio_id:
         problems.append("远程音频只有 source_sha256，无法校验字节；请先用 scripts/snapshot_audio.py 归档")
-    return problems
+    return problems, warnings
 
 
 def _duplicate_identity_problems(entries: list[dict]) -> list[str]:
@@ -1693,6 +1709,11 @@ def main() -> int:
         help="音频身份不匹配时仅警告并继续（默认中止）",
     )
     parser.add_argument(
+        "--strict-audio-id",
+        action="store_true",
+        help="即使 source_sha256 一致，也要求 PCM audio_id 完全一致（跨解码器会失败）",
+    )
+    parser.add_argument(
         "--min-boundary-event-recall",
         type=float,
         default=MIN_BOUNDARY_EVENT_RECALL,
@@ -1792,7 +1813,15 @@ def main() -> int:
                 return 1
         print(f"[extract] {feed} / {name}", flush=True)
         mono, forensic = extract_features(audio, proxy=args.proxy)
-        identity = _identity_problems(entry, audio, mono, args.allow_unverified_audio)
+        identity, identity_warnings = _identity_problems(
+            entry,
+            audio,
+            mono,
+            args.allow_unverified_audio,
+            args.strict_audio_id,
+        )
+        for warning in identity_warnings:
+            print(f"[identity-warn] {name}: {warning}", flush=True)
         if identity:
             for problem in identity:
                 print(f"[identity] {name}: {problem}", flush=True)
