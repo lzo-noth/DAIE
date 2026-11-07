@@ -62,7 +62,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out/release
-          gh run download "$RESUME_RUN" -D out/release --repo "${{ github.repository }}"
+          name=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_RUN/artifacts" \
+            --jq '.artifacts[] | select(.name | test("^(dai-release-annotations|dai-release-pipeline)-")) | .name' \
+            | head -1)
+          if [ -z "$name" ]; then
+            echo "run $RESUME_RUN 没有可复用的标注 artifact" >&2
+            exit 1
+          fi
+          gh run download "$RESUME_RUN" -n "$name" -D out/release --repo "$GITHUB_REPOSITORY"
           ls -la out/release | head -40
       - name: Fetch release manifests
         env:
