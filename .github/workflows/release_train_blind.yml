@@ -33,9 +33,14 @@ on:
         description: "用 ASR+LLM 为盲测集自动生成 llm_weak 真值（不会标记性能达标）"
         required: false
         default: "false"
+      resume_run_id:
+        description: "复用该 run 的 artifact（已完成集/快照/转写）继续跑，可留空"
+        required: false
+        default: ""
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   release-pipeline:
@@ -51,6 +56,16 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
           python -m pip install --quiet numpy openai faster-whisper "av<14"
+      - name: Restore partial pipeline output from previous run
+        if: inputs.resume_run_id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RESUME_RUN: ${{ inputs.resume_run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/release
+          gh run download "$RESUME_RUN" -D out/release --repo "${{ github.repository }}"
+          ls -la out/release | head -40
       - name: Fetch release manifests
         env:
           TRAIN_URL: ${{ inputs.train_manifest_url }}
@@ -74,7 +89,8 @@ jobs:
             --transcripts-out out/release/transcripts.jsonl \
             --snapshot-dir out/release/snapshots \
             --whisper-model "$WHISPER_MODEL" --language "$LANGUAGE" \
-            --labels-source llm_weak --allow-empty-ads
+            --labels-source llm_weak --allow-empty-ads \
+            --batch-size 40 --request-interval 5 --resume
       - name: Train single-recording models
         run: |
           set -euo pipefail
@@ -106,7 +122,8 @@ jobs:
               --ground-truth-dir out/release/blind_gt \
               --blind-manifest-out out/release/blind_generated.jsonl \
               --whisper-model "$WHISPER_MODEL" --language "$LANGUAGE" \
-              --labels-source llm_weak --allow-empty-ads
+              --labels-source llm_weak --allow-empty-ads \
+              --batch-size 40 --request-interval 5 --resume
             manifest=out/release/blind_generated.jsonl
             allow_nonhuman=true
           fi

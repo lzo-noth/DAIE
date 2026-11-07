@@ -37,10 +37,17 @@ def classify_transcript_segments(
     client,
     model: str,
     batch_size: int = 12,
+    request_interval_s: float = 0.0,
 ) -> dict[str, dict[str, Any]]:
-    """Classify full-episode transcript segments as ads or content."""
+    """Classify full-episode transcript segments as ads or content.
+
+    ``request_interval_s`` paces batches so long episodes do not exceed
+    provider rate limits (Gemini free tier is 15 requests/minute).
+    """
     results: dict[str, dict[str, Any]] = {}
     for start in range(0, len(segments), batch_size):
+        if start and request_interval_s > 0:
+            time.sleep(request_interval_s)
         batch = []
         for index in range(start, min(start + batch_size, len(segments))):
             segment = segments[index]
@@ -179,14 +186,33 @@ def _retryable(exc: Exception) -> bool:
     )
 
 
-def _create_with_retry(client, **kwargs):
-    for attempt in range(5):
+def _retry_after_seconds(exc: Exception) -> float | None:
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if headers is None:
+        headers = getattr(exc, "headers", None)
+    if headers is None:
+        return None
+    try:
+        value = headers.get("retry-after") or headers.get("Retry-After")
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _create_with_retry(client, attempts: int = 9, **kwargs):
+    for attempt in range(attempts):
         try:
             return client.chat.completions.create(**kwargs)
         except Exception as exc:  # noqa: BLE001
-            if attempt == 4 or not _retryable(exc):
+            if attempt == attempts - 1 or not _retryable(exc):
                 raise
-            time.sleep((5, 15, 30, 60)[attempt])
+            delay = _retry_after_seconds(exc)
+            if delay is None:
+                delay = min(300.0, 15.0 * (2 ** attempt))
+            time.sleep(delay)
 
 
 def classify_items(

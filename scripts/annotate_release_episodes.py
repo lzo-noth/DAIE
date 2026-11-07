@@ -71,6 +71,35 @@ def _transcribe(path: Path, model, language: str) -> list[dict]:
     ]
 
 
+def _load_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            # 中断写入的残行；其余行仍然可用。
+            continue
+    return rows
+
+
+def _episode_key(row: dict) -> tuple[str, str]:
+    return (str(row.get("feed") or "unknown"), str(row.get("episode") or ""))
+
+
+def _existing_snapshot(snapshot_dir: Path, digest: str) -> Path | None:
+    if not digest:
+        return None
+    for candidate in snapshot_dir.glob(f"{digest}*"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True, help="release 音频清单 JSONL")
@@ -85,6 +114,12 @@ def main() -> int:
     parser.add_argument("--compute-type", default="int8")
     parser.add_argument("--model", default="", help="LLM 模型名")
     parser.add_argument("--batch-size", type=int, default=12)
+    parser.add_argument(
+        "--request-interval", type=float, default=0.0, help="LLM 批次之间等待秒数（限速）"
+    )
+    parser.add_argument(
+        "--resume", action="store_true", help="复用已有 transcripts/annotations，跳过已完成集"
+    )
     parser.add_argument("--max-gap", type=float, default=1.0)
     parser.add_argument("--min-confidence", type=float, default=0.5)
     parser.add_argument("--allow-empty-ads", action="store_true")
@@ -105,12 +140,29 @@ def main() -> int:
     whisper = WhisperModel(args.whisper_model, device="cpu", compute_type=args.compute_type)
     args.annotations_out.parent.mkdir(parents=True, exist_ok=True)
     args.transcripts_out.parent.mkdir(parents=True, exist_ok=True)
-    annotation_handle = args.annotations_out.open("w", encoding="utf-8")
-    transcript_handle = args.transcripts_out.open("w", encoding="utf-8")
+    mode = "a" if args.resume else "w"
+    done_annotations = (
+        {_episode_key(row) for row in _load_jsonl(args.annotations_out)}
+        if args.resume
+        else set()
+    )
+    cached_transcripts = (
+        {_episode_key(row): row for row in _load_jsonl(args.transcripts_out)}
+        if args.resume
+        else {}
+    )
+    annotation_handle = args.annotations_out.open(mode, encoding="utf-8")
+    transcript_handle = args.transcripts_out.open(mode, encoding="utf-8")
     if args.blind_manifest_out:
         args.blind_manifest_out.parent.mkdir(parents=True, exist_ok=True)
-        blind_handle = args.blind_manifest_out.open("w", encoding="utf-8")
+        existing_blind = (
+            {_episode_key(row) for row in _load_jsonl(args.blind_manifest_out)}
+            if args.resume
+            else set()
+        )
+        blind_handle = args.blind_manifest_out.open(mode, encoding="utf-8")
     else:
+        existing_blind = set()
         blind_handle = None
     if args.ground_truth_dir:
         args.ground_truth_dir.mkdir(parents=True, exist_ok=True)
@@ -123,43 +175,82 @@ def main() -> int:
             continue
         feed = str(row.get("feed") or "unknown")
         episode = str(row.get("episode") or Path(source).stem)
+        key = (feed, episode)
+        if key in done_annotations:
+            print(f"[resume] 跳过已完成: {feed}/{episode}", flush=True)
+            continue
         print(f"[annotate] {feed} / {episode}", flush=True)
-        target, digest = snapshot(source, args.snapshot_dir, None, False)
-        # Reuse snapshot_audio's identity extraction without a second download.
-        from dai_detect.single_episode import extract_features
+        cached = cached_transcripts.get(key)
+        if cached:
+            segments = list(cached.get("segments") or [])
+            results = dict(cached.get("results") or {})
+            ads = list(cached.get("ads") or [])
+            audio_path = str(cached.get("audio") or "")
+            digest = str(cached.get("source_sha256") or "")
+            audio_id = str(cached.get("audio_id") or "")
+            audio_id_kind = str(cached.get("audio_id_kind") or "")
+            duration = float(cached.get("duration_s") or 0.0)
+            print(f"[resume] 复用转写: {feed}/{episode}", flush=True)
+        else:
+            digest_hint = str(row.get("source_sha256") or "")
+            reused = _existing_snapshot(args.snapshot_dir, digest_hint)
+            if reused:
+                target, digest = reused, digest_hint
+                print(f"[resume] 复用音频快照: {target.name}", flush=True)
+            else:
+                target, digest = snapshot(source, args.snapshot_dir, None, False)
+            # Reuse snapshot_audio's identity extraction without a second download.
+            from dai_detect.single_episode import extract_features
 
-        mono, forensic = extract_features(str(target), proxy=None)
-        duration = min(
-            float(mono.get("duration_s") or 0.0),
-            float(forensic.get("duration_s") or 0.0),
-        )
-        segments = _transcribe(target, whisper, args.language)
-        results = classify_transcript_segments(segments, client, llm_model, args.batch_size)
-        ads = merge_ad_segments(
-            segments, results, max_gap_s=args.max_gap, min_confidence=args.min_confidence
-        )
+            mono, forensic = extract_features(str(target), proxy=None)
+            duration = min(
+                float(mono.get("duration_s") or 0.0),
+                float(forensic.get("duration_s") or 0.0),
+            )
+            audio_path = str(target)
+            audio_id = str(mono.get("audio_id") or "")
+            audio_id_kind = str(mono.get("audio_id_kind") or "")
+            segments = _transcribe(target, whisper, args.language)
+            results = classify_transcript_segments(
+                segments,
+                client,
+                llm_model,
+                args.batch_size,
+                args.request_interval,
+            )
+            ads = merge_ad_segments(
+                segments, results, max_gap_s=args.max_gap, min_confidence=args.min_confidence
+            )
+            transcript_handle.write(
+                json.dumps(
+                    {
+                        "audio": audio_path,
+                        "feed": feed,
+                        "episode": episode,
+                        "source_sha256": digest,
+                        "audio_id": audio_id,
+                        "audio_id_kind": audio_id_kind,
+                        "duration_s": round(duration, 2),
+                        "labels_source": args.labels_source,
+                        "segments": segments,
+                        "results": results,
+                        "ads": ads,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            transcript_handle.flush()
         identity = {
-            "audio": str(target),
+            "audio": audio_path,
             "feed": feed,
             "episode": episode,
             "source_sha256": digest,
-            "audio_id": str(mono.get("audio_id") or ""),
-            "audio_id_kind": str(mono.get("audio_id_kind") or ""),
+            "audio_id": audio_id,
+            "audio_id_kind": audio_id_kind,
             "duration_s": round(duration, 2),
             "labels_source": args.labels_source,
         }
-        transcript_handle.write(
-            json.dumps(
-                {
-                    **identity,
-                    "segments": segments,
-                    "results": results,
-                    "ads": ads,
-                },
-                ensure_ascii=False,
-            )
-            + "\n"
-        )
         if (
             not ads
             and not args.allow_empty_ads
@@ -173,6 +264,7 @@ def main() -> int:
         ]
         annotation = {**identity, "ads": ads}
         annotation_handle.write(json.dumps(annotation, ensure_ascii=False) + "\n")
+        annotation_handle.flush()
         if blind_handle and args.ground_truth_dir:
             safe = "".join(
                 character if character.isalnum() or character in "-_." else "_"
@@ -193,18 +285,20 @@ def main() -> int:
                 ),
                 encoding="utf-8",
             )
-            blind_handle.write(
-                json.dumps(
-                    {
-                        "audio": str(target),
-                        "feed": feed,
-                        "episode": episode,
-                        "ground_truth": str(gt_path),
-                    },
-                    ensure_ascii=False,
+            if key not in existing_blind:
+                blind_handle.write(
+                    json.dumps(
+                        {
+                            "audio": audio_path,
+                            "feed": feed,
+                            "episode": episode,
+                            "ground_truth": str(gt_path),
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
                 )
-                + "\n"
-            )
+                blind_handle.flush()
         total_ads += len(ads)
         total_episodes += 1
         print(f"[annotate] {feed}/{episode}: ads={len(ads)} segments={len(segments)}", flush=True)
