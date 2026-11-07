@@ -40,14 +40,29 @@ def _load_feeds(path: Path) -> list[dict]:
     return feeds
 
 
+def _is_audio_url(url: str, content_type: str = "") -> bool:
+    ctype = (content_type or "").lower()
+    if ctype.startswith("audio/"):
+        return True
+    suffix = Path(urllib.parse.urlparse(url).path).suffix.lower()
+    return suffix in AUDIO_SUFFIXES
+
+
 def _entry_audio(entry) -> str:
     for enclosure in entry.get("enclosures") or []:
         href = str(enclosure.get("href") or enclosure.get("url") or "")
-        if href.startswith(("http://", "https://")):
+        if href.startswith(("http://", "https://")) and _is_audio_url(
+            href, str(enclosure.get("type") or "")
+        ):
             return href
     for link in entry.get("links") or []:
-        if link.get("rel") == "enclosure" and link.get("href"):
-            return str(link["href"])
+        href = str(link.get("href") or "")
+        if (
+            link.get("rel") == "enclosure"
+            and href.startswith(("http://", "https://"))
+            and _is_audio_url(href, str(link.get("type") or ""))
+        ):
+            return href
     return ""
 
 
