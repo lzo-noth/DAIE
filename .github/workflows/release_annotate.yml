@@ -53,7 +53,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
-          python -m pip install --quiet numpy faster-whisper "av<14"
+          python -m pip install --quiet numpy openai faster-whisper "av<14"
       - name: Restore partial annotation output from previous run
         if: inputs.resume_run_id != ''
         env:
