@@ -40,7 +40,7 @@ permissions:
 jobs:
   release-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -74,7 +74,7 @@ jobs:
             --transcripts-out out/release/transcripts.jsonl \
             --snapshot-dir out/release/snapshots \
             --whisper-model "$WHISPER_MODEL" --language "$LANGUAGE" \
-            --labels-source llm_weak
+            --labels-source llm_weak --allow-empty-ads
       - name: Train single-recording models
         run: |
           set -euo pipefail
