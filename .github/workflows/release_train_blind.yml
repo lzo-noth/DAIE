@@ -50,7 +50,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
-          python -m pip install --quiet numpy openai faster-whisper
+          python -m pip install --quiet numpy openai faster-whisper "av<14"
       - name: Fetch release manifests
         env:
           TRAIN_URL: ${{ inputs.train_manifest_url }}
