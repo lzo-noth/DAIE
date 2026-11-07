@@ -57,12 +57,14 @@ def main() -> int:
 
     candidates = sorted(feed for feed in by_feed if feed and feed not in blind_feeds)
     random.Random(args.seed).shuffle(candidates)
+    blind_count = sum(len(by_feed[feed]) for feed in blind_feeds)
     for feed in candidates:
-        if len(blind_rows) >= args.blind_episodes:
+        if blind_count >= args.blind_episodes:
             break
         blind_feeds.add(feed)
-        blind_rows.extend(by_feed[feed][:2])
+        blind_count += len(by_feed[feed])
 
+    blind_rows = [row for row in rows if str(row.get("feed") or "") in blind_feeds]
     train_rows = [
         row
         for row in rows
