@@ -12,9 +12,13 @@ on:
         required: false
         default: "42"
       max_per_feed:
-        description: "每个 feed 最多先取几集（默认先保证 feed 多样性）"
+        description: "每个 feed 先最多取几集"
         required: false
         default: "1"
+      latest_per_feed:
+        description: "每个 feed 只从最近多少集里抽样"
+        required: false
+        default: "10"
       release_tag:
         description: "附加到的 Release tag"
         required: false
@@ -46,17 +50,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Sample and download audio
+      - name: Install dependencies
+        run: python -m pip install --quiet feedparser
+      - name: Sample and download platform feed audio
         env:
           COUNT: ${{ inputs.count }}
           SEED: ${{ inputs.seed }}
           MAX_PER_FEED: ${{ inputs.max_per_feed }}
+          LATEST_PER_FEED: ${{ inputs.latest_per_feed }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          python scripts/sample_report_audio.py \
-            --index datasets/episode_audio_index.jsonl \
-            --count "$COUNT" --seed "$SEED" --max-per-feed "$MAX_PER_FEED" \
+          python scripts/sample_platform_feeds.py \
+            --platforms platforms.json \
+            --count "$COUNT" --seed "$SEED" \
+            --max-per-feed "$MAX_PER_FEED" --latest-per-feed "$LATEST_PER_FEED" \
             --release-tag "$RELEASE_TAG" \
             --out-dir out/sample_audio \
             --manifest out/sample_audio_manifest.jsonl
@@ -92,6 +100,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "manifest unchanged"
           else
-            git commit -m "Add sampled release audio manifest"
+            git commit -m "Add sampled platform feed audio manifest"
             git push
           fi
