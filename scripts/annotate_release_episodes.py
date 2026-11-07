@@ -52,6 +52,28 @@ def _client_and_model(model: str):
     return client, model_name
 
 
+GEMINI_MODEL_CANDIDATES = (
+    "gemini-3.5-flash-lite",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash-lite",
+)
+
+
+def _probe_model(client, model: str) -> str:
+    """Return "" when the model answers, else a short error string."""
+    try:
+        client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=1,
+            temperature=0,
+        )
+        return ""
+    except Exception as exc:  # noqa: BLE001
+        return f"{type(exc).__name__}: {str(exc)[:200]}"
+
+
 def _transcribe(path: Path, model, language: str) -> list[dict]:
     segments, _ = model.transcribe(
         str(path),
@@ -113,6 +135,9 @@ def main() -> int:
     parser.add_argument("--language", default="en")
     parser.add_argument("--compute-type", default="int8")
     parser.add_argument("--model", default="", help="LLM 模型名")
+    parser.add_argument(
+        "--pick-model", action="store_true", help="探测可用 LLM 模型，成功时打印 MODEL=<name>"
+    )
     parser.add_argument("--batch-size", type=int, default=12)
     parser.add_argument(
         "--request-interval", type=float, default=0.0, help="LLM 批次之间等待秒数（限速）"
@@ -134,6 +159,19 @@ def main() -> int:
     if client is None:
         print("缺少 GEMINI_API_KEY/OPENAI_API_KEY，无法生成 LLM 标注", file=sys.stderr)
         return 2
+    if args.pick_model:
+        candidates = [llm_model]
+        if os.environ.get("GEMINI_API_KEY", "").strip():
+            candidates += [name for name in GEMINI_MODEL_CANDIDATES if name != llm_model]
+        for candidate in candidates:
+            error = _probe_model(client, candidate)
+            if not error:
+                print(f"model {candidate}: ok", flush=True)
+                print(f"MODEL={candidate}", flush=True)
+                return 0
+            print(f"model {candidate}: {error}", flush=True)
+        print("没有可用的 LLM 模型", file=sys.stderr)
+        return 1
 
     from faster_whisper import WhisperModel
 
@@ -169,6 +207,7 @@ def main() -> int:
 
     total_ads = 0
     total_episodes = 0
+    failures: list[dict] = []
     for row in rows:
         source = str(row.get("audio_url") or row.get("audio") or "")
         if not source:
@@ -183,14 +222,18 @@ def main() -> int:
         cached = cached_transcripts.get(key)
         if cached:
             segments = list(cached.get("segments") or [])
-            results = dict(cached.get("results") or {})
-            ads = list(cached.get("ads") or [])
             audio_path = str(cached.get("audio") or "")
             digest = str(cached.get("source_sha256") or "")
             audio_id = str(cached.get("audio_id") or "")
             audio_id_kind = str(cached.get("audio_id_kind") or "")
             duration = float(cached.get("duration_s") or 0.0)
-            print(f"[resume] 复用转写: {feed}/{episode}", flush=True)
+            classified = not cached.get("llm_error")
+            if classified:
+                results = dict(cached.get("results") or {})
+                ads = list(cached.get("ads") or [])
+                print(f"[resume] 复用转写: {feed}/{episode}", flush=True)
+            else:
+                print(f"[resume] 复用转写并重试 LLM 分类: {feed}/{episode}", flush=True)
         else:
             digest_hint = str(row.get("source_sha256") or "")
             reused = _existing_snapshot(args.snapshot_dir, digest_hint)
@@ -211,36 +254,7 @@ def main() -> int:
             audio_id = str(mono.get("audio_id") or "")
             audio_id_kind = str(mono.get("audio_id_kind") or "")
             segments = _transcribe(target, whisper, args.language)
-            results = classify_transcript_segments(
-                segments,
-                client,
-                llm_model,
-                args.batch_size,
-                args.request_interval,
-            )
-            ads = merge_ad_segments(
-                segments, results, max_gap_s=args.max_gap, min_confidence=args.min_confidence
-            )
-            transcript_handle.write(
-                json.dumps(
-                    {
-                        "audio": audio_path,
-                        "feed": feed,
-                        "episode": episode,
-                        "source_sha256": digest,
-                        "audio_id": audio_id,
-                        "audio_id_kind": audio_id_kind,
-                        "duration_s": round(duration, 2),
-                        "labels_source": args.labels_source,
-                        "segments": segments,
-                        "results": results,
-                        "ads": ads,
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
-            transcript_handle.flush()
+            classified = False
         identity = {
             "audio": audio_path,
             "feed": feed,
@@ -251,6 +265,52 @@ def main() -> int:
             "duration_s": round(duration, 2),
             "labels_source": args.labels_source,
         }
+        if not classified:
+            try:
+                results = classify_transcript_segments(
+                    segments,
+                    client,
+                    llm_model,
+                    args.batch_size,
+                    args.request_interval,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # 单集失败不终止整批：转写立即落盘，配额恢复后 --resume 只重跑 LLM。
+                failures.append(
+                    {"feed": feed, "episode": episode, "error": f"{type(exc).__name__}: {exc}"[:300]}
+                )
+                transcript_handle.write(
+                    json.dumps(
+                        {
+                            **identity,
+                            "segments": segments,
+                            "results": {},
+                            "ads": [],
+                            "llm_error": f"{type(exc).__name__}: {exc}"[:300],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+                transcript_handle.flush()
+                print(f"[fail] {feed}/{episode}: LLM 分类失败，已保留转写", flush=True)
+                continue
+            ads = merge_ad_segments(
+                segments, results, max_gap_s=args.max_gap, min_confidence=args.min_confidence
+            )
+            transcript_handle.write(
+                json.dumps(
+                    {
+                        **identity,
+                        "segments": segments,
+                        "results": results,
+                        "ads": ads,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            transcript_handle.flush()
         if (
             not ads
             and not args.allow_empty_ads
@@ -315,6 +375,7 @@ def main() -> int:
                 "labels_source": args.labels_source,
                 "annotations": str(args.annotations_out),
                 "transcripts": str(args.transcripts_out),
+                "failed": failures,
             },
             ensure_ascii=False,
         )

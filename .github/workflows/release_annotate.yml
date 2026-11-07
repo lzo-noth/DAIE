@@ -19,6 +19,10 @@ on:
         description: "转写语言"
         required: false
         default: "en"
+      llm_model:
+        description: "LLM 模型（留空则自动探测可用模型）"
+        required: false
+        default: ""
       labels_source:
         description: "标签来源（llm_weak 待人工校对；人工改完后填 human）"
         required: false
@@ -80,6 +84,17 @@ jobs:
           mkdir -p out/release
           if [[ "$TRAIN_URL" == http* ]]; then curl -fsSL "$TRAIN_URL" -o out/release/train_manifest.jsonl; else cp "$TRAIN_URL" out/release/train_manifest.jsonl; fi
           if [[ "$BLIND_URL" == http* ]]; then curl -fsSL "$BLIND_URL" -o out/release/blind_manifest.jsonl; else cp "$BLIND_URL" out/release/blind_manifest.jsonl; fi
+      - name: Pick available LLM model
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LLM_MODEL: ${{ inputs.llm_model }}
+        run: |
+          set -euo pipefail
+          python scripts/annotate_release_episodes.py --pick-model --model "$LLM_MODEL" | tee pick_model.log
+          model=$(grep '^MODEL=' pick_model.log | tail -1 | cut -d= -f2)
+          test -n "$model"
+          echo "LLM_MODEL=$model" >> "$GITHUB_ENV"
       - name: Transcribe and LLM-annotate training audio
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -97,6 +112,7 @@ jobs:
             --transcripts-out out/release/transcripts.jsonl \
             --snapshot-dir out/release/snapshots \
             --whisper-model "$WHISPER_MODEL" --language "$LANGUAGE" \
+            --model "$LLM_MODEL" \
             --labels-source "$LABELS_SOURCE" --allow-empty-ads \
             --batch-size "$BATCH_SIZE" --request-interval "$REQUEST_INTERVAL" \
             --resume
@@ -119,6 +135,7 @@ jobs:
             --ground-truth-dir out/release/blind_gt \
             --blind-manifest-out out/release/blind_generated.jsonl \
             --whisper-model "$WHISPER_MODEL" --language "$LANGUAGE" \
+            --model "$LLM_MODEL" \
             --labels-source "$LABELS_SOURCE" --allow-empty-ads \
             --batch-size "$BATCH_SIZE" --request-interval "$REQUEST_INTERVAL" \
             --resume
