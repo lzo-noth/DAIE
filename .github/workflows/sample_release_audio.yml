@@ -55,7 +55,7 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/sample_report_audio.py \
-            --reports-root artifact \
+            --index datasets/episode_audio_index.jsonl \
             --count "$COUNT" --seed "$SEED" --max-per-feed "$MAX_PER_FEED" \
             --release-tag "$RELEASE_TAG" \
             --out-dir out/sample_audio \

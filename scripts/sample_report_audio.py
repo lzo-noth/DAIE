@@ -89,6 +89,7 @@ def _download(url: str, target: Path, timeout: int) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--reports-root", type=Path, default=Path("artifact"))
+    parser.add_argument("--index", type=Path, help="可选的 episode 索引 JSONL（替代扫描 artifact）")
     parser.add_argument("--count", type=int, default=15)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-per-feed", type=int, default=1)
@@ -99,7 +100,15 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=180)
     args = parser.parse_args()
 
-    items = _collect(args.reports_root)
+    items = (
+        [
+            json.loads(line)
+            for line in args.index.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if args.index
+        else _collect(args.reports_root)
+    )
     if not items:
         print(f"没有在 {args.reports_root} 找到带 audio_url 的 episode", file=sys.stderr)
         return 1
