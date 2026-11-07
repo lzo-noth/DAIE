@@ -31,6 +31,10 @@ on:
         description: "是否把采样清单提交到仓库"
         required: false
         default: "true"
+      exclude_manifest:
+        description: "跳过该清单里已有的 feed/episode，并与其合并"
+        required: false
+        default: "datasets/sampled_release_manifest.jsonl"
 
 permissions:
   contents: write
@@ -59,13 +63,19 @@ jobs:
           MAX_PER_FEED: ${{ inputs.max_per_feed }}
           LATEST_PER_FEED: ${{ inputs.latest_per_feed }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          EXCLUDE: ${{ inputs.exclude_manifest }}
         run: |
           set -euo pipefail
+          exclude_args=()
+          if [ -n "$EXCLUDE" ] && [ -f "$EXCLUDE" ]; then
+            exclude_args+=(--exclude-manifest "$EXCLUDE" --merged-manifest datasets/sampled_release_manifest.jsonl)
+          fi
           python scripts/sample_platform_feeds.py \
             --platforms platforms.json \
             --count "$COUNT" --seed "$SEED" \
             --max-per-feed "$MAX_PER_FEED" --latest-per-feed "$LATEST_PER_FEED" \
             --release-tag "$RELEASE_TAG" \
+            "${exclude_args[@]}" \
             --out-dir out/sample_audio \
             --manifest out/sample_audio_manifest.jsonl
           ls -lh out/sample_audio | head -30
@@ -90,10 +100,13 @@ jobs:
         if: inputs.commit_manifest == 'true'
         env:
           MANIFEST: out/sample_audio_manifest.jsonl
+          EXCLUDE: ${{ inputs.exclude_manifest }}
         run: |
           set -euo pipefail
           mkdir -p datasets
-          cp "$MANIFEST" datasets/sampled_release_manifest.jsonl
+          if [ -z "${EXCLUDE:-}" ] || [ ! -f "$EXCLUDE" ]; then
+            cp "$MANIFEST" datasets/sampled_release_manifest.jsonl
+          fi
           git config user.name "github-actions"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add datasets/sampled_release_manifest.jsonl

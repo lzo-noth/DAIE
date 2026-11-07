@@ -146,6 +146,8 @@ def main() -> int:
     parser.add_argument(
         "--resume", action="store_true", help="复用已有 transcripts/annotations，跳过已完成集"
     )
+    parser.add_argument("--shard-index", type=int, default=0, help="分片序号（从 0 开始）")
+    parser.add_argument("--shard-count", type=int, default=1, help="分片总数")
     parser.add_argument("--max-gap", type=float, default=1.0)
     parser.add_argument("--min-confidence", type=float, default=0.5)
     parser.add_argument("--allow-empty-ads", action="store_true")
@@ -176,6 +178,10 @@ def main() -> int:
         for line in args.manifest.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+    if args.shard_count > 1:
+        rows = [
+            row for index, row in enumerate(rows) if index % args.shard_count == args.shard_index
+        ]
 
     from faster_whisper import WhisperModel
 

@@ -35,6 +35,10 @@ on:
         description: "LLM 批次间隔秒数（限速）"
         required: false
         default: "5"
+      shard_count:
+        description: "并行分片数（每片约 12-15 集）"
+        required: false
+        default: "1"
       resume_run_id:
         description: "复用该 run 的 artifact（已完成集/快照/转写）继续跑，可留空"
         required: false
@@ -45,9 +49,26 @@ permissions:
   actions: read
 
 jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.matrix.outputs.shards }}
+    steps:
+      - id: matrix
+        env:
+          N: ${{ inputs.shard_count }}
+        run: |
+          shards=$(python -c 'import json,os;print(json.dumps(list(range(1,int(os.environ["N"])+1))))')
+          echo "shards=$shards" >> "$GITHUB_OUTPUT"
+
   annotate:
+    needs: setup
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.setup.outputs.shards) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -67,8 +88,8 @@ jobs:
           set -euo pipefail
           mkdir -p out/release
           name=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_RUN/artifacts" \
-            --jq '.artifacts[] | select(.name | test("^(dai-release-annotations|dai-release-pipeline)-")) | .name' \
-            | head -1)
+            --jq '.artifacts[] | select(.name | test("^(dai-release-annotations-[0-9]+$|dai-release-pipeline-)")) | .name' \
+            | tail -1)
           if [ -z "$name" ]; then
             echo "run $RESUME_RUN 没有可复用的标注 artifact" >&2
             exit 1
@@ -91,7 +112,13 @@ jobs:
           LLM_MODEL: ${{ inputs.llm_model }}
         run: |
           set -euo pipefail
-          python scripts/annotate_release_episodes.py --pick-model --model "$LLM_MODEL" | tee pick_model.log
+          for attempt in 1 2 3; do
+            if python scripts/annotate_release_episodes.py --pick-model --model "$LLM_MODEL" | tee pick_model.log; then
+              break
+            fi
+            echo "model probe failed (attempt $attempt)"
+            sleep $((attempt * 60))
+          done
           model=$(grep '^MODEL=' pick_model.log | tail -1 | cut -d= -f2)
           test -n "$model"
           echo "LLM_MODEL=$model" >> "$GITHUB_ENV"
@@ -104,6 +131,8 @@ jobs:
           LABELS_SOURCE: ${{ inputs.labels_source }}
           BATCH_SIZE: ${{ inputs.batch_size }}
           REQUEST_INTERVAL: ${{ inputs.request_interval }}
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
         run: |
           set -euo pipefail
           python scripts/annotate_release_episodes.py \
@@ -115,6 +144,7 @@ jobs:
             --model "$LLM_MODEL" \
             --labels-source "$LABELS_SOURCE" --allow-empty-ads \
             --batch-size "$BATCH_SIZE" --request-interval "$REQUEST_INTERVAL" \
+            --shard-index "$((SHARD_INDEX - 1))" --shard-count "$SHARD_COUNT" \
             --resume
       - name: Transcribe and LLM-annotate blind audio ground truth
         env:
@@ -125,6 +155,8 @@ jobs:
           LABELS_SOURCE: ${{ inputs.labels_source }}
           BATCH_SIZE: ${{ inputs.batch_size }}
           REQUEST_INTERVAL: ${{ inputs.request_interval }}
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
         run: |
           set -euo pipefail
           python scripts/annotate_release_episodes.py \
@@ -138,9 +170,51 @@ jobs:
             --model "$LLM_MODEL" \
             --labels-source "$LABELS_SOURCE" --allow-empty-ads \
             --batch-size "$BATCH_SIZE" --request-interval "$REQUEST_INTERVAL" \
+            --shard-index "$((SHARD_INDEX - 1))" --shard-count "$SHARD_COUNT" \
             --resume
-      - name: Apply label review decisions
+      - uses: actions/upload-artifact@v4
         if: always()
+        with:
+          name: dai-release-annotations-${{ github.run_number }}-shard${{ matrix.shard }}
+          path: out/release/
+          if-no-files-found: warn
+          retention-days: 30
+
+  publish:
+    needs: annotate
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download shard artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/shards
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" \
+            --jq '.artifacts[] | select(.name | startswith("dai-release-annotations-")) | .name' \
+            > shard_names.txt
+          count=$(wc -l < shard_names.txt)
+          test "$count" -gt 0
+          i=0
+          while read -r name; do
+            i=$((i + 1))
+            gh run download "$GITHUB_RUN_ID" -n "$name" -D "out/shards/shard-$i" --repo "$GITHUB_REPOSITORY"
+          done < shard_names.txt
+          ls -la out/shards | head -20
+      - name: Merge shards
+        run: |
+          set -euo pipefail
+          python scripts/merge_release_shards.py \
+            --shards-dir out/shards --out-dir out/release
+      - name: Apply label review decisions
         run: |
           set -euo pipefail
           if [ -f datasets/release_annotations/review_decisions.json ]; then
@@ -151,13 +225,12 @@ jobs:
             echo "no review decisions, keeping raw LLM labels"
           fi
       - name: Publish annotation data to repo
-        if: always()
         run: |
           set -euo pipefail
           python scripts/publish_annotation_data.py \
             --source out/release \
             --dest datasets/release_annotations \
-            --run-id "$GITHUB_RUN_ID" --model "${LLM_MODEL:-}"
+            --run-id "$GITHUB_RUN_ID"
           git config user.name "github-actions"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add datasets/release_annotations
@@ -168,7 +241,6 @@ jobs:
           git commit -m "Update release annotation data (run $GITHUB_RUN_ID)"
           git push || { git pull --rebase origin "${GITHUB_REF_NAME}"; git push; }
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
           name: dai-release-annotations-${{ github.run_number }}
           path: out/release/

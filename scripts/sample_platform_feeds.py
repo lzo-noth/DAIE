@@ -168,7 +168,25 @@ def main() -> int:
     parser.add_argument("--release-tag", default="1.0")
     parser.add_argument("--repo", default="lzo-noth/DAIE")
     parser.add_argument("--timeout", type=int, default=180)
+    parser.add_argument(
+        "--exclude-manifest",
+        type=Path,
+        help="已有清单；跳过其中相同的 feed/episode（避免重复采样同一集）",
+    )
+    parser.add_argument(
+        "--merged-manifest",
+        type=Path,
+        help="把本次结果与 --exclude-manifest 合并后写到该路径（按 feed/episode 去重）",
+    )
     args = parser.parse_args()
+
+    excluded: set[tuple[str, str]] = set()
+    if args.exclude_manifest and args.exclude_manifest.exists():
+        for line in args.exclude_manifest.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            excluded.add((str(row.get("feed") or ""), str(row.get("episode") or "")))
 
     feeds = _load_feeds(args.platforms)
     if not feeds:
@@ -189,6 +207,12 @@ def main() -> int:
         return 1
 
     candidates = _ordered(items, args.seed, args.max_per_feed)
+    if excluded:
+        candidates = [
+            item
+            for item in candidates
+            if (str(item["feed"]), str(item["episode"])) not in excluded
+        ]
     args.out_dir.mkdir(parents=True, exist_ok=True)
     args.manifest.parent.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
@@ -227,6 +251,28 @@ def main() -> int:
         "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
         encoding="utf-8",
     )
+    if args.merged_manifest:
+        merged: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        sources = []
+        if args.exclude_manifest and args.exclude_manifest.exists():
+            sources.append(args.exclude_manifest)
+        sources.append(args.manifest)
+        for source in sources:
+            for line in source.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                key = (str(row.get("feed") or ""), str(row.get("episode") or ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(row)
+        args.merged_manifest.parent.mkdir(parents=True, exist_ok=True)
+        args.merged_manifest.write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in merged) + "\n",
+            encoding="utf-8",
+        )
     print(
         json.dumps(
             {
