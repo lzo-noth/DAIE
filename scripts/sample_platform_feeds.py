@@ -54,11 +54,10 @@ def _entry_audio(entry) -> str:
 def _collect_feed(feed: dict, latest: int, timeout: int) -> list[dict]:
     import feedparser
 
-    parsed = feedparser.parse(
-        feed["url"],
-        request_headers={"User-Agent": USER_AGENT},
-        request_timeout=timeout,
-    )
+    request = urllib.request.Request(feed["url"], headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = response.read()
+    parsed = feedparser.parse(payload)
     episodes = []
     for entry in parsed.entries[:latest]:
         audio = _entry_audio(entry)
