@@ -18,6 +18,10 @@ on:
         description: "允许 LLM_weak/unverified 真值跑通流程（不会标记性能达标）"
         required: false
         default: "false"
+      require_calibrated_models:
+        description: "要求模型通过严格校准检查（关闭后仅用于诊断，不会标记达标）"
+        required: false
+        default: "true"
 
 permissions:
   contents: read
@@ -71,17 +75,24 @@ jobs:
           ALLOW_WEAK: ${{ inputs.allow_weak_blind_labels }}
           MIN_EVENTS: ${{ inputs.min_events }}
           MIN_FEEDS: ${{ inputs.min_feeds }}
+          REQUIRE_CALIBRATED: ${{ inputs.require_calibrated_models }}
         run: |
           set -euo pipefail
           args=()
           if [ "$ALLOW_WEAK" = "true" ]; then
             args+=(--allow-nonhuman-ground-truth)
           fi
+          strict=()
+          if [ "$REQUIRE_CALIBRATED" = "true" ]; then
+            strict+=(--require-calibrated-models)
+          else
+            echo "::warning::跳过严格校准门禁，本次盲测结果仅用于诊断"
+          fi
           python scripts/blind_test_batch.py \
             --manifest out/release/blind_generated.jsonl \
             --model out/release/ad_model.json \
             --boundary-model out/release/boundary_model.json \
-            --require-models --require-calibrated-models --require-independent-test \
+            --require-models "${strict[@]}" --require-independent-test \
             --min-events "$MIN_EVENTS" --min-feeds "$MIN_FEEDS" \
             "${args[@]}" \
             --reports-out-dir out/release/blind_reports \
