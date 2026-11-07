@@ -139,6 +139,17 @@ jobs:
             --labels-source "$LABELS_SOURCE" --allow-empty-ads \
             --batch-size "$BATCH_SIZE" --request-interval "$REQUEST_INTERVAL" \
             --resume
+      - name: Apply label review decisions
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -f datasets/release_annotations/review_decisions.json ]; then
+            python scripts/apply_review_decisions.py \
+              --data-dir out/release \
+              --decisions datasets/release_annotations/review_decisions.json
+          else
+            echo "no review decisions, keeping raw LLM labels"
+          fi
       - name: Publish annotation data to repo
         if: always()
         run: |

@@ -107,6 +107,8 @@ python scripts/annotate_release_episodes.py \
 
 重要：ASR + LLM 生成的是 `labels_source=llm_weak` 的弱标签，可用于训练或人工预标注，但**不是人工真值**。只有盲测真值显式包含 `"labels_source": "human"` 时，`performance_targets_met` 才可能为 true；否则 workflow 仍可跑通，但结果只用于流程验证，不能作为产品验收。
 
+标签复核：`merge_ad_segments` 会丢弃 `host_read=true` 的片段，但真实播客的广告绝大多数是主持人口播，导致 TWiT 这类节目 9 个广告段全部被丢成 0 个。因此 `datasets/release_annotations/review_decisions.json` 定义了复核策略（只保留 `third_party_ad`、忽略 `host_read`、`max_gap_s=3`、`min_span_s=2`），并记录逐段丢弃项（内容提及、赞助披露、交叉推广）。`scripts/apply_review_decisions.py` 会用逐句 LLM 判定重新生成 `ads`，`release-annotate` 在发布前自动执行。复核后标签记为 `labels_source=ai_reviewed`——它是文本级 AI 复核，仍**不是**人工真值，不能用于性能验收。
+
 `release-annotate` 需要仓库 Secrets 中的 `GEMINI_API_KEY` 或 `OPENAI_API_KEY`，运行标注时可传 `--resume` 语义的 `resume_run_id` 复用已完成集；`labels_source` 默认 `llm_weak`，人工校对完成后将它设为 `human` 再标注/重跑。`release-train-blind` 不需要 LLM key，只读标注 artifact 并训练/盲测；`allow_weak_blind_labels=true` 允许非人工真值跑通流程，但不会把 `performance_targets_met` 标为 true。
 
 ### 从 platforms.json 抽样并上传到 Release

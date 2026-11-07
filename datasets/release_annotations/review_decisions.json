@@ -1,0 +1,62 @@
+{
+  "reviewer": "agent:text_review",
+  "labels_source": "ai_reviewed",
+  "policy": {
+    "ad_types": ["third_party_ad"],
+    "ignore_host_read": true,
+    "min_confidence": 0.5,
+    "max_gap_s": 3.0,
+    "min_span_s": 2.0
+  },
+  "drop_all": [
+    {
+      "feed": "Office Ladies",
+      "episode": "Introducing The We Do Not Care Club Podcast with Melani Sanders",
+      "reason": "整集是对另一档节目的交叉推广，不是付费第三方广告"
+    }
+  ],
+  "drops": [
+    {
+      "feed": "This Week in Tech",
+      "episode": "TWiT 1102: Exclave Subpoena - OpenClaw, Meta's Muse, & Persistent Agentic Automation",
+      "start_s": 3153.1,
+      "reason": "Zepbound 顺口提及，非广告段"
+    },
+    {
+      "feed": "This Week in Tech",
+      "episode": "TWiT 1102: Exclave Subpoena - OpenClaw, Meta's Muse, & Persistent Agentic Automation",
+      "start_s": 4499.2,
+      "reason": "Anthropic 赞助披露对话，非广告段"
+    },
+    {
+      "feed": "This Week in Tech",
+      "episode": "TWiT 1102: Exclave Subpoena - OpenClaw, Meta's Muse, & Persistent Agentic Automation",
+      "start_s": 9858.9,
+      "reason": "Blackbird 产品讨论，非广告段"
+    },
+    {
+      "feed": "This Week in Tech",
+      "episode": "TWiT 1102: Exclave Subpoena - OpenClaw, Meta's Muse, & Persistent Agentic Automation",
+      "start_s": 10281.2,
+      "reason": "Norton 合作方调侃，非广告段"
+    },
+    {
+      "feed": "99% Invisible",
+      "episode": "Doktoro Esperanto",
+      "start_s": 1214.5,
+      "reason": "Duolingo 一句提及，非广告段"
+    },
+    {
+      "feed": "Now You Know Podcasts",
+      "episode": "Robotaxi Nap Mode! | Tesla Time News 696",
+      "start_s": 1260.0,
+      "reason": "EVJEC 产品描述属于内容，非广告段"
+    },
+    {
+      "feed": "Programming Throwdown",
+      "episode": "186: Becoming a Manager",
+      "start_s": 1562.6,
+      "reason": "主持人自述使用 RunPod 的经历，不是广告读稿"
+    }
+  ]
+}

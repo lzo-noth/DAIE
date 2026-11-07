@@ -77,7 +77,9 @@ def main() -> int:
         target_dir = args.dest / "blind_gt"
         target_dir.mkdir(parents=True, exist_ok=True)
         for source in sorted(ground_truth_dir.glob("*.json")):
-            shutil.copyfile(source, target_dir / source.name)
+            target = target_dir / source.name
+            if source.resolve() != target.resolve():
+                shutil.copyfile(source, target)
         published["blind_gt"] = {
             "files": len(list(target_dir.glob("*.json"))),
         }
