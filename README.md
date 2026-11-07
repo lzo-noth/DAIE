@@ -75,14 +75,10 @@ python scripts/blind_test_batch.py --manifest blind.jsonl \
 
 ### Release 音频 + ASR/LLM 标注
 
-把真实音频作为 GitHub Release asset 后，可以用 `release-train-blind` workflow 自动完成：
+把真实音频作为 GitHub Release asset 后，标注和盲测分成两个手动 workflow：
 
-1. 下载/快照 release 音频，得到 `source_sha256`、`audio_id`、`audio_id_kind`；
-2. faster-whisper 转写整集；
-3. LLM 判断第三方插入广告并合并相邻片段；
-4. 写出带音频身份的 `annotations.jsonl`；
-5. 训练模型；
-6. 用盲测 release 清单做批量严格盲测。
+1. `release-annotate`：只做数据获取，不训练、不评测。它下载/快照 release 音频，得到 `source_sha256`、`audio_id`、`audio_id_kind`；faster-whisper 转写整集；LLM 判断第三方插入广告并合并相邻片段；写出带音频身份的 `annotations.jsonl`、盲测集 `blind_gt/` 和 `blind_generated.jsonl`。产出 artifact `dai-release-annotations-<run_number>`，供人工校对。
+2. `release-train-blind`：只做训练和盲测，不再调用 ASR/LLM。它通过 `annotation_run_id` 读取上一步（人工校对后重新上传/重新标注的）artifact，训练模型，再用 `blind_generated.jsonl` 做批量严格盲测，产出 `dai-release-blind-<run_number>`。
 
 本地命令：
 
@@ -111,7 +107,7 @@ python scripts/annotate_release_episodes.py \
 
 重要：ASR + LLM 生成的是 `labels_source=llm_weak` 的弱标签，可用于训练或人工预标注，但**不是人工真值**。只有盲测真值显式包含 `"labels_source": "human"` 时，`performance_targets_met` 才可能为 true；否则 workflow 仍可跑通，但结果只用于流程验证，不能作为产品验收。
 
-`release-train-blind` 是手动 workflow，需要在仓库 Secrets 中配置 `GEMINI_API_KEY` 或 `OPENAI_API_KEY`。它读取 `train_manifest_url` 和 `blind_manifest_url`，产出 artifact `dai-release-pipeline-<run_number>`，包含模型、LLM 标注、转写、逐集盲测报告和汇总指标。`generate_weak_blind_labels=true` 会用 ASR+LLM 自动生成盲测集真值；`allow_weak_blind_labels=true` 允许这类非人工真值跑通流程。两者都不会把 `performance_targets_met` 标为 true，因为 LLM 标签不是人工验收真值。
+`release-annotate` 需要仓库 Secrets 中的 `GEMINI_API_KEY` 或 `OPENAI_API_KEY`，运行标注时可传 `--resume` 语义的 `resume_run_id` 复用已完成集；`labels_source` 默认 `llm_weak`，人工校对完成后将它设为 `human` 再标注/重跑。`release-train-blind` 不需要 LLM key，只读标注 artifact 并训练/盲测；`allow_weak_blind_labels=true` 允许非人工真值跑通流程，但不会把 `performance_targets_met` 标为 true。
 
 ### 从 platforms.json 抽样并上传到 Release
 
