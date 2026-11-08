@@ -89,10 +89,13 @@ def classify_transcript_segments(
             )
             text = response.choices[0].message.content or ""
             try:
-                results.update(parse_response(text, expected))
+                parsed = parse_response(text, expected)
+                missing = expected - set(parsed)
+                results.update(parsed)
                 _log(
                     f"batch {batch_index}/{batches} 完成: "
-                    f"{time.time() - began:.1f}s, 解析 {len(expected)} 条"
+                    f"{time.time() - began:.1f}s, 解析 {len(parsed)}/{len(expected)} 条"
+                    + (f", 缺少 {len(missing)} 条" if missing else "")
                 )
                 break
             except ValueError as exc:
