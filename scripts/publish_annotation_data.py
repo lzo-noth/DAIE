@@ -70,8 +70,8 @@ def main() -> int:
         source = args.source / name
         if not source.exists():
             continue
-        snapshot_dir = "blind_snapshots" if name.startswith("blind_") else "snapshots"
-        published[name] = _publish_jsonl(source, args.dest / name, snapshot_dir)
+        # 合并后的 artifact 把所有音频都放在 snapshots/，盲测清单也指向这里。
+        published[name] = _publish_jsonl(source, args.dest / name, "snapshots")
 
     ground_truth_dir = args.source / "blind_gt"
     if ground_truth_dir.is_dir():

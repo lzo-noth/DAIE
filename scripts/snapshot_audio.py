@@ -52,19 +52,26 @@ def _copy_local(source: str, target: Path) -> str:
 def _download(source: str, target: Path, proxy: str | None) -> str:
     request = Request(source, headers={"User-Agent": HTTP_USER_AGENT})
     opener = build_opener(ProxyHandler({"http": proxy, "https": proxy})) if proxy else None
-    digest = hashlib.sha256()
-    response = opener.open(request, timeout=120) if opener else urlopen(request, timeout=120)
-    try:
-        with response, target.open("wb") as writer:
-            while True:
-                chunk = response.read(CHUNK)
-                if not chunk:
-                    break
-                digest.update(chunk)
-                writer.write(chunk)
-    finally:
-        response.close()
-    return digest.hexdigest()
+    last_error: Exception | None = None
+    for attempt in range(3):
+        digest = hashlib.sha256()
+        try:
+            # 大文件在慢链路上读超时会中断整批；给足 300 秒并重试。
+            response = (
+                opener.open(request, timeout=300) if opener else urlopen(request, timeout=300)
+            )
+            with response, target.open("wb") as writer:
+                while True:
+                    chunk = response.read(CHUNK)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    writer.write(chunk)
+            return digest.hexdigest()
+        except Exception as exc:  # noqa: BLE001 - retry transient CDN stalls
+            last_error = exc
+            target.unlink(missing_ok=True)
+    raise RuntimeError(f"{type(last_error).__name__}: {last_error}")
 
 
 def snapshot(source: str, out_dir: Path, proxy: str | None, force: bool) -> tuple[Path, str]:

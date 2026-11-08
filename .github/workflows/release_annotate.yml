@@ -110,6 +110,13 @@ jobs:
             exit 1
           fi
           gh run download "$RESUME_RUN" -n "$name" -D out/base --repo "$GITHUB_REPOSITORY"
+          mkdir -p out/release
+          if [ -d out/base/snapshots ]; then
+            cp -r out/base/snapshots out/release/
+          fi
+          if [ -d out/base/blind_snapshots ]; then
+            cp -r out/base/blind_snapshots out/release/
+          fi
           ls -la out/base | head -40
       - name: Fetch release manifests
         env:

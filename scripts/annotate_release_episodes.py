@@ -254,8 +254,16 @@ def main() -> int:
             continue
         if _existing_snapshot(args.snapshot_dir, digest_hint):
             continue
-        target, _ = snapshot(source, args.snapshot_dir, None, False)
-        print(f"[snapshot] 补齐: {target.name}", flush=True)
+        sibling = args.snapshot_dir.parent / (
+            "snapshots" if args.snapshot_dir.name == "blind_snapshots" else "blind_snapshots"
+        )
+        if _existing_snapshot(sibling, digest_hint):
+            continue
+        try:
+            target, _ = snapshot(source, args.snapshot_dir, None, False)
+            print(f"[snapshot] 补齐: {target.name}", flush=True)
+        except Exception as exc:  # noqa: BLE001 - 单集下载失败不应终止整批
+            print(f"[snapshot] 补齐失败，稍后重试: {type(exc).__name__}: {exc}", flush=True)
 
     total_ads = 0
     total_episodes = 0
