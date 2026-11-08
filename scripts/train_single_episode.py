@@ -666,7 +666,8 @@ def _choose_event_threshold(
     if inner_full and has_events:
         limit = max_false_positives_per_hour
         candidates: list[tuple[float, dict, float]] = []
-        for candidate in np.linspace(0.10, 0.70, 31):
+        # 0.70 以上常是满足 FP/hour 的唯一区域；上界太低会让硬约束永远不可达。
+        for candidate in np.linspace(0.05, 0.95, 37):
             metrics = _event_metrics(
                 samples,
                 sorted(inner_full),
@@ -686,16 +687,26 @@ def _choose_event_threshold(
             else:
                 eligible = candidates
                 fp_valid = None
-            if not eligible:
-                eligible = candidates
-            best = max(
-                eligible,
-                key=lambda item: (
-                    float(item[1].get("event_f1") or 0.0),
-                    -item[2],
-                    -abs(item[0] - 0.5),
-                ),
-            )
+            if eligible:
+                best = max(
+                    eligible,
+                    key=lambda item: (
+                        float(item[1].get("event_f1") or 0.0),
+                        -item[2],
+                        -abs(item[0] - 0.5),
+                    ),
+                )
+            else:
+                # 硬约束不可达时退化为最保守的候选（FP 最低），而不是为了 F1
+                # 放低阈值堆误报。
+                best = min(
+                    candidates,
+                    key=lambda item: (
+                        item[2],
+                        -float(item[1].get("event_f1") or 0.0),
+                        -item[0],
+                    ),
+                )
             return best[0], {
                 "source": f"{fold_kind}_event_f1",
                 "objective": "event_f1",
@@ -765,7 +776,7 @@ def _choose_classifier_threshold(
 
 def _boundary_candidates(
     center: float = 0.5,
-    coarse: tuple[float, float, float] = (0.2, 0.8, 0.1),
+    coarse: tuple[float, float, float] = (0.2, 0.95, 0.1),
     radius: float = 0.1,
     step: float = 0.01,
 ) -> tuple[list[float], list[float]]:
@@ -990,7 +1001,7 @@ def _choose_boundary_thresholds(
                 probabilities,
                 hop_s=float(sample.windows["hop_s"]),
                 span_s=float(sample.windows["span_s"]),
-                min_ad_s=6.0,
+                min_ad_s=10.0,
                 enter_threshold=enter,
                 exit_threshold=exit_value,
             )
@@ -1495,7 +1506,7 @@ def _event_metrics(
             probability,
             hop_s=float(sample.windows["hop_s"]),
             span_s=float(sample.windows["span_s"]),
-            min_ad_s=6.0,
+            min_ad_s=10.0,
             enter_threshold=enter,
             exit_threshold=exit_value,
         )

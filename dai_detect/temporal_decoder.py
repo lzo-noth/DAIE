@@ -62,7 +62,7 @@ def decode_windows(
     probabilities: np.ndarray,
     hop_s: float,
     span_s: float,
-    min_ad_s: float = 6.0,
+    min_ad_s: float = 10.0,
     max_gap_s: float = 2.0,
     max_ad_s: float = 600.0,
     enter_threshold: float = 0.55,

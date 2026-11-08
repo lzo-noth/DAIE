@@ -178,7 +178,7 @@ def main() -> int:
     parser.add_argument("--out", type=Path, help="保存检测时间轴 JSON")
     parser.add_argument("--metrics", type=Path, help="保存评测指标 JSON")
     parser.add_argument("--threshold", type=float)
-    parser.add_argument("--min-ad", type=float, default=6.0)
+    parser.add_argument("--min-ad", type=float, default=10.0)
     parser.add_argument(
         "--allow-audio-mismatch",
         action="store_true",

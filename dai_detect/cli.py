@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     single_parser.add_argument("--model", type=Path, help="广告分类模型 JSON（默认 models/ad_segment_model.json）")
     single_parser.add_argument("--boundary-model", type=Path, help="边界模型 JSON（默认 models/boundary_model.json）")
     single_parser.add_argument("--threshold", type=float, help="覆盖模型进入阈值")
-    single_parser.add_argument("--min-ad", type=float, default=6.0, help="广告最短秒数（默认 6）")
+    single_parser.add_argument("--min-ad", type=float, default=10.0, help="广告最短秒数（默认 10）")
     single_parser.add_argument("--min-confidence", type=float, default=0.0, help="输出最低置信度（默认 0）")
     single_parser.add_argument(
         "--require-models",

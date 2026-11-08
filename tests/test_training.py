@@ -32,9 +32,9 @@ from scripts.train_single_episode import (
 
 
 def _boundary_episode(feed: str) -> EpisodeSample:
-    duration = 40.0
+    duration = 60.0
     times = np.arange(0.5, duration, 0.5)
-    labels = ((times >= 11.0) & (times <= 19.0)).astype(np.float64)
+    labels = ((times >= 11.0) & (times <= 34.0)).astype(np.float64)
     features = np.zeros((len(times), len(WINDOW_FEATURES)), dtype=np.float32)
     features[:, 0] = labels * 2.0 - 1.0
     grid = 0.02
@@ -42,7 +42,7 @@ def _boundary_episode(feed: str) -> EpisodeSample:
     boundary = np.zeros((count, len(BOUNDARY_FEATURES)), dtype=np.float16)
     positions = np.arange(count) * grid
     boundary[:, 0] = np.where(np.abs(positions - 10.0) <= 0.1, 2.0, 0.0)
-    boundary[:, 1] = np.where(np.abs(positions - 20.0) <= 0.1, 2.0, 0.0)
+    boundary[:, 1] = np.where(np.abs(positions - 35.0) <= 0.1, 2.0, 0.0)
     return EpisodeSample(
         feed=feed,
         episode=feed,
@@ -55,7 +55,7 @@ def _boundary_episode(feed: str) -> EpisodeSample:
         },
         indices=np.arange(len(times)),
         labels=labels,
-        ads=[{"start_s": 10.0, "end_s": 20.0}],
+        ads=[{"start_s": 10.0, "end_s": 35.0}],
         duration_s=duration,
         change_scores=np.zeros(len(times)),
         change_grid_s=grid,
@@ -380,7 +380,7 @@ class BoundaryThresholdCalibrationTest(unittest.TestCase):
     def test_boundary_search_has_fine_candidates(self) -> None:
         coarse, _ = _boundary_candidates(center=0.5)
         self.assertEqual(coarse[0], 0.2)
-        self.assertEqual(coarse[-1], 0.8)
+        self.assertEqual(coarse[-1], 0.9)
         _, fine = _boundary_candidates(center=0.45)
         self.assertTrue(fine)
         self.assertAlmostEqual(min(fine), 0.35)
