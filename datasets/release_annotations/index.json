@@ -1,30 +1,30 @@
 {
-  "published_at": "2026-11-08T11:13:01+00:00",
-  "run_id": "42472658288",
-  "llm_model": "gemini-3.5-flash-lite",
+  "published_at": "2026-11-08T11:19:25+00:00",
+  "run_id": "42474789281",
+  "llm_model": "",
   "labels_sources": [
     "ai_reviewed"
   ],
   "files": {
     "annotations.jsonl": {
       "rows": 21,
-      "sha256": "3fff6e4c84653f86398c38000af30f0a5cf32673c4931af2f4fd940a136375cd"
+      "sha256": "0c508b7f8d8474e10e031e0cedcf2177823c17aa40502c95fc3af80cd349e051"
     },
     "transcripts.jsonl": {
       "rows": 21,
-      "sha256": "159da0d8339ecdb21427e4d12dbe4cbdbebcaec21ed86c48fbbb17036595836e"
+      "sha256": "2b58c93c9afd18eec60e87213b4ce38b90650625bc1dce9f7b2b6e4209261db0"
     },
     "blind_annotations.jsonl": {
       "rows": 13,
-      "sha256": "3f651894c10fa62eaf5d1e64ff0d640a8071b52b243aa213939c46d7f7e65eb3"
+      "sha256": "6a491d4bbc7f74175b782cf699a53cd42e8b5eee41200964d7b89c0cd7c67518"
     },
     "blind_transcripts.jsonl": {
       "rows": 13,
-      "sha256": "599e985d2856f19812e29a9202d7aecba7d2e5a85b6673f10edadf02d5bfe2ac"
+      "sha256": "021a9a347c9b16f6fca51d0cf0edce04c81f9f5e591040d012098e23003d8cbd"
     },
     "blind_generated.jsonl": {
       "rows": 13,
-      "sha256": "f311bd14941a7634edd5bc57926f39aeac6c6f26c2cfef1e659eba96ae51cd29"
+      "sha256": "96351941601a34c7bcc7a75ee88c21468233758599644b1fa821ea90c8055678"
     },
     "blind_gt": {
       "files": 13
