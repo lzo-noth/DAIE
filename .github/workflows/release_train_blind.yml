@@ -51,9 +51,10 @@ jobs:
           ANNOTATION_RUN: ${{ inputs.annotation_run_id }}
         run: |
           set -euo pipefail
+          # 同一 run 里还有 -shard 命名空间的分片产物，只取合并后的整包。
           name=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ANNOTATION_RUN/artifacts" \
-            --jq '.artifacts[] | select(.name | startswith("dai-release-annotations-")) | .name' \
-            | head -1)
+            --jq '.artifacts[] | select(.name | test("^dai-release-annotations-[0-9]+$")) | .name' \
+            | sort -t- -k4 -n | tail -1)
           if [ -z "$name" ]; then
             echo "run $ANNOTATION_RUN 没有 dai-release-annotations artifact" >&2
             exit 1
