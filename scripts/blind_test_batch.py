@@ -214,12 +214,24 @@ def _run_row(row: dict, args: argparse.Namespace) -> dict:
         if args.allow_audio_mismatch:
             command.append("--allow-audio-mismatch")
         process = subprocess.run(command, capture_output=True, text=True)
-        if process.returncode != 0:
+        # 2 表示"该集未达验收阈值"，但指标已完整写出，必须计入批量统计；
+        # 3 才是身份/独立性拒绝评分。
+        if process.returncode != 0 and (
+            process.returncode != 2 or not metrics_path.exists()
+        ):
             return {
                 "feed": str(row.get("feed") or ""),
                 "episode": str(row.get("episode") or ""),
                 "audio": str(row["audio"]),
                 "error": (process.stderr or process.stdout).strip()[-800:],
+                "returncode": process.returncode,
+            }
+        if not metrics_path.exists():
+            return {
+                "feed": str(row.get("feed") or ""),
+                "episode": str(row.get("episode") or ""),
+                "audio": str(row["audio"]),
+                "error": "盲测进程未写出 metrics.json",
                 "returncode": process.returncode,
             }
         report = json.loads(metrics_path.read_text(encoding="utf-8"))

@@ -199,6 +199,12 @@ def main() -> int:
         if args.resume
         else {}
     )
+    if args.resume:
+        # LLM 失败的集在 annotations 里可能是空 ads（复核脚本重建过），
+        # 必须重新进入 LLM 分类，而不是当成已完成跳过。
+        done_annotations -= {
+            key for key, row in cached_transcripts.items() if row.get("llm_error")
+        }
     annotation_handle = args.annotations_out.open(mode, encoding="utf-8")
     transcript_handle = args.transcripts_out.open(mode, encoding="utf-8")
     if args.blind_manifest_out:
