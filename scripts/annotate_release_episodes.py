@@ -246,6 +246,17 @@ def main() -> int:
     if args.ground_truth_dir:
         args.ground_truth_dir.mkdir(parents=True, exist_ok=True)
 
+    # 已完成的集会被跳过，但训练/盲测仍要解码音频：先补齐缺失快照。
+    for row in rows:
+        source = str(row.get("audio_url") or row.get("audio") or "")
+        digest_hint = str(row.get("source_sha256") or "")
+        if not source or not digest_hint:
+            continue
+        if _existing_snapshot(args.snapshot_dir, digest_hint):
+            continue
+        target, _ = snapshot(source, args.snapshot_dir, None, False)
+        print(f"[snapshot] 补齐: {target.name}", flush=True)
+
     total_ads = 0
     total_episodes = 0
     failures: list[dict] = []
@@ -268,6 +279,16 @@ def main() -> int:
             audio_id = str(cached.get("audio_id") or "")
             audio_id_kind = str(cached.get("audio_id_kind") or "")
             duration = float(cached.get("duration_s") or 0.0)
+            # 转写可能来自旧 artifact，但音频快照未必在本次目录里；
+            # 盲测/训练都要解码这份音频，缺失时必须补下载。
+            if digest:
+                existing = _existing_snapshot(args.snapshot_dir, digest)
+                if existing:
+                    audio_path = str(existing)
+                else:
+                    target, digest = snapshot(source, args.snapshot_dir, None, False)
+                    audio_path = str(target)
+                    print(f"[resume] 补齐音频快照: {target.name}", flush=True)
             classified = not cached.get("llm_error")
             if classified:
                 results = dict(cached.get("results") or {})
