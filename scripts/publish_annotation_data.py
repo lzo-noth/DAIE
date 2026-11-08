@@ -34,22 +34,22 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _relocate(row: dict) -> dict:
+def _relocate(row: dict, snapshot_dir: str = "snapshots") -> dict:
     audio = row.get("audio")
     if isinstance(audio, str) and audio:
-        row["audio"] = f"snapshots/{Path(audio).name}"
+        row["audio"] = f"{snapshot_dir}/{Path(audio).name}"
     ground_truth = row.get("ground_truth")
     if isinstance(ground_truth, str) and ground_truth:
         row["ground_truth"] = f"blind_gt/{Path(ground_truth).name}"
     return row
 
 
-def _publish_jsonl(source: Path, target: Path) -> dict:
+def _publish_jsonl(source: Path, target: Path, snapshot_dir: str = "snapshots") -> dict:
     rows = []
     for line in source.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        rows.append(_relocate(json.loads(line)))
+        rows.append(_relocate(json.loads(line), snapshot_dir))
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8") as handle:
         for row in rows:
@@ -70,7 +70,8 @@ def main() -> int:
         source = args.source / name
         if not source.exists():
             continue
-        published[name] = _publish_jsonl(source, args.dest / name)
+        snapshot_dir = "blind_snapshots" if name.startswith("blind_") else "snapshots"
+        published[name] = _publish_jsonl(source, args.dest / name, snapshot_dir)
 
     ground_truth_dir = args.source / "blind_gt"
     if ground_truth_dir.is_dir():
