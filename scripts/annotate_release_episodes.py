@@ -115,6 +115,24 @@ def _episode_key(row: dict) -> tuple[str, str]:
     return (str(row.get("feed") or "unknown"), str(row.get("episode") or ""))
 
 
+def _clamp_ads(ads: list[dict], duration: float, min_span_s: float = 1.0) -> list[dict]:
+    """Trim ad spans to the decoded duration.
+
+    Whisper segments can end a few seconds past the audio length; those spans
+    fail downstream validation, so clamp instead of rejecting the episode.
+    """
+    if duration <= 0:
+        return ads
+    clamped = []
+    for ad in ads:
+        start = max(0.0, float(ad.get("start_s") or 0.0))
+        end = min(duration, float(ad.get("end_s") or 0.0))
+        if end - start < min_span_s:
+            continue
+        clamped.append({**ad, "start_s": round(start, 3), "end_s": round(end, 3)})
+    return clamped
+
+
 def _existing_snapshot(snapshot_dir: Path, digest: str) -> Path | None:
     if not digest:
         return None
@@ -253,7 +271,7 @@ def main() -> int:
             classified = not cached.get("llm_error")
             if classified:
                 results = dict(cached.get("results") or {})
-                ads = list(cached.get("ads") or [])
+                ads = _clamp_ads(list(cached.get("ads") or []), duration)
                 print(f"[resume] 复用转写: {feed}/{episode}", flush=True)
             else:
                 print(f"[resume] 复用转写并重试 LLM 分类: {feed}/{episode}", flush=True)
@@ -331,6 +349,7 @@ def main() -> int:
             ads = merge_ad_segments(
                 segments, results, max_gap_s=args.max_gap, min_confidence=args.min_confidence
             )
+            ads = _clamp_ads(ads, duration)
             print(
                 f"[llm] {feed}/{episode}: 分类完成 {time.time() - began:.0f}s, "
                 f"广告段 {len(ads)}",

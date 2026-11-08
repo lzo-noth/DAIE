@@ -45,6 +45,7 @@ def derive_ads(
     results: dict[str, dict],
     policy: dict,
     drop_starts: list[float],
+    duration: float = 0.0,
 ) -> list[dict]:
     min_confidence = float(policy.get("min_confidence", 0.5))
     max_gap = float(policy.get("max_gap_s", 3.0))
@@ -69,6 +70,9 @@ def derive_ads(
 
     ads = []
     for start, end in spans:
+        if duration > 0:
+            start = max(0.0, start)
+            end = min(duration, end)
         if end - start < min_span:
             continue
         if any(abs(start - drop) <= MATCH_TOLERANCE_S for drop in drop_starts):
@@ -120,6 +124,7 @@ def main() -> int:
                     dict(row.get("results") or {}),
                     policy,
                     drops.get(key, []),
+                    float(row.get("duration_s") or 0.0),
                 )
             identity = {
                 field: row.get(field)
