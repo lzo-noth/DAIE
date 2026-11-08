@@ -176,19 +176,38 @@ def _download(url: str, target: Path) -> None:
         handle.write(response.read())
 
 
-def _run_row(row: dict, args: argparse.Namespace) -> dict:
+def _resolve(value: str, base: Path) -> str:
+    """Resolve manifest-relative paths against the manifest directory."""
+    if value.startswith(("http://", "https://")):
+        return value
+    path = Path(value)
+    if path.is_absolute():
+        return str(path)
+    candidate = base / path
+    if candidate.exists():
+        return str(candidate)
+    # 兼容历史清单：音频可能落在另一个快照目录。
+    for alternative in ("blind_snapshots", "snapshots"):
+        fallback = base / alternative / path.name
+        if fallback.exists():
+            return str(fallback)
+    return str(candidate)
+
+
+def _run_row(row: dict, args: argparse.Namespace, base: Path) -> dict:
     with tempfile.TemporaryDirectory(prefix="dai-batch-") as directory:
         metrics_path = Path(directory) / "metrics.json"
-        ground_truth = str(row["ground_truth"])
+        ground_truth = _resolve(str(row["ground_truth"]), base)
         if ground_truth.startswith(("http://", "https://")):
             local_truth = Path(directory) / "ground_truth.json"
             _download(ground_truth, local_truth)
             ground_truth = str(local_truth)
+        audio = _resolve(str(row["audio"]), base)
         command = [
             sys.executable,
             str(BLIND_TEST),
             "--audio",
-            str(row["audio"]),
+            audio,
             "--ground-truth",
             ground_truth,
             "--feed",
@@ -272,7 +291,7 @@ def main() -> int:
         for line in args.manifest.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    reports = [_run_row(row, args) for row in rows]
+    reports = [_run_row(row, args, args.manifest.parent) for row in rows]
     if args.reports_out_dir:
         args.reports_out_dir.mkdir(parents=True, exist_ok=True)
         for index, report in enumerate(reports):
