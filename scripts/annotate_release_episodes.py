@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -185,6 +186,12 @@ def main() -> int:
 
     from faster_whisper import WhisperModel
 
+    print(
+        f"[config] model={llm_model} batch={args.batch_size} "
+        f"interval={args.request_interval}s labels={args.labels_source} "
+        f"shard={args.shard_index + 1}/{args.shard_count} resume={args.resume}",
+        flush=True,
+    )
     whisper = WhisperModel(args.whisper_model, device="cpu", compute_type=args.compute_type)
     args.annotations_out.parent.mkdir(parents=True, exist_ok=True)
     args.transcripts_out.parent.mkdir(parents=True, exist_ok=True)
@@ -269,7 +276,13 @@ def main() -> int:
             audio_path = str(target)
             audio_id = str(mono.get("audio_id") or "")
             audio_id_kind = str(mono.get("audio_id_kind") or "")
+            asr_began = time.time()
             segments = _transcribe(target, whisper, args.language)
+            print(
+                f"[asr] {feed}/{episode}: {len(segments)} 段, "
+                f"{time.time() - asr_began:.0f}s",
+                flush=True,
+            )
             classified = False
         identity = {
             "audio": audio_path,
@@ -282,6 +295,7 @@ def main() -> int:
             "labels_source": args.labels_source,
         }
         if not classified:
+            began = time.time()
             try:
                 results = classify_transcript_segments(
                     segments,
@@ -292,8 +306,12 @@ def main() -> int:
                 )
             except Exception as exc:  # noqa: BLE001
                 # 单集失败不终止整批：转写立即落盘，配额恢复后 --resume 只重跑 LLM。
-                failures.append(
-                    {"feed": feed, "episode": episode, "error": f"{type(exc).__name__}: {exc}"[:300]}
+                detail = f"{type(exc).__name__}: {str(exc).replace(chr(10), ' ')[:500]}"
+                failures.append({"feed": feed, "episode": episode, "error": detail})
+                print(
+                    f"[fail] {feed}/{episode}: LLM 分类失败，已保留转写; "
+                    f"耗时 {time.time() - began:.0f}s; 错误 {detail}",
+                    flush=True,
                 )
                 transcript_handle.write(
                     json.dumps(
@@ -302,17 +320,21 @@ def main() -> int:
                             "segments": segments,
                             "results": {},
                             "ads": [],
-                            "llm_error": f"{type(exc).__name__}: {exc}"[:300],
+                            "llm_error": detail[:500],
                         },
                         ensure_ascii=False,
                     )
                     + "\n"
                 )
                 transcript_handle.flush()
-                print(f"[fail] {feed}/{episode}: LLM 分类失败，已保留转写", flush=True)
                 continue
             ads = merge_ad_segments(
                 segments, results, max_gap_s=args.max_gap, min_confidence=args.min_confidence
+            )
+            print(
+                f"[llm] {feed}/{episode}: 分类完成 {time.time() - began:.0f}s, "
+                f"广告段 {len(ads)}",
+                flush=True,
             )
             transcript_handle.write(
                 json.dumps(

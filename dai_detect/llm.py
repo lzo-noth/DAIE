@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import time
 from typing import Any
 
 AD_TYPES = {"third_party_ad", "self_promo", "content", "uncertain"}
+
+
+def _log(message: str) -> None:
+    """Emit progress to stdout so CI logs show where LLM calls stall."""
+    if os.environ.get("LLM_QUIET", "").strip():
+        return
+    print(f"[llm] {message}", flush=True)
+
 
 SYSTEM_PROMPT = """You classify transcript snippets from podcast segments that were acoustically flagged as possible ad insertions.
 Return strict JSON only. For every item decide:
@@ -45,7 +55,9 @@ def classify_transcript_segments(
     provider rate limits (Gemini free tier is 15 requests/minute).
     """
     results: dict[str, dict[str, Any]] = {}
+    batches = math.ceil(len(segments) / batch_size) if segments else 0
     for start in range(0, len(segments), batch_size):
+        batch_index = start // batch_size + 1
         if start and request_interval_s > 0:
             time.sleep(request_interval_s)
         batch = []
@@ -60,6 +72,8 @@ def classify_transcript_segments(
                 }
             )
         expected = {item["id"] for item in batch}
+        began = time.time()
+        _log(f"batch {batch_index}/{batches} 开始: segments={len(batch)} model={model}")
         for parse_attempt in range(2):
             response = _create_with_retry(
                 client,
@@ -73,10 +87,20 @@ def classify_transcript_segments(
                 ],
                 temperature=0,
             )
+            text = response.choices[0].message.content or ""
             try:
-                results.update(parse_response(response.choices[0].message.content or "", expected))
+                results.update(parse_response(text, expected))
+                _log(
+                    f"batch {batch_index}/{batches} 完成: "
+                    f"{time.time() - began:.1f}s, 解析 {len(expected)} 条"
+                )
                 break
-            except ValueError:
+            except ValueError as exc:
+                _log(
+                    f"batch {batch_index}/{batches} 解析失败"
+                    f"（第 {parse_attempt + 1}/2 次）: {exc}; "
+                    f"响应前 200 字符: {text[:200]!r}"
+                )
                 if parse_attempt == 1:
                     raise
     return results
@@ -202,16 +226,30 @@ def _retry_after_seconds(exc: Exception) -> float | None:
         return None
 
 
+def _describe_error(exc: Exception) -> str:
+    status = getattr(exc, "status_code", None) or getattr(
+        getattr(exc, "response", None), "status_code", None
+    )
+    text = str(exc).replace("\n", " ")[:400]
+    return f"{type(exc).__name__}(status={status}): {text}"
+
+
 def _create_with_retry(client, attempts: int = 9, **kwargs):
     for attempt in range(attempts):
         try:
             return client.chat.completions.create(**kwargs)
         except Exception as exc:  # noqa: BLE001
-            if attempt == attempts - 1 or not _retryable(exc):
+            retryable = _retryable(exc)
+            _log(
+                f"请求失败（第 {attempt + 1}/{attempts} 次，"
+                f"{'可重试' if retryable else '不可重试'}）: {_describe_error(exc)}"
+            )
+            if attempt == attempts - 1 or not retryable:
                 raise
             delay = _retry_after_seconds(exc)
             if delay is None:
                 delay = min(300.0, 15.0 * (2 ** attempt))
+            _log(f"等待 {delay:.0f}s 后重试")
             time.sleep(delay)
 
 
