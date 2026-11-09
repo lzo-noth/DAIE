@@ -85,9 +85,24 @@ class HumanLabelGateTest(unittest.TestCase):
                 "end_verified": True,
             }
         ]
-        source, problems = _verify_human_labels(ads, "human")
+        review = {
+            "reviewer": "alice",
+            "reviewed_at": "2026-11-09T00:00:00",
+            "listened": True,
+            "source_sha256": "s" * 64,
+            "no_ads_confirmed": False,
+        }
+        source, problems = _verify_human_labels(ads, "human", review)
         self.assertEqual(source, "human")
         self.assertEqual(problems, [])
+
+    def test_empty_ground_truth_needs_whole_episode_confirmation(self) -> None:
+        review = {"listened": True, "reviewer": "", "reviewed_at": ""}
+        source, problems = _verify_human_labels([], "human", review)
+        self.assertEqual(source, "unverified")
+        self.assertTrue(any("no_ads_confirmed" in problem for problem in problems))
+        self.assertTrue(any("reviewer" in problem for problem in problems))
+        self.assertTrue(any("reviewed_at" in problem for problem in problems))
 
 
 class MergePriorityTest(unittest.TestCase):
@@ -196,8 +211,57 @@ class CoverageGateTest(unittest.TestCase):
             (data / "blind_generated.jsonl").write_text("", encoding="utf-8")
             report = verify(train, blind, data, [], allow_unavailable=False)
             self.assertFalse(report["complete"])
-            self.assertIn(("A", "2"), report["train_missing"])
-            self.assertIn(("B", "9"), report["blind_missing"])
+            self.assertIn(
+                {"feed": "A", "episode": "2", "source_sha256": ""},
+                report["train_missing"],
+            )
+            self.assertIn(
+                {"feed": "B", "episode": "9", "source_sha256": ""},
+                report["blind_missing"],
+            )
+            self.assertIn(
+                {"feed": "B", "episode": "9", "source_sha256": ""},
+                report["blind_generated_missing"],
+            )
+
+    def test_blind_generated_must_cover_the_blind_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            train = root / "train.jsonl"
+            train.write_text("", encoding="utf-8")
+            blind = root / "blind.jsonl"
+            blind.write_text(
+                json.dumps({"feed": "B", "episode": "9", "source_sha256": "s" * 64})
+                + "\n",
+                encoding="utf-8",
+            )
+            data = root / "data"
+            data.mkdir()
+            (data / "annotations.jsonl").write_text("", encoding="utf-8")
+            (data / "blind_annotations.jsonl").write_text(
+                json.dumps({"feed": "B", "episode": "9", "source_sha256": "s" * 64})
+                + "\n",
+                encoding="utf-8",
+            )
+            (data / "blind_generated.jsonl").write_text(
+                json.dumps(
+                    {
+                        "feed": "B",
+                        "episode": "9",
+                        "source_sha256": "x" * 64,
+                        "ground_truth": "b.json",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (data / "blind_gt").mkdir()
+            (data / "blind_gt" / "b.json").write_text(
+                json.dumps({"source_sha256": "x" * 64, "ads": []}), encoding="utf-8"
+            )
+            report = verify(train, blind, data, [], allow_unavailable=False)
+            self.assertFalse(report["complete"])
+            self.assertTrue(report["blind_generated_missing"])
 
     def test_explicit_unavailable_rows_are_accounted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -235,7 +299,10 @@ class CoverageGateTest(unittest.TestCase):
             )
             report = verify(train, blind, data, [shard], allow_unavailable=True)
             self.assertTrue(report["complete"])
-            self.assertEqual(report["unavailable_rows"], [("A", "2")])
+            self.assertEqual(
+                report["unavailable_rows"],
+                [{"feed": "A", "episode": "2", "source_sha256": ""}],
+            )
 
 
 class PublishHoldoutTest(unittest.TestCase):
@@ -287,6 +354,41 @@ class PublishHoldoutTest(unittest.TestCase):
             self.assertFalse((dest / "blind_gt").exists())
             index = json.loads((dest / "index.json").read_text(encoding="utf-8"))
             self.assertFalse(index["holdout"]["published"])
+
+
+class CacheIdentityTest(unittest.TestCase):
+    def test_same_episode_with_new_audio_is_a_different_cache_entry(self) -> None:
+        from scripts.annotate_release_episodes import _identity_key
+
+        first = {"feed": "A", "episode": "1", "source_sha256": "a" * 64}
+        second = {"feed": "A", "episode": "1", "source_sha256": "b" * 64}
+        self.assertNotEqual(_identity_key(first), _identity_key(second))
+
+    def test_merge_keeps_both_audio_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "one" / "annotations.jsonl"
+            first.parent.mkdir(parents=True)
+            first.write_text(
+                json.dumps(
+                    {"feed": "A", "episode": "1", "source_sha256": "a" * 64, "ads": []}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            second = root / "two" / "annotations.jsonl"
+            second.parent.mkdir(parents=True)
+            second.write_text(
+                json.dumps(
+                    {"feed": "A", "episode": "1", "source_sha256": "b" * 64, "ads": []}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            target = root / "out" / "annotations.jsonl"
+            _merge_jsonl([first, second], target)
+            rows = target.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(rows), 2)
 
 
 class QuotaFailureTest(unittest.TestCase):
@@ -370,11 +472,19 @@ class ManualReviewTest(unittest.TestCase):
 
     def test_apply_requires_listening_and_edge_verification(self) -> None:
         rows = [
-            {"feed": "A", "episode": "1", "ads": [], "labels_source": "ai_reviewed"}
+            {
+                "feed": "A",
+                "episode": "1",
+                "source_sha256": "s" * 64,
+                "duration_s": 200.0,
+                "ads": [],
+                "labels_source": "ai_reviewed",
+            }
         ]
         review = {
             "feed": "A",
             "episode": "1",
+            "source_sha256": "s" * 64,
             "reviewer": "human",
             "reviewed_at": "2026-11-09T00:00:00",
             "listened": True,
@@ -391,13 +501,52 @@ class ManualReviewTest(unittest.TestCase):
         self.assertEqual(updated[0]["labels_source"], "ai_reviewed")
         self.assertEqual(len(rejected), 1)
 
-    def test_verified_review_marks_episode_human(self) -> None:
+    def test_review_for_another_audio_variant_is_rejected(self) -> None:
         rows = [
-            {"feed": "A", "episode": "1", "ads": [], "labels_source": "ai_reviewed"}
+            {
+                "feed": "A",
+                "episode": "1",
+                "source_sha256": "a" * 64,
+                "duration_s": 200.0,
+                "ads": [],
+                "labels_source": "ai_reviewed",
+            }
         ]
         review = {
             "feed": "A",
             "episode": "1",
+            "source_sha256": "b" * 64,
+            "reviewer": "human",
+            "reviewed_at": "2026-11-09T00:00:00",
+            "listened": True,
+            "ads": [
+                {
+                    "start_s": 120.0,
+                    "end_s": 151.42,
+                    "start_verified": True,
+                    "end_verified": True,
+                }
+            ],
+        }
+        updated, rejected = apply_review(rows, [review])
+        self.assertEqual(updated[0]["labels_source"], "ai_reviewed")
+        self.assertEqual(len(rejected), 1)
+
+    def test_verified_review_marks_episode_human(self) -> None:
+        rows = [
+            {
+                "feed": "A",
+                "episode": "1",
+                "source_sha256": "s" * 64,
+                "duration_s": 200.0,
+                "ads": [],
+                "labels_source": "ai_reviewed",
+            }
+        ]
+        review = {
+            "feed": "A",
+            "episode": "1",
+            "source_sha256": "s" * 64,
             "reviewer": "human",
             "reviewed_at": "2026-11-09T00:00:00",
             "listened": True,

@@ -39,6 +39,11 @@
         "name": "Last Podcast On The Left",
         "slug": "simplecast-lpotl",
         "url": "https://feeds.simplecast.com/dCXMIpJz"
+      },
+      {
+        "name": "The Ezra Klein Show",
+        "slug": "simplecast-ezraklein",
+        "url": "https://feeds.simplecast.com/kEKXbjuJ"
       }
     ]
   },
@@ -87,6 +92,11 @@
         "name": "The Prof G Pod",
         "slug": "megaphone-profg",
         "url": "https://feeds.megaphone.fm/WWO6655869236"
+      },
+      {
+        "name": "Radio Atlantic",
+        "slug": "megaphone-radioatlantic",
+        "url": "https://feeds.megaphone.fm/radioatlantic"
       }
     ]
   },
@@ -279,6 +289,29 @@
     ]
   },
   {
+    "platform": "Direct RSS",
+    "owner": "Publisher-hosted",
+    "delivery": "rss_stitched",
+    "notes": "Publisher-hosted feeds; ad stitching depends on the show's own pipeline.",
+    "feeds": [
+      {
+        "name": "This American Life",
+        "slug": "direct-tal",
+        "url": "https://www.thisamericanlife.org/podcast/rss.xml"
+      },
+      {
+        "name": "The Moth",
+        "slug": "direct-moth",
+        "url": "http://feeds.feedburner.com/themothpodcast"
+      },
+      {
+        "name": "Death, Sex & Money",
+        "slug": "direct-dsm",
+        "url": "https://my.slate.com/podcasts/feeds/death-sex-money/"
+      }
+    ]
+  },
+  {
     "platform": "NPR",
     "owner": "NPR",
     "delivery": "rss_stitched",
@@ -293,6 +326,11 @@
         "name": "Fresh Air",
         "slug": "npr-freshair",
         "url": "https://feeds.npr.org/381444908/podcast.xml"
+      },
+      {
+        "name": "Wait Wait... Don't Tell Me!",
+        "slug": "npr-waitwait",
+        "url": "https://feeds.npr.org/344098539/podcast.xml"
       }
     ]
   },

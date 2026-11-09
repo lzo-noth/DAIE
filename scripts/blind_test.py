@@ -27,8 +27,11 @@ ACCEPTANCE = {
 }
 
 
-def _load_ground_truth(path: Path) -> tuple[list[dict], float | None, dict, str]:
+def _load_ground_truth(
+    path: Path,
+) -> tuple[list[dict], float | None, dict, str, dict]:
     payload = json.loads(path.read_text(encoding="utf-8"))
+    review: dict = {}
     if isinstance(payload, list):
         ads = payload
         duration = None
@@ -48,6 +51,10 @@ def _load_ground_truth(path: Path) -> tuple[list[dict], float | None, dict, str]
             ),
         }
         label_source = str(payload.get("labels_source") or "unverified")
+        review = dict(payload.get("boundary_review") or {})
+        review.setdefault("no_ads_confirmed", payload.get("no_ads_confirmed"))
+        review.setdefault("reviewer", payload.get("reviewer"))
+        review.setdefault("reviewed_at", payload.get("reviewed_at"))
     rows = []
     for ad in ads:
         rows.append(
@@ -58,14 +65,15 @@ def _load_ground_truth(path: Path) -> tuple[list[dict], float | None, dict, str]
                 "label_method": str(ad.get("label_method") or ""),
                 "start_verified": ad.get("start_verified"),
                 "end_verified": ad.get("end_verified"),
+                "ambiguous_boundary": ad.get("ambiguous_boundary"),
                 "host_read": bool(ad.get("host_read") or False),
             }
         )
-    return rows, float(duration) if duration else None, identity, label_source
+    return rows, float(duration) if duration else None, identity, label_source, review
 
 
 def _verify_human_labels(
-    ads: list[dict], declared: str
+    ads: list[dict], declared: str, review: dict | None = None
 ) -> tuple[str, list[str]]:
     """A ``human`` label must prove it came from listening to the audio.
 
@@ -76,15 +84,33 @@ def _verify_human_labels(
     """
     if declared != "human":
         return declared, []
-    problems = [
+    problems: list[str] = []
+    meta = review or {}
+    if not str(meta.get("reviewer") or "").strip():
+        problems.append("整集复核缺少 reviewer")
+    if not str(meta.get("reviewed_at") or "").strip():
+        problems.append("整集复核缺少 reviewed_at")
+    if meta.get("listened") is not True:
+        problems.append("整集复核未标记听过音频")
+    if meta.get("ambiguous_boundary") is True:
+        problems.append("整集复核标记为模糊边界")
+    if not ads and meta.get("no_ads_confirmed") is not True:
+        # 空广告集没有逐条检查可做，但它是误报率的分母，必须有整集确认。
+        problems.append("空广告集缺少 no_ads_confirmed=true 的整集确认")
+    problems.extend(
         f"广告 {ad['start_s']:.2f}-{ad['end_s']:.2f} 缺少 label_method=human_audio_review"
         for ad in ads
         if str(ad.get("label_method") or "") != "human_audio_review"
-    ]
+    )
     problems.extend(
         f"广告 {ad['start_s']:.2f}-{ad['end_s']:.2f} 的起止未逐条人工复核"
         for ad in ads
         if ad.get("start_verified") is not True or ad.get("end_verified") is not True
+    )
+    problems.extend(
+        f"广告 {ad['start_s']:.2f}-{ad['end_s']:.2f} 被标记为模糊边界"
+        for ad in ads
+        if ad.get("ambiguous_boundary") is True
     )
     return ("unverified", problems) if problems else ("human", [])
 
@@ -346,10 +372,22 @@ def main() -> int:
         return 0
 
     # Ground truth is read only after the timeline above is fixed.
-    ground_truth, gt_duration, gt_identity, label_source = _load_ground_truth(
-        args.ground_truth
+    (
+        ground_truth,
+        gt_duration,
+        gt_identity,
+        label_source,
+        review_meta,
+    ) = _load_ground_truth(args.ground_truth)
+    label_source, label_problems = _verify_human_labels(
+        ground_truth, label_source, review_meta
     )
-    label_source, label_problems = _verify_human_labels(ground_truth, label_source)
+    reviewed_sha = str(review_meta.get("source_sha256") or "")
+    if label_source == "human" and reviewed_sha != gt_identity["source_sha256"]:
+        label_source = "unverified"
+        label_problems.append(
+            "人工复核绑定的 source_sha256 与真值音频不一致，拒绝按 human 验收"
+        )
     for problem in label_problems:
         print(f"[labels] {problem}", file=sys.stderr)
     if label_problems and not args.allow_unverified_ground_truth:

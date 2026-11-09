@@ -527,7 +527,7 @@ class ReleaseLabelTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            _, _, _, label_source = _load_ground_truth(path)
+            _, _, _, label_source, _ = _load_ground_truth(path)
             self.assertEqual(label_source, source)
 
     def test_ground_truth_without_label_source_is_unverified(self) -> None:
@@ -535,7 +535,7 @@ class ReleaseLabelTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
         path = directory / "plain.json"
         path.write_text(json.dumps({"ads": []}), encoding="utf-8")
-        _, _, _, label_source = _load_ground_truth(path)
+        _, _, _, label_source, _ = _load_ground_truth(path)
         self.assertEqual(label_source, "unverified")
 
     def test_merge_ad_segments_merges_adjacent_third_party_ads(self) -> None:

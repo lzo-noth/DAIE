@@ -51,8 +51,12 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def _key(row: dict) -> tuple[str, str]:
-    return (str(row.get("feed") or "unknown"), str(row.get("episode") or ""))
+def _identity(row: dict) -> tuple[str, str, str]:
+    return (
+        str(row.get("feed") or "unknown"),
+        str(row.get("episode") or ""),
+        str(row.get("source_sha256") or ""),
+    )
 
 
 def build_worklist(rows: list[dict], labels_source: str) -> list[dict]:
@@ -76,6 +80,8 @@ def build_worklist(rows: list[dict], labels_source: str) -> list[dict]:
                 "feed": str(row.get("feed") or "unknown"),
                 "episode": str(row.get("episode") or ""),
                 "audio": row.get("audio"),
+                # 复核结果必须绑定这份音频字节，否则同一集的另一个 DAI
+                # 变体可能套用为它人工确认过的边界。
                 "source_sha256": row.get("source_sha256"),
                 "audio_id": row.get("audio_id"),
                 "duration_s": row.get("duration_s"),
@@ -84,40 +90,78 @@ def build_worklist(rows: list[dict], labels_source: str) -> list[dict]:
                 "reviewer": "",
                 "reviewed_at": "",
                 "listened": False,
+                "no_ads_confirmed": False,
                 "ambiguous_boundary": False,
             }
         )
     return worklist
 
 
-def _verified_ads(review: dict) -> tuple[list[dict], list[str]]:
+def _verify_review(review: dict, row: dict) -> tuple[list[dict], list[str]]:
+    """Validate one episode review against the audio it claims to describe."""
     problems: list[str] = []
+    if not str(review.get("reviewer") or "").strip():
+        problems.append("缺少 reviewer")
+    if not str(review.get("reviewed_at") or "").strip():
+        problems.append("缺少 reviewed_at")
     if review.get("listened") is not True:
-        problems.append("未标记听过边界前后音频")
+        problems.append("未标记听过整集音频")
+
+    row_sha = str(row.get("source_sha256") or "")
+    review_sha = str(review.get("source_sha256") or "")
+    if not review_sha:
+        problems.append("复核结果缺少 source_sha256，无法证明绑定的是这份音频")
+    elif review_sha != row_sha:
+        problems.append(
+            f"source_sha256 不匹配（复核 {review_sha[:16]}… vs 音频 {row_sha[:16]}…）"
+        )
+    row_audio_id = str(row.get("audio_id") or "")
+    review_audio_id = str(review.get("audio_id") or "")
+    if row_audio_id and review_audio_id and row_audio_id != review_audio_id:
+        problems.append("audio_id 不匹配，复核对应的是另一条录音")
+
+    if review.get("ambiguous_boundary") is True:
+        problems.append("标记为模糊边界，不能直接作为人工作真值")
+
+    raw_ads = list(review.get("ads") or [])
+    if not raw_ads:
+        # 无广告集同样是误报率的分母，必须显式确认"整集确实没有广告"。
+        if review.get("no_ads_confirmed") is not True:
+            problems.append("空广告集需要 no_ads_confirmed=true 的整集确认")
+
+    duration = float(row.get("duration_s") or review.get("duration_s") or 0.0)
     verified: list[dict] = []
-    for ad in review.get("ads") or []:
+    for ad in raw_ads:
         start = ad.get("start_s")
         end = ad.get("end_s")
         if start is None or end is None:
             problems.append("存在未填写的边界")
             continue
-        if float(end) <= float(start):
+        start, end = float(start), float(end)
+        if end <= start:
             problems.append(f"边界非法 {start}-{end}")
+            continue
+        if duration > 0 and (start < 0 or end > duration + 0.5):
+            problems.append(f"边界 {start}-{end} 超出音频时长 {duration:.1f}s")
             continue
         if ad.get("start_verified") is not True or ad.get("end_verified") is not True:
             problems.append(f"边界 {start}-{end} 未逐条确认")
             continue
+        if ad.get("ambiguous_boundary") is True:
+            problems.append(f"边界 {start}-{end} 被标记为模糊边界")
+            continue
         verified.append(
             {
-                "start_s": round(float(start), 3),
-                "end_s": round(float(end), 3),
-                "type": str(ad.get("type") or "third_party_inserted"),
+                "start_s": round(start, 3),
+                "end_s": round(end, 3),
+                "type": str(ad.get("type") or "third_party_ad"),
+                "ad_content_type": str(ad.get("ad_content_type") or "third_party_ad"),
+                "ad_production_style": str(ad.get("ad_production_style") or "unknown"),
+                "insertion_mechanism": str(ad.get("insertion_mechanism") or "unknown"),
                 "label_method": "human_audio_review",
                 "start_verified": True,
                 "end_verified": True,
-                "ambiguous_boundary": bool(
-                    ad.get("ambiguous_boundary") or review.get("ambiguous_boundary")
-                ),
+                "ambiguous_boundary": False,
                 "candidate_start_s": ad.get("candidate_start_s"),
                 "candidate_end_s": ad.get("candidate_end_s"),
                 "reviewer": str(review.get("reviewer") or ""),
@@ -130,19 +174,39 @@ def _verified_ads(review: dict) -> tuple[list[dict], list[str]]:
 def apply_review(
     rows: list[dict], reviews: list[dict], labels_source: str = "human"
 ) -> tuple[list[dict], list[dict]]:
-    """Merge reviewed spans; only fully verified episodes claim ``human``."""
-    by_key = {_key(review): review for review in reviews}
+    """Merge reviewed spans; only fully verified episodes claim ``human``.
+
+    Reviews are matched by episode first and then by audio hash: a review that
+    was written for another DAI variant of the same episode must surface as a
+    rejection instead of silently disappearing.
+    """
+    by_pair: dict[tuple[str, str], list[dict]] = {}
+    for review in reviews:
+        by_pair.setdefault((*_identity(review)[:2],), []).append(review)
     applied: list[dict] = []
     rejected: list[dict] = []
     for row in rows:
-        key = _key(row)
-        review = by_key.get(key)
-        if review is None:
+        key = _identity(row)
+        candidates = by_pair.get(key[:2], [])
+        if not candidates:
             continue
-        ads, problems = _verified_ads(review)
+        review = next(
+            (
+                candidate
+                for candidate in candidates
+                if str(candidate.get("source_sha256") or "") == key[2]
+            ),
+            candidates[0],
+        )
+        ads, problems = _verify_review(review, row)
         if problems:
             rejected.append(
-                {"feed": key[0], "episode": key[1], "problems": problems}
+                {
+                    "feed": key[0],
+                    "episode": key[1],
+                    "source_sha256": key[2],
+                    "problems": problems,
+                }
             )
             continue
         row["ads"] = ads
@@ -150,8 +214,10 @@ def apply_review(
         row["boundary_review"] = {
             "reviewer": str(review.get("reviewer") or ""),
             "reviewed_at": str(review.get("reviewed_at") or ""),
+            "source_sha256": key[2],
             "listened": True,
-            "ambiguous_boundary": bool(review.get("ambiguous_boundary") or False),
+            "no_ads_confirmed": bool(review.get("no_ads_confirmed") or False),
+            "ambiguous_boundary": False,
             "labels_source": labels_source,
         }
         applied.append({"feed": key[0], "episode": key[1], "ads": len(ads)})
@@ -220,11 +286,11 @@ def main() -> int:
         )
     if args.ground_truth_dir and args.ground_truth_dir.is_dir() and args.blind_generated:
         annotations = {
-            _key(row): row
+            _identity(row): row
             for row in _load_jsonl(args.blind_annotations or Path("/nonexistent"))
         }
         for item in _load_jsonl(args.blind_generated):
-            annotation = annotations.get(_key(item))
+            annotation = annotations.get(_identity(item))
             if annotation is None:
                 continue
             gt_path = args.ground_truth_dir / Path(
@@ -233,8 +299,15 @@ def main() -> int:
             if not gt_path.exists():
                 continue
             payload = json.loads(gt_path.read_text(encoding="utf-8"))
+            # 真值文件与标注必须是同一份音频字节，否则人工边界会被写到
+            # 另一个 DAI 变体的真值上。
+            if str(payload.get("source_sha256") or "") != str(
+                annotation.get("source_sha256") or ""
+            ):
+                continue
             payload["ads"] = annotation.get("ads") or []
             payload["labels_source"] = annotation.get("labels_source")
+            payload["boundary_review"] = annotation.get("boundary_review")
             gt_path.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
             )

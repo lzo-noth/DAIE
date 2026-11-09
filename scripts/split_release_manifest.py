@@ -90,6 +90,11 @@ def main() -> int:
         type=Path,
         help="platforms.json；用于给缺少 feed_url 的历史行回填规范化 feed 身份",
     )
+    parser.add_argument(
+        "--blind-feeds",
+        default="",
+        help="强制作为盲测的 feed 名称（逗号分隔）；给出后不再自动挑选盲测 feed",
+    )
     args = parser.parse_args()
 
     rows = _load(args.manifest)
@@ -107,15 +112,29 @@ def main() -> int:
     by_feed: dict[str, list[dict]] = {}
     for row in rows:
         by_feed.setdefault(_group(row), []).append(row)
+    groups_by_name: dict[str, set[str]] = {}
+    for row in rows:
+        groups_by_name.setdefault(str(row.get("feed") or ""), set()).add(_group(row))
 
-    candidates = sorted(feed for feed in by_feed if feed and feed not in blind_feeds)
-    random.Random(args.seed).shuffle(candidates)
-    blind_count = sum(len(by_feed[feed]) for feed in blind_feeds if feed in by_feed)
-    for feed in candidates:
-        if blind_count >= args.blind_episodes:
-            break
-        blind_feeds.add(feed)
-        blind_count += len(by_feed[feed])
+    forced = [name.strip() for name in args.blind_feeds.split(",") if name.strip()]
+    if forced:
+        forced_groups: set[str] = set()
+        for name in forced:
+            if name not in groups_by_name:
+                print(f"[blind] 清单中没有 feed: {name}", flush=True)
+                continue
+            forced_groups |= groups_by_name[name]
+        blind_feeds |= forced_groups
+        print(f"[blind] 强制盲测 feed: {len(forced_groups)} 组", flush=True)
+    else:
+        candidates = sorted(feed for feed in by_feed if feed and feed not in blind_feeds)
+        random.Random(args.seed).shuffle(candidates)
+        blind_count = sum(len(by_feed[feed]) for feed in blind_feeds if feed in by_feed)
+        for feed in candidates:
+            if blind_count >= args.blind_episodes:
+                break
+            blind_feeds.add(feed)
+            blind_count += len(by_feed[feed])
 
     blind_rows = [row for row in rows if _group(row) in blind_feeds]
     train_rows = [

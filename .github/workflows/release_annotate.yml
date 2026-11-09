@@ -24,7 +24,7 @@ on:
         required: false
         default: ""
       llm_provider:
-        description: "LLM 提供方：auto / gemini / openai（Gemini 配额耗尽时切 openai）"
+        description: "LLM 提供方：auto（优先 Gemini）/ gemini / openai；auto 不会在配额耗尽后自动切换，失败后需手动改这里重跑"
         required: false
         default: "auto"
       labels_source:

@@ -350,9 +350,14 @@ def _annotation_problems(
             problems.append(f"广告区间 #{index + 1} 缺少有效的 start_s/end_s")
             continue
         ad_type = str(ad.get("type") or ad.get("ad_type") or "")
-        if require_ad_type and ad_type != "third_party_inserted":
+        # 新标签写 third_party_ad，并额外记录内容/制作/插入机制三个维度；
+        # 历史数据里的 third_party_inserted 继续接受，但不再作为唯一取值。
+        if require_ad_type and ad_type not in (
+            "third_party_ad",
+            "third_party_inserted",
+        ):
             problems.append(
-                f"广告区间 #{index + 1} 的 type 必须是 third_party_inserted"
+                f"广告区间 #{index + 1} 的 type 必须是 third_party_ad"
             )
         if start < 0:
             problems.append(f"广告区间 #{index + 1} 的 start_s 小于 0")

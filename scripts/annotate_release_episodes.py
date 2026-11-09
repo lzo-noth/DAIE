@@ -136,6 +136,17 @@ def _episode_key(row: dict) -> tuple[str, str]:
     return (str(row.get("feed") or "unknown"), str(row.get("episode") or ""))
 
 
+def _identity_key(row: dict) -> tuple[str, str, str]:
+    """Cache identity: feed + episode + the exact audio bytes.
+
+    DAI can serve a different ad variant for the same episode and URL, so a
+    feed/episode key alone would reuse the old variant's ASR and labels for a
+    new recording. That produces a dataset that is 100% "covered" and entirely
+    wrong.
+    """
+    return (*_episode_key(row), str(row.get("source_sha256") or ""))
+
+
 def _clamp_ads(ads: list[dict], duration: float, min_span_s: float = 1.0) -> list[dict]:
     """Trim ad spans to the decoded duration.
 
@@ -247,12 +258,12 @@ def main() -> int:
     args.transcripts_out.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if args.resume else "w"
     done_annotations = (
-        {_episode_key(row) for row in _load_jsonl(args.annotations_out)}
+        {_identity_key(row) for row in _load_jsonl(args.annotations_out)}
         if args.resume
         else set()
     )
     cached_transcripts = (
-        {_episode_key(row): row for row in _load_jsonl(args.transcripts_out)}
+        {_identity_key(row): row for row in _load_jsonl(args.transcripts_out)}
         if args.resume
         else {}
     )
@@ -267,7 +278,7 @@ def main() -> int:
     if args.blind_manifest_out:
         args.blind_manifest_out.parent.mkdir(parents=True, exist_ok=True)
         existing_blind = (
-            {_episode_key(row) for row in _load_jsonl(args.blind_manifest_out)}
+            {_identity_key(row) for row in _load_jsonl(args.blind_manifest_out)}
             if args.resume
             else set()
         )
@@ -279,7 +290,7 @@ def main() -> int:
         args.ground_truth_dir.mkdir(parents=True, exist_ok=True)
 
     # 已完成的集会被跳过，但训练/盲测仍要解码音频：先补齐缺失快照。
-    prefetch_failures: dict[tuple[str, str], str] = {}
+    prefetch_failures: dict[tuple[str, str, str], str] = {}
     for row in rows:
         source = str(row.get("audio_url") or row.get("audio") or "")
         digest_hint = str(row.get("source_sha256") or "")
@@ -297,9 +308,7 @@ def main() -> int:
             print(f"[snapshot] 补齐: {target.name}", flush=True)
         except Exception as exc:  # noqa: BLE001 - 单集下载失败不应终止整批
             detail = f"{type(exc).__name__}: {exc}"
-            prefetch_failures[
-                (str(row.get("feed") or "unknown"), str(row.get("episode") or ""))
-            ] = detail
+            prefetch_failures[_identity_key(row)] = detail
             print(f"[snapshot] 补齐失败，记录为不可用: {detail}", flush=True)
 
     total_ads = 0
@@ -314,15 +323,16 @@ def main() -> int:
             continue
         feed = str(row.get("feed") or "unknown")
         episode = str(row.get("episode") or Path(source).stem)
-        key = (feed, episode)
+        key = _identity_key(row)
         if key in done_annotations:
-            print(f"[resume] 跳过已完成: {feed}/{episode}", flush=True)
+            print(f"[resume] 跳过已完成（同一音频哈希）: {feed}/{episode}", flush=True)
             continue
         if key in prefetch_failures:
             unavailable.append(
                 {
                     "feed": feed,
                     "episode": episode,
+                    "source_sha256": key[2],
                     "audio": source,
                     "reason": prefetch_failures[key],
                 }
@@ -389,6 +399,24 @@ def main() -> int:
                     )
                     print(f"[unavailable] {feed}/{episode}: 音频下载失败 {detail}", flush=True)
                     continue
+            # 清单里的 source_sha256 是抽样时那份音频；重新下载若拿到另一个
+            # DAI 变体，就不能把它的标注冒充成清单音频的真值。
+            if digest_hint and digest != digest_hint:
+                detail = (
+                    f"audio_sha256_mismatch: manifest={digest_hint[:16]}… "
+                    f"downloaded={digest[:16]}…"
+                )
+                unavailable.append(
+                    {
+                        "feed": feed,
+                        "episode": episode,
+                        "source_sha256": digest,
+                        "audio": source,
+                        "reason": detail,
+                    }
+                )
+                print(f"[unavailable] {feed}/{episode}: {detail}", flush=True)
+                continue
             # Reuse snapshot_audio's identity extraction without a second download.
             from dai_detect.single_episode import extract_features
 
@@ -515,7 +543,15 @@ def main() -> int:
             )
             continue
         ads = [
-            {**ad, "type": "third_party_inserted"}
+            {
+                **ad,
+                "type": "third_party_ad",
+                "ad_content_type": "third_party_ad",
+                # 纯文本判定无法证明广告是 DAI 动态插入还是原生剪辑进母版；
+                # 也不该把"第三方广告"直接说成"已确认的动态插入"。
+                "ad_production_style": "unknown",
+                "insertion_mechanism": "unknown",
+            }
             for ad in ads
         ]
         annotation = {**identity, "ads": ads}
@@ -552,6 +588,7 @@ def main() -> int:
                                 feed, str(row.get("feed_url") or "")
                             ),
                             "episode": episode,
+                            "source_sha256": digest,
                             "ground_truth": str(gt_path),
                         },
                         ensure_ascii=False,
@@ -569,22 +606,28 @@ def main() -> int:
         blind_handle.close()
 
     # 覆盖率是发布门禁的输入：任何未产出标注、未产出真值或快照不可用的行
-    # 都必须显式记账，不能靠"退出码 0"掩盖。
-    produced = {_episode_key(row) for row in _load_jsonl(args.annotations_out)}
-    expected = {_episode_key(row) for row in rows}
+    # 都必须显式记账，不能靠"退出码 0"掩盖。身份键包含音频哈希，
+    # 同一集的另一个 DAI 变体不算"已覆盖"。
+    produced = {_identity_key(row) for row in _load_jsonl(args.annotations_out)}
+    expected = {_identity_key(row) for row in rows}
     covered: list[dict] = []
     for row in rows:
-        key = _episode_key(row)
-        if key in produced:
-            covered.append({"feed": key[0], "episode": key[1], "status": "annotated"})
-        else:
-            covered.append({"feed": key[0], "episode": key[1], "status": "missing"})
-    unavailable_keys = {_episode_key(row) for row in unavailable}
+        key = _identity_key(row)
+        status = "annotated" if key in produced else "missing"
+        covered.append(
+            {
+                "feed": key[0],
+                "episode": key[1],
+                "source_sha256": key[2],
+                "status": status,
+            }
+        )
+    unavailable_keys = {_identity_key(row) for row in unavailable}
     incomplete = [
         item
         for item in covered
         if item["status"] != "annotated"
-        and (item["feed"], item["episode"]) not in unavailable_keys
+        and (item["feed"], item["episode"], item["source_sha256"]) not in unavailable_keys
     ]
     coverage = {
         "annotations": str(args.annotations_out),

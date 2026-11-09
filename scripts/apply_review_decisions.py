@@ -18,10 +18,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from dai_detect.feed_identity import canonical_feed_key
 
 DEFAULT_DECISIONS = Path("datasets/release_annotations/review_decisions.json")
 MATCH_TOLERANCE_S = 0.6
+
+
+def _identity(row: dict) -> tuple[str, str, str]:
+    return (
+        str(row.get("feed") or "unknown"),
+        str(row.get("episode") or ""),
+        str(row.get("source_sha256") or ""),
+    )
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -92,7 +105,10 @@ def derive_ads(
             {
                 "start_s": round(start, 3),
                 "end_s": round(end, 3),
-                "type": "third_party_inserted",
+                "type": "third_party_ad",
+                "ad_content_type": "third_party_ad",
+                "ad_production_style": "unknown",
+                "insertion_mechanism": "unknown",
             }
         )
     return ads
@@ -124,9 +140,35 @@ def main() -> int:
         transcripts_path = args.data_dir / transcripts_name
         if not transcripts_path.exists():
             continue
+        # 人工听审过的行不能被文本复核覆盖回去；否则人工边界的价值会在
+        # 下一次发布里被悄悄抹掉。
+        existing = {
+            _identity(row): row
+            for row in load_jsonl(args.data_dir / annotations_name)
+        }
         rebuilt = []
         for row in load_jsonl(transcripts_path):
             key = (str(row.get("feed") or "unknown"), str(row.get("episode") or ""))
+            identity_key = _identity(row)
+            previous = existing.get(identity_key)
+            if previous and str(previous.get("labels_source") or "") == "human":
+                rebuilt.append(previous)
+                stats.append(
+                    {
+                        "feed": key[0],
+                        "episode": key[1],
+                        "ads": len(previous.get("ads") or []),
+                        "ad_s": round(
+                            sum(
+                                a["end_s"] - a["start_s"]
+                                for a in previous.get("ads") or []
+                            ),
+                            1,
+                        ),
+                        "labels_source": "human",
+                    }
+                )
+                continue
             if key in drop_all:
                 ads = []
             else:
@@ -142,6 +184,8 @@ def main() -> int:
                 for field in (
                     "audio",
                     "feed",
+                    "feed_url",
+                    "feed_key",
                     "episode",
                     "source_sha256",
                     "audio_id",
@@ -149,6 +193,13 @@ def main() -> int:
                     "duration_s",
                 )
             }
+            identity["feed_key"] = str(
+                identity.get("feed_key")
+                or canonical_feed_key(
+                    str(identity.get("feed") or ""),
+                    str(identity.get("feed_url") or ""),
+                )
+            )
             rebuilt.append({**identity, "labels_source": labels_source, "ads": ads})
             stats.append(
                 {
@@ -164,13 +215,12 @@ def main() -> int:
     gt_dir = args.data_dir / "blind_gt"
     if generated_path.exists() and gt_dir.is_dir():
         annotations = {
-            (str(row.get("feed") or "unknown"), str(row.get("episode") or "")): row
+            _identity(row): row
             for row in load_jsonl(args.data_dir / "blind_annotations.jsonl")
         }
         rebuilt_generated = []
         for row in load_jsonl(generated_path):
-            key = (str(row.get("feed") or "unknown"), str(row.get("episode") or ""))
-            annotation = annotations.get(key)
+            annotation = annotations.get(_identity(row))
             if annotation is None:
                 rebuilt_generated.append(row)
                 continue
@@ -183,13 +233,20 @@ def main() -> int:
                         "source_sha256": annotation.get("source_sha256"),
                         "audio_id": annotation.get("audio_id"),
                         "audio_id_kind": annotation.get("audio_id_kind"),
-                        "labels_source": labels_source,
+                        "labels_source": annotation.get("labels_source") or labels_source,
+                        "boundary_review": annotation.get("boundary_review"),
                     },
                     ensure_ascii=False,
                 ),
                 encoding="utf-8",
             )
-            rebuilt_generated.append({**row, "ground_truth": str(row.get("ground_truth"))})
+            rebuilt_generated.append(
+                {
+                    **row,
+                    "source_sha256": annotation.get("source_sha256") or row.get("source_sha256"),
+                    "ground_truth": str(row.get("ground_truth")),
+                }
+            )
         write_jsonl(generated_path, rebuilt_generated)
 
     print(

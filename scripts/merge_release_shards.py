@@ -23,8 +23,18 @@ JSONL_FILES = (
 )
 
 
-def _key(row: dict) -> tuple[str, str]:
-    return (str(row.get("feed") or "unknown"), str(row.get("episode") or ""))
+def _key(row: dict) -> tuple[str, str, str]:
+    """Merge identity includes the audio hash.
+
+    The same episode can be annotated twice from two DAI variants; merging on
+    feed/episode alone would silently drop one of them and keep whichever
+    shard came last.
+    """
+    return (
+        str(row.get("feed") or "unknown"),
+        str(row.get("episode") or ""),
+        str(row.get("source_sha256") or ""),
+    )
 
 
 def _priority(row: dict) -> tuple[int, str]:

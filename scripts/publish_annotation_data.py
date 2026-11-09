@@ -71,6 +71,35 @@ def _publish_jsonl(source: Path, target: Path, snapshot_dir: str = "snapshots") 
     return {"rows": len(rows), "sha256": _sha256(target)}
 
 
+def _validate_published(dest: Path, index: dict) -> None:
+    """Fail if the index describes files that are not on disk as described.
+
+    The index and the data files are generated in the same step, but a partial
+    publish or a later manual edit can leave metadata pointing at another
+    batch. Publishing must fail loudly instead of shipping inconsistent counts,
+    hashes or a stale ``published_at``.
+    """
+    for name, meta in (index.get("files") or {}).items():
+        path = dest / name
+        if not path.exists():
+            raise SystemExit(f"index 引用了不存在的文件: {path}")
+        rows = sum(
+            1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+        )
+        if int(meta.get("rows") or 0) != rows:
+            raise SystemExit(
+                f"{name} 行数不一致: index={meta.get('rows')} 实际={rows}"
+            )
+        if str(meta.get("sha256") or "") != _sha256(path):
+            raise SystemExit(f"{name} 的 sha256 与 index 不一致")
+    expected_episodes = int(index.get("episodes") or 0)
+    actual = index["files"].get("annotations.jsonl", {}).get("rows", 0)
+    if expected_episodes != actual:
+        raise SystemExit(
+            f"index episodes={expected_episodes} 与 annotations 行数={actual} 不一致"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path, required=True, help="pipeline 输出目录（含 out/release）")
@@ -146,6 +175,7 @@ def main() -> int:
     (args.dest / "index.json").write_text(
         json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    _validate_published(args.dest, index)
     print(json.dumps(index, ensure_ascii=False), flush=True)
     return 0
 
