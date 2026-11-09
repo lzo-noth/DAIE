@@ -70,11 +70,11 @@ class ShardOffsetTest(unittest.TestCase):
         # start=1 -> k2, k3 exhausted first, then the untouched k1.
         self.assertEqual(response.choices[0].message.content, "ok")
         self.assertEqual(client.status()["keys"], 3)
-        self.assertEqual(client.active_key_number, 3)
+        self.assertEqual(client.active_key_number, 1)
 
     def test_offset_wraps_past_pool_length(self) -> None:
         client = RotatingChatClient(_factory({}), ["a", "b", "c"], start=4)
-        self.assertEqual(client.active_key_number, 1)
+        self.assertEqual(client.active_key_number, 2)
 
 
 class LoadKeysTest(unittest.TestCase):
@@ -132,6 +132,29 @@ class RotatingClientTest(unittest.TestCase):
             client.chat.completions.create(model="m", messages=[])
         self.assertEqual(client.active_key_number, 1)
         self.assertEqual(client.status()["exhausted"], 0)
+
+    def test_second_consecutive_429_moves_to_the_next_key(self) -> None:
+        behaviour = {"k1": _minute_rate_error(), "k2": _response("ok")}
+        client = RotatingChatClient(_factory(behaviour), ["k1", "k2"])
+        with redirect_stdout(io.StringIO()):
+            with self.assertRaises(_ApiError):
+                client.chat.completions.create(model="m", messages=[])
+            response = client.chat.completions.create(model="m", messages=[])
+        self.assertEqual(response.choices[0].message.content, "ok")
+        self.assertEqual(client.active_key_number, 2)
+
+    def test_success_resets_the_rate_limit_streak(self) -> None:
+        behaviour = {"k1": _minute_rate_error(), "k2": _response("ok")}
+        client = RotatingChatClient(_factory(behaviour), ["k1", "k2"])
+        with redirect_stdout(io.StringIO()):
+            with self.assertRaises(_ApiError):
+                client.chat.completions.create(model="m", messages=[])
+            behaviour["k1"] = _response("ok")
+            client.chat.completions.create(model="m", messages=[])
+            behaviour["k1"] = _minute_rate_error()
+            with self.assertRaises(_ApiError):
+                client.chat.completions.create(model="m", messages=[])
+        self.assertEqual(client.active_key_number, 1)
 
     def test_auth_rejection_rotates_to_next_key(self) -> None:
         behaviour = {

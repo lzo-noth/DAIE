@@ -12,7 +12,7 @@ import os
 from types import SimpleNamespace
 from typing import Callable
 
-from dai_detect.llm import _log, is_key_failure
+from dai_detect.llm import _log, is_key_failure, is_rate_limit
 
 KEY_SEPARATORS = (",", "\n", ";", " ")
 
@@ -56,13 +56,14 @@ class RotatingChatClient:
     ) -> None:
         self._factory = factory
         keys = list(keys)
-        if keys and start:
-            offset = start % len(keys)
-            keys = keys[offset:] + keys[:offset]
+        self._offset = start % len(keys) if keys and start else 0
+        if self._offset:
+            keys = keys[self._offset:] + keys[:self._offset]
         self._keys = keys
         self._index = 0
         self._clients: dict[int, object] = {}
         self._exhausted: dict[int, str] = {}
+        self._rate_limits = 0
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     @property
@@ -71,12 +72,30 @@ class RotatingChatClient:
 
     @property
     def active_key_number(self) -> int:
-        return min(self._index + 1, len(self._keys))
+        """1-based position in the original (unrotated) key list."""
+        if not self._keys:
+            return 0
+        index = min(self._index, len(self._keys) - 1)
+        return (self._offset + index) % len(self._keys) + 1
 
     def _client(self) -> object:
         if self._index not in self._clients:
             self._clients[self._index] = self._factory(self._keys[self._index])
         return self._clients[self._index]
+
+    def _should_rotate(self, exc: Exception) -> bool:
+        """Retire the key only when it -- not the request -- is the problem.
+
+        A bare 429 may be a per-minute limit, so the first one goes back to
+        the caller's retry/backoff. A second consecutive 429 on the same key
+        means waiting is not working; try another key instead.
+        """
+        if is_key_failure(exc):
+            return True
+        if is_rate_limit(exc):
+            self._rate_limits += 1
+            return self._rate_limits >= 2
+        return False
 
     def _create(self, **kwargs):
         if self._index >= len(self._keys):
@@ -88,20 +107,23 @@ class RotatingChatClient:
             try:
                 response = self._client().chat.completions.create(**kwargs)
             except Exception as exc:  # noqa: BLE001
-                if not is_key_failure(exc):
+                if not self._should_rotate(exc):
                     raise
+                failed_number = self.active_key_number
                 self._exhausted[attempt] = type(exc).__name__
                 self._index += 1
+                self._rate_limits = 0
                 if self._index >= len(self._keys):
                     raise AllKeysExhausted(
                         f"全部 {len(self._keys)} 个 key 均已不可用"
                         f"（最后一个错误 {type(exc).__name__}）"
                     ) from exc
                 _log(
-                    f"key #{attempt + 1} 不可用（{type(exc).__name__}），"
-                    f"切换到 key #{self._index + 1}/{len(self._keys)}"
+                    f"key #{failed_number} 不可用（{type(exc).__name__}），"
+                    f"切换到 key #{self.active_key_number}/{len(self._keys)}"
                 )
                 continue
+            self._rate_limits = 0
             return response
         raise AllKeysExhausted("key 池已空")
 

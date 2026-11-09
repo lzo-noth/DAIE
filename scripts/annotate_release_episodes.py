@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dai_detect.feed_identity import canonical_feed_key
 from dai_detect.llm import classify_transcript_segments, merge_ad_segments
-from dai_detect.llm_keys import RotatingChatClient, load_keys
+from dai_detect.llm_keys import AllKeysExhausted, RotatingChatClient, load_keys
 from scripts.snapshot_audio import snapshot
 
 
@@ -508,6 +508,12 @@ def main() -> int:
                     + "\n"
                 )
                 transcript_handle.flush()
+                if isinstance(exc, AllKeysExhausted):
+                    # 整个 key 池都被拒绝：继续重试没有意义，立即停下，配额
+                    # 恢复后用 --resume 只补 LLM 部分。
+                    aborted_reason = f"key 池已耗尽：{detail}"
+                    print(f"[abort] {aborted_reason}", flush=True)
+                    break
                 if (
                     args.max_consecutive_llm_failures > 0
                     and consecutive_llm_failures >= args.max_consecutive_llm_failures

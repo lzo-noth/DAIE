@@ -266,6 +266,15 @@ def _daily_quota_exhausted(exc: Exception) -> bool:
     )
 
 
+def is_rate_limit(exc: Exception) -> bool:
+    """True for any 429, including ones whose body carries no quota detail."""
+    status = getattr(exc, "status_code", None) or getattr(
+        getattr(exc, "response", None), "status_code", None
+    )
+    text = str(exc).lower()
+    return status == 429 or "429" in text or "rate limit" in text
+
+
 def is_key_failure(exc: Exception) -> bool:
     """True when another API key might succeed where this one failed.
 

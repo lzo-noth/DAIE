@@ -107,14 +107,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RESUME_RUN: ${{ inputs.resume_run_id }}
+          SHARD_INDEX: ${{ matrix.shard }}
         run: |
           set -euo pipefail
           mkdir -p out/base
+          # 只复用本分片自己的 artifact：分片映射由清单和 shard_count 决定，
+          # 同一分片号对应同一批身份，所以 1:1 恢复即可，不必下载全部分片。
+          pattern="^dai-release-annotations-[0-9]+-shard${SHARD_INDEX}$|^dai-release-pipeline-"
           name=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_RUN/artifacts" \
-            --jq '.artifacts[] | select(.name | test("^(dai-release-annotations-[0-9]+$|dai-release-pipeline-)")) | .name' \
+            --jq ".artifacts[] | select(.name | test(\"$pattern\")) | .name" \
             | tail -1)
           if [ -z "$name" ]; then
-            echo "run $RESUME_RUN 没有可复用的标注 artifact" >&2
+            echo "run $RESUME_RUN 没有可复用本分片（shard$SHARD_INDEX）的标注 artifact" >&2
             exit 1
           fi
           gh run download "$RESUME_RUN" -n "$name" -D out/base --repo "$GITHUB_REPOSITORY"
