@@ -391,6 +391,7 @@ def main() -> int:
         identity = {
             "audio": audio_path,
             "feed": feed,
+            "feed_url": str(row.get("feed_url") or ""),
             "episode": episode,
             "source_sha256": digest,
             "audio_id": audio_id,
