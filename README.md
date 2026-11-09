@@ -105,17 +105,40 @@ python scripts/annotate_release_episodes.py \
 {"audio":"https://github.com/<owner>/<repo>/releases/download/<tag>/show_b_ep1.mp3","feed":"Show B","episode":"Ep 1","ground_truth":"https://raw.githubusercontent.com/.../show_b_ep1.json"}
 ```
 
-重要：ASR + LLM 生成的是 `labels_source=llm_weak` 的弱标签，可用于训练或人工预标注，但**不是人工真值**。只有盲测真值显式包含 `"labels_source": "human"` 时，`performance_targets_met` 才可能为 true；否则 workflow 仍可跑通，但结果只用于流程验证，不能作为产品验收。
+重要：ASR + LLM 生成的是 `labels_source=llm_weak` 的弱标签，可用于训练或人工预标注，但**不是人工真值**。只有盲测真值显式包含 `"labels_source": "human"` 时，`performance_targets_met` 才可能为 true；而且 `human` 现在需要可审计的证据：每条广告必须带 `label_method="human_audio_review"`、`start_verified=true`、`end_verified=true`。缺任何一项都会被降级为 `unverified` 并拒绝评分（调试可加 `--allow-unverified-ground-truth`）。
 
-标签复核：`merge_ad_segments` 会丢弃 `host_read=true` 的片段，但真实播客的广告绝大多数是主持人口播，导致 TWiT 这类节目 9 个广告段全部被丢成 0 个。因此 `datasets/release_annotations/review_decisions.json` 定义了复核策略（只保留 `third_party_ad`、忽略 `host_read`、`max_gap_s=3`、`min_span_s=2`），并记录逐段丢弃项（内容提及、赞助披露、交叉推广）。`scripts/apply_review_decisions.py` 会用逐句 LLM 判定重新生成 `ads`，`release-annotate` 在发布前自动执行。复核后标签记为 `labels_source=ai_reviewed`——它是文本级 AI 复核，仍**不是**人工真值，不能用于性能验收。
+人工边界复核流程：
+
+```bash
+# 1) 导出待复核清单（保留原始 AI 候选边界）
+python scripts/review_ad_boundaries.py --annotations annotations.jsonl \
+  --blind-annotations blind_annotations.jsonl --worklist-out review_worklist.jsonl
+# 2) 听音频、填 start_s/end_s 并逐条确认起止
+python scripts/review_ad_boundaries.py --annotations annotations.jsonl \
+  --blind-annotations blind_annotations.jsonl \
+  --ground-truth-dir blind_gt --blind-generated blind_generated.jsonl \
+  --apply review_done.jsonl
+```
+
+标签复核：`merge_ad_segments` 会丢弃 `host_read=true` 的片段，但真实播客的广告绝大多数是主持人口播，导致 TWiT 这类节目 9 个广告段全部被丢成 0 个。因此 `datasets/release_annotations/review_decisions.json` 定义了复核策略（只保留 `third_party_ad`、忽略 `host_read`、`max_gap_s=3`、`min_span_s=2`），并记录逐段丢弃项（内容提及、赞助披露、交叉推广）。`scripts/apply_review_decisions.py` 会用逐句 LLM 判定重新生成 `ads`，`release-annotate` 在发布前自动执行；它和初次生成共用同一条 host-read 规则，不会在重建时把口播赞助又放回来。复核后标签记为 `labels_source=ai_reviewed`——它是文本级 AI 复核，仍**不是**人工真值，不能用于性能验收。
+
+检测范围：产品只检测 **≥10 秒**的第三方插入广告。训练标签、解码器 `min_ad_s` 与盲测评测分母共用同一阈值：短于 10 秒的标注会被显式排除（日志和 `ground_truth_scope` 里可见），不会出现“解码器输出不了、却仍算漏检”的口径冲突。
 
 `release-annotate` 需要仓库 Secrets 中的 `GEMINI_API_KEY` 或 `OPENAI_API_KEY`，运行标注时可传 `--resume` 语义的 `resume_run_id` 复用已完成集；`labels_source` 默认 `llm_weak`，人工校对完成后将它设为 `human` 再标注/重跑。`release-train-blind` 不需要 LLM key，只读标注 artifact 并训练/盲测；`allow_weak_blind_labels=true` 允许非人工真值跑通流程，但不会把 `performance_targets_met` 标为 true。
+
+发布完整性门禁：`release-annotate` 的每个分片都会写 `*.coverage.json`；只要出现下载失败的音频、LLM 失败或未产出标注的行，分片就以非零码退出，`publish` job 因 `needs: annotate` 不会执行。即使手工分片产物齐全，`scripts/verify_release_coverage.py` 还会按清单逐行核对标注、盲测真值与不可用记录，100% 覆盖才允许发布（`--allow-unavailable` 默认关闭）。合并分片时按“成功优先于 `llm_error`、其次按时间戳最新”选行，旧分片的失败记录不会覆盖其他分片的成功重试。
+
+盲测保密：公开仓库只发布 `annotations.jsonl`、`transcripts.jsonl` 和 `index.json`。`blind_annotations.jsonl`、`blind_transcripts.jsonl`、`blind_generated.jsonl` 与 `blind_gt/` 只存在于 Actions artifact（发布步骤也会主动删除历史提交里的这些文件）。否则模型开发者可以逐条查看评测集的起止时间，等于把 holdout 变成调参信号。最终验收时应把盲测 artifact 归档到私有位置，而不是留在 30 天有效期的临时产物里。
+
+音频可复现：训练快照是内容寻址文件名（`<sha256>.<ext>`），`archive_snapshots.py` 会把它们上传到 `audio-snapshots` Release 且从不覆盖，避免 artifact 过期后只剩哈希、无法重建同一份 DAI 变体。盲测音频默认不归档到公开 Release。
+
+feed 隔离使用规范化身份：manifest 记录 `feed_url`，隔离键是 URL 的哈希（`dai_detect/feed_identity.py`），显示名只作为没有 URL 时的兜底。这样 `This Week in Tech` 与 `TWiT` 不会因改名被当作两个节目，也不会因换 RSS 地址绕过隔离。
 
 ### 从 platforms.json 抽样并上传到 Release
 
 `sample-release-audio` 手动 workflow 读取仓库里的 [platforms.json](platforms.json)，解析每个 feed 的 RSS enclosure，取最近若干集，按 seed 随机抽取指定数量（优先覆盖不同 feed），下载音频、计算 `source_sha256`，上传 artifact，并附加到 `release_tag` 指定的 Release。它还会把清单写入 `datasets/sampled_release_manifest.jsonl`（可关闭提交）。
 
-默认参数：`count=15`、`seed=42`、`max_per_feed=1`、`latest_per_feed=10`、`release_tag=1.0`。生成的清单每行包含 `audio`（Release URL）、`feed`、`episode`、`source_sha256`、`source_url`、`published`，可直接作为 `release-train-blind` 的训练清单；盲测音频必须来自未参与训练的 feed。
+默认参数：`count=15`、`seed=42`、`max_per_feed=1`、`latest_per_feed=10`、`release_tag=1.0`。生成的清单每行包含 `audio`（Release URL）、`feed`、`feed_url`、`episode`、`source_sha256`、`source_url`、`published`，可直接作为 `release-train-blind` 的训练清单；盲测音频必须来自未参与训练的 feed（`feed_url` 用于规范化隔离，历史缺字段的行可由 `split_release_manifest.py --platforms platforms.json` 回填）。
 
 标注 JSONL 每行一集：
 

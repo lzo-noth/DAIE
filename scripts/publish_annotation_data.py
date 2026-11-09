@@ -1,9 +1,21 @@
 #!/usr/bin/env python3
-"""Copy non-audio annotation data from a pipeline output dir into the repo.
+"""Copy non-audio *training* annotation data from a pipeline output into the repo.
+
+Blind-holdout labels are deliberately not published. Committing the blind
+ground truth turns the final holdout into a de-facto training signal: anyone
+editing features or thresholds can inspect the exact start/end times they are
+being scored against. Feed-disjoint splits alone do not prevent that.
+
+What is published:
+  - ``annotations.jsonl`` / ``transcripts.jsonl`` for training episodes
+  - ``index.json`` with counts and dataset identity
+
+What stays private (Actions artifact / separate evaluation repo):
+  - ``blind_annotations.jsonl`` / ``blind_transcripts.jsonl``
+  - ``blind_generated.jsonl`` and ``blind_gt/*.json``
 
 Audio snapshots stay in the Actions artifact because training needs the exact
-bytes; labels and transcripts are committed so the dataset can be reviewed and
-diffed in git. Local snapshot paths inside the JSONL rows are rewritten to
+bytes; local snapshot paths inside the JSONL rows are rewritten to
 ``snapshots/<file>`` so the files stay relocatable.
 """
 
@@ -17,9 +29,11 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-JSONL_FILES = (
+PUBLISHED_JSONL = (
     "annotations.jsonl",
     "transcripts.jsonl",
+)
+HOLDOUT_JSONL = (
     "blind_annotations.jsonl",
     "blind_transcripts.jsonl",
     "blind_generated.jsonl",
@@ -66,24 +80,31 @@ def main() -> int:
     args = parser.parse_args()
 
     published: dict[str, dict] = {}
-    for name in JSONL_FILES:
+    for name in PUBLISHED_JSONL:
         source = args.source / name
         if not source.exists():
             continue
-        # 合并后的 artifact 把所有音频都放在 snapshots/，盲测清单也指向这里。
+        # 合并后的 artifact 把所有音频都放在 snapshots/。
         published[name] = _publish_jsonl(source, args.dest / name, "snapshots")
 
-    ground_truth_dir = args.source / "blind_gt"
-    if ground_truth_dir.is_dir():
-        target_dir = args.dest / "blind_gt"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        for source in sorted(ground_truth_dir.glob("*.json")):
-            target = target_dir / source.name
-            if source.resolve() != target.resolve():
-                shutil.copyfile(source, target)
-        published["blind_gt"] = {
-            "files": len(list(target_dir.glob("*.json"))),
-        }
+    # 撤回历史版本里已经公开的盲测真值，避免旧提交继续泄露 holdout。
+    removed = []
+    for name in HOLDOUT_JSONL:
+        target = args.dest / name
+        if target.exists():
+            target.unlink()
+            removed.append(str(target))
+    blind_gt = args.dest / "blind_gt"
+    if blind_gt.is_dir():
+        shutil.rmtree(blind_gt)
+        removed.append(str(blind_gt))
+
+    holdout_rows = 0
+    blind_generated = args.source / "blind_generated.jsonl"
+    if blind_generated.exists():
+        holdout_rows = sum(
+            1 for line in blind_generated.read_text(encoding="utf-8").splitlines() if line.strip()
+        )
 
     if not published:
         print(f"{args.source} 没有可发布的数据", flush=True)
@@ -113,6 +134,13 @@ def main() -> int:
         "episodes": published.get("annotations.jsonl", {}).get("rows", 0),
         "feeds": len(set(feeds)),
         "ads": ads,
+        "holdout": {
+            "published": False,
+            "episodes": holdout_rows,
+            "location": "actions_artifact",
+            "note": "盲测标签不进入公开仓库，避免评测集被逐步适配",
+        },
+        "removed_holdout_files": removed,
     }
     args.dest.mkdir(parents=True, exist_ok=True)
     (args.dest / "index.json").write_text(

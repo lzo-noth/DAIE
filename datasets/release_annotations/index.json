@@ -1,36 +1,27 @@
 {
-  "published_at": "2026-11-09T02:48:12+00:00",
-  "run_id": "42548123324",
+  "published_at": "2026-11-08T11:19:25+00:00",
+  "run_id": "42474789281",
   "llm_model": "",
   "labels_sources": [
     "ai_reviewed"
   ],
   "files": {
     "annotations.jsonl": {
-      "rows": 25,
-      "sha256": "34615b1bde2bdb4021eab0f4705667dc439aacd1e0a0db5cf4929b2eec2e6f6c"
+      "rows": 21,
+      "sha256": "0c508b7f8d8474e10e031e0cedcf2177823c17aa40502c95fc3af80cd349e051"
     },
     "transcripts.jsonl": {
-      "rows": 25,
-      "sha256": "37c6dedf89a6f3ddc99f8ef470fd5fe1b56f84bacd231b52175e672b08381a93"
-    },
-    "blind_annotations.jsonl": {
-      "rows": 13,
-      "sha256": "6a491d4bbc7f74175b782cf699a53cd42e8b5eee41200964d7b89c0cd7c67518"
-    },
-    "blind_transcripts.jsonl": {
-      "rows": 13,
-      "sha256": "021a9a347c9b16f6fca51d0cf0edce04c81f9f5e591040d012098e23003d8cbd"
-    },
-    "blind_generated.jsonl": {
-      "rows": 13,
-      "sha256": "96351941601a34c7bcc7a75ee88c21468233758599644b1fa821ea90c8055678"
-    },
-    "blind_gt": {
-      "files": 13
+      "rows": 21,
+      "sha256": "2b58c93c9afd18eec60e87213b4ce38b90650625bc1dce9f7b2b6e4209261db0"
     }
   },
-  "episodes": 25,
-  "feeds": 12,
-  "ads": 55
+  "episodes": 21,
+  "feeds": 9,
+  "ads": 55,
+  "holdout": {
+    "published": false,
+    "episodes": 13,
+    "location": "actions_artifact",
+    "note": "盲测标签不进入公开仓库，避免评测集被逐步适配"
+  }
 }

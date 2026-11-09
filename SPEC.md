@@ -165,7 +165,18 @@ DAI 会在同一 URL 背后按请求替换广告，因此 URL、文件名、RSS 
 | Transcript 依赖 | 0 | 不调用 ASR/LLM |
 | 逐集 ASR | 0 | 同上 |
 
+检测范围：只检测 **时长 ≥ 10 秒**的第三方插入广告。训练标签、`min_ad_s` 解码下限与评测分母必须使用同一阈值，短于 10 秒的广告不计入召回分母。
+
 盲测协议：把完整一集音频交给检测器，隐藏所有人工广告标注；检测器输出时间轴后再用真值评估。盲测脚本 `scripts/blind_test.py` 强制先检测、后评估。
+
+验收前置条件（缺一不可）：
+
+1. `labels_source=human` 的每条广告都带 `label_method=human_audio_review`、`start_verified=true`、`end_verified=true`，并保留原始 AI 候选边界。
+2. 盲测真值与盲测转录不进入公开仓库，只存在于私有 artifact / 独立评测仓库。
+3. 数据发布必须通过覆盖率门禁：清单每一行都有成功标注或显式不可用记录，且所有分片成功。
+4. 模型通过严格嵌套分组 CV 校准；本次盲测启用了 `--require-calibrated-models`。诊断运行（关闭校准门禁或使用非人工真值）永远不会写 `performance_targets_met=true`。
+5. 置信区间使用 feed→episode 两级 cluster bootstrap，不以事件独立假设的 Wilson 区间作为最终结论。
+6. 隔离以规范化 `feed_key`（RSS URL 哈希）判定，不以显示名判定。
 
 ## 6. 已知风险
 

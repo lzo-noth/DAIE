@@ -53,6 +53,7 @@ from dai_detect.metrics import (
 )
 from dai_detect.refinement import refine_events
 from dai_detect.single_episode import extract_features
+from dai_detect.feed_identity import canonical_feed_key
 from dai_detect.single_features import WINDOW_FEATURES, build_windows, window_labels
 from dai_detect.temporal_decoder import decode_windows
 
@@ -199,6 +200,9 @@ def _weak_labels(windows: dict, labels: list[dict]) -> tuple[np.ndarray, np.ndar
     for row in labels:
         start = float(row.get("start_s") or 0.0)
         end = float(row.get("end_s") or 0.0)
+        if end - start < MIN_AD_S:
+            # 与部署端同一广告定义：短于 MIN_AD_S 的候选不作为广告标签。
+            continue
         label = 1 if row.get("is_ad") else 0
         for index, center in enumerate(times):
             if start <= center <= end:
@@ -1865,6 +1869,18 @@ def main() -> int:
                 if not args.allow_invalid_annotations:
                     print("[data] 中止训练；确认标注后可修正，或用 --allow-invalid-annotations 覆盖")
                     return 1
+            # 检测器无法输出短于 MIN_AD_S 的事件；训练标签必须用同一定义，
+            # 否则短广告会把广告窗口教成负样本、同时又算进评测分母。
+            short = [item for item in ads if item["end_s"] - item["start_s"] < MIN_AD_S]
+            if short:
+                durations = ", ".join(
+                    f"{item['end_s'] - item['start_s']:.2f}s" for item in short[:5]
+                )
+                print(
+                    f"[data] {name}: 排除 {len(short)} 段短于 {MIN_AD_S:g}s 的广告（{durations}）",
+                    flush=True,
+                )
+            ads = [item for item in ads if item["end_s"] - item["start_s"] >= MIN_AD_S]
             indices, labels = window_labels(windows, ads)
         else:
             key = (
@@ -2192,6 +2208,15 @@ def main() -> int:
             }
         ),
         "feeds": sorted({str(entry.get("feed") or "unknown") for entry in entries}),
+        "feed_keys": sorted(
+            {
+                canonical_feed_key(
+                    str(entry.get("feed") or ""),
+                    str(entry.get("feed_url") or ""),
+                )
+                for entry in entries
+            }
+        ),
     }
 
     payload = {

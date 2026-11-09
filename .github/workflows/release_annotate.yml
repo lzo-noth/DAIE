@@ -43,6 +43,10 @@ on:
         description: "复用该 run 的 artifact（已完成集/快照/转写）继续跑，可留空"
         required: false
         default: ""
+      snapshot_tag:
+        description: "训练音频快照归档到的 Release tag（内容寻址，不覆盖）"
+        required: false
+        default: "audio-snapshots"
 
 permissions:
   contents: write
@@ -204,7 +208,6 @@ jobs:
 
   publish:
     needs: annotate
-    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -252,6 +255,41 @@ jobs:
             fi
           done
           python scripts/merge_release_shards.py "${inputs[@]}" --out-dir out/release
+      - name: Fetch release manifests for coverage gate
+        env:
+          TRAIN_URL: ${{ inputs.train_manifest_url }}
+          BLIND_URL: ${{ inputs.blind_manifest_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/gate
+          if [[ "$TRAIN_URL" == http* ]]; then curl -fsSL "$TRAIN_URL" -o out/gate/train_manifest.jsonl; else cp "$TRAIN_URL" out/gate/train_manifest.jsonl; fi
+          if [[ "$BLIND_URL" == http* ]]; then curl -fsSL "$BLIND_URL" -o out/gate/blind_manifest.jsonl; else cp "$BLIND_URL" out/gate/blind_manifest.jsonl; fi
+      - name: Enforce manifest coverage
+        run: |
+          set -euo pipefail
+          coverage_args=()
+          for dir in out/shards/shard-*; do
+            if [ -d "$dir" ]; then
+              coverage_args+=(--coverage-dir "$dir")
+            fi
+          done
+          python scripts/verify_release_coverage.py \
+            --train-manifest out/gate/train_manifest.jsonl \
+            --blind-manifest out/gate/blind_manifest.jsonl \
+            --data-dir out/release \
+            "${coverage_args[@]}" \
+            --out out/release/release_coverage.json
+      - name: Archive training audio snapshots
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
+        run: |
+          set -euo pipefail
+          python scripts/archive_snapshots.py \
+            --dir out/release/snapshots \
+            --tag "$SNAPSHOT_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --index-out out/release/snapshot_archive.json
       - name: Apply label review decisions
         run: |
           set -euo pipefail

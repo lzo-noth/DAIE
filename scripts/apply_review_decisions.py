@@ -47,15 +47,26 @@ def derive_ads(
     drop_starts: list[float],
     duration: float = 0.0,
 ) -> list[dict]:
+    """Rebuild ad spans from per-segment verdicts under the review policy.
+
+    The first pass (``merge_ad_segments``) and this rebuild must agree on what
+    an ad is, otherwise the published ground truth re-introduces content the
+    first pass deliberately dropped. ``host_read`` is the important case: most
+    podcast ad reads are host-read, and they are excluded by policy but are
+    still marked ``is_ad`` plus ``ad_type=third_party_ad`` by the LLM.
+    """
     min_confidence = float(policy.get("min_confidence", 0.5))
     max_gap = float(policy.get("max_gap_s", 3.0))
     min_span = float(policy.get("min_span_s", 2.0))
     ad_types = set(policy.get("ad_types") or ["third_party_ad"])
+    ignore_host_read = bool(policy.get("ignore_host_read", True))
 
     spans: list[list[float]] = []
     for index, segment in enumerate(segments):
         result = results.get(str(index)) or {}
         if result.get("is_ad") is not True:
+            continue
+        if ignore_host_read and result.get("host_read") is True:
             continue
         if str(result.get("ad_type") or "") not in ad_types:
             continue

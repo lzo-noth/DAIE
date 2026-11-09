@@ -106,6 +106,16 @@ jobs:
             --boundary-model out/pipeline/boundary_model.json \
             --feed D --require-models --require-calibrated-models \
             --require-independent-test --out out/pipeline/timeline.json
+      - name: No-ad episode must stay silent
+        run: |
+          set -euo pipefail
+          SNAP=$(python -c "import json;print(json.loads(open('out/pipeline/blind_manifest.jsonl').readlines()[1])['audio'])")
+          python scripts/blind_test.py --audio "$SNAP" \
+            --model out/pipeline/ad_model.json \
+            --boundary-model out/pipeline/boundary_model.json \
+            --ground-truth out/pipeline/ground_truth_no_ad.json \
+            --feed F --require-models --require-calibrated-models \
+            --require-independent-test --metrics out/pipeline/no_ad_metrics.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

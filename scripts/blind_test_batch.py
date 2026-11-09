@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import subprocess
 import sys
 import tempfile
@@ -66,16 +67,114 @@ def _percentile(values: list[float], percentile: float) -> float | None:
     return round(float(ordered[low] * (1.0 - weight) + ordered[high] * weight), 3)
 
 
+def _interval(values: list[float]) -> dict:
+    return {
+        "estimate": None,
+        "lower": _percentile(values, 2.5),
+        "upper": _percentile(values, 97.5),
+    }
+
+
+def _feed_report_stats(report: dict) -> tuple[int, int, int, float, list[float]]:
+    metrics = report.get("metrics") or {}
+    errors: list[float] = []
+    for match in report.get("matches") or []:
+        errors.extend((float(match["start_error"]), float(match["end_error"])))
+    return (
+        int(metrics.get("matched") or 0),
+        int(metrics.get("false_positives") or 0),
+        int(metrics.get("false_negatives") or 0),
+        float(report.get("duration_s") or 0.0),
+        errors,
+    )
+
+
+def _cluster_bootstrap(reports: list[dict], iterations: int = 2000, seed: int = 0) -> dict:
+    """Two-stage cluster bootstrap over feeds, then episodes.
+
+    Ad events inside one episode share acoustics, and episodes inside one feed
+    share production and stitching pipelines, so treating every event as an
+    independent Bernoulli observation makes the Wilson interval too narrow.
+    Resampling feeds and then episodes keeps that clustering in the interval.
+    """
+    by_feed: dict[str, list[dict]] = {}
+    for report in reports:
+        by_feed.setdefault(str(report.get("feed") or "unknown"), []).append(report)
+    feeds = sorted(by_feed)
+    if not feeds or iterations <= 0:
+        return {
+            "event_precision": _interval([]),
+            "event_recall": _interval([]),
+            "event_f1": _interval([]),
+            "boundary_p95_s": _interval([]),
+            "false_positives_per_hour": _interval([]),
+        }
+    rng = random.Random(seed)
+    precision: list[float] = []
+    recall: list[float] = []
+    f1: list[float] = []
+    p95: list[float] = []
+    fp_rate: list[float] = []
+    for _ in range(iterations):
+        tp = fp = fn = 0
+        duration = 0.0
+        errors: list[float] = []
+        for feed in (rng.choice(feeds) for _ in feeds):
+            episodes = by_feed[feed]
+            for report in (rng.choice(episodes) for _ in episodes):
+                episode_tp, episode_fp, episode_fn, episode_duration, episode_errors = (
+                    _feed_report_stats(report)
+                )
+                tp += episode_tp
+                fp += episode_fp
+                fn += episode_fn
+                duration += episode_duration
+                errors.extend(episode_errors)
+        predicted = tp + fp
+        truth = tp + fn
+        if predicted:
+            precision.append(tp / predicted)
+        if truth:
+            recall.append(tp / truth)
+        if predicted and truth and tp:
+            precision_value = tp / predicted
+            recall_value = tp / truth
+            f1.append(
+                2.0 * precision_value * recall_value / (precision_value + recall_value)
+            )
+        elif predicted and truth:
+            f1.append(0.0)
+        if errors:
+            value = _percentile(errors, 95)
+            if value is not None:
+                p95.append(float(value))
+        if duration > 0:
+            fp_rate.append(fp / (duration / 3600.0))
+    return {
+        "event_precision": _interval(precision),
+        "event_recall": _interval(recall),
+        "event_f1": _interval(f1),
+        "boundary_p95_s": _interval(p95),
+        "false_positives_per_hour": _interval(fp_rate),
+    }
+
+
 def _aggregate(reports: list[dict]) -> dict:
     tp = fp = fn = predicted = ground_truth = 0
     total_duration = 0.0
+    excluded_short_ads = 0
     boundary_errors: list[float] = []
     label_sources: set[str] = set()
+    label_problems: list[str] = []
     feeds: dict[str, dict] = {}
     for report in reports:
         metrics = report["metrics"]
         feed = report.get("feed") or "unknown"
         label_sources.add(str(report.get("labels_source") or "unverified"))
+        label_problems.extend(str(problem) for problem in report.get("label_problems") or [])
+        excluded_short_ads += int(
+            (report.get("ground_truth_scope") or {}).get("excluded_short_ads") or 0
+        )
         bucket = feeds.setdefault(
             feed,
             {
@@ -167,6 +266,8 @@ def _aggregate(reports: list[dict]) -> dict:
         "all_independent": all(bucket["independent"] for bucket in feeds.values()),
         "labels_sources": sorted(label_sources),
         "all_human_labels": label_sources == {"human"},
+        "excluded_short_ads": excluded_short_ads,
+        "label_problems": label_problems,
     }
 
 
@@ -217,6 +318,8 @@ def _run_row(row: dict, args: argparse.Namespace, base: Path) -> dict:
             "--quiet",
             "--max-fp-per-hour",
             str(args.max_fp_per_hour),
+            "--min-ad",
+            str(args.min_ad),
         ]
         if args.model:
             command += ["--model", str(args.model)]
@@ -228,6 +331,10 @@ def _run_row(row: dict, args: argparse.Namespace, base: Path) -> dict:
             command.append("--require-calibrated-models")
         if args.require_independent_test:
             command.append("--require-independent-test")
+        if row.get("feed_url"):
+            command += ["--feed-url", str(row["feed_url"])]
+        if row.get("feed_key"):
+            command += ["--feed-key", str(row["feed_key"])]
         if args.allow_training_overlap:
             command.append("--allow-training-overlap")
         if args.allow_audio_mismatch:
@@ -277,6 +384,13 @@ def main() -> int:
     parser.add_argument("--allow-training-overlap", action="store_true")
     parser.add_argument("--allow-audio-mismatch", action="store_true")
     parser.add_argument("--max-fp-per-hour", type=float, default=ACCEPTANCE["false_positives_per_hour"])
+    parser.add_argument(
+        "--min-ad",
+        type=float,
+        default=10.0,
+        help="检测与评测共同的最短广告秒数；短于该值的真值广告不计入分母",
+    )
+    parser.add_argument("--bootstrap-iterations", type=int, default=2000)
     parser.add_argument("--min-events", type=int, default=10)
     parser.add_argument("--min-feeds", type=int, default=3)
     parser.add_argument(
@@ -316,6 +430,9 @@ def main() -> int:
         return 2
 
     aggregate = _aggregate(successful)
+    aggregate["ci95_cluster_bootstrap"] = _cluster_bootstrap(
+        successful, iterations=args.bootstrap_iterations
+    )
     checks = {
         "event_precision": (
             aggregate["event_precision"] is not None
@@ -343,26 +460,43 @@ def main() -> int:
             aggregate["all_human_labels"] or args.allow_nonhuman_ground_truth
         ),
         "no_failed_episodes": not failures,
+        # 跳过严格校准门禁的运行只用于诊断，绝不是性能验收。
+        "calibrated_models": bool(args.require_calibrated_models),
     }
-    passed = all(checks.values())
+    # 诊断模式仍然应该跑完并正常退出；校验收到的限制只影响 targets_met，
+    # 不计入"指标是否通过"的退出码。
+    metric_checks = {
+        key: value for key, value in checks.items() if key != "calibrated_models"
+    }
+    passed = all(metric_checks.values())
+    targets_met = bool(
+        passed
+        and aggregate["all_human_labels"]
+        and aggregate["all_independent"]
+        and args.require_calibrated_models
+        and not args.allow_nonhuman_ground_truth
+    )
+    if targets_met:
+        source = "independent_human_ground_truth_calibrated_models"
+    elif not args.require_calibrated_models:
+        source = "diagnostic_only_calibration_gate_disabled"
+    elif args.allow_nonhuman_ground_truth:
+        source = "diagnostic_only_nonhuman_ground_truth"
+    else:
+        source = "not_independent_or_non_human_labels"
     summary = {
         "manifest": str(args.manifest),
         "episodes": len(rows),
         "successful_episodes": len(successful),
         "failed_episodes": failures,
+        "min_ad_s": args.min_ad,
+        "require_calibrated_models": bool(args.require_calibrated_models),
+        "allow_nonhuman_ground_truth": bool(args.allow_nonhuman_ground_truth),
         "metrics": aggregate,
         "checks": checks,
         "passed": passed,
-        "performance_targets_met": bool(
-            passed
-            and aggregate["all_human_labels"]
-            and aggregate["all_independent"]
-        ),
-        "performance_targets_source": (
-            "independent_human_ground_truth_batch"
-            if passed and aggregate["all_human_labels"]
-            else "not_independent_or_non_human_labels"
-        ),
+        "performance_targets_met": targets_met,
+        "performance_targets_source": source,
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if args.out:

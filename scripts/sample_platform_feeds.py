@@ -241,6 +241,7 @@ def main() -> int:
                 "duration_s": item["duration_s"],
                 "published": item["published"],
                 "platform": item["platform"],
+                "feed_url": item["feed_url"],
                 "source_url": item["audio_url"],
                 "source_sha256": digest,
             }

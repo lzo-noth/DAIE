@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dai_detect.evaluation import evaluate_events
+from dai_detect.feed_identity import canonical_feed_key
 from dai_detect.single_episode import SingleConfig, analyze_single, write_timeline
 
 ACCEPTANCE = {
@@ -53,9 +54,53 @@ def _load_ground_truth(path: Path) -> tuple[list[dict], float | None, dict, str]
             {
                 "start_s": float(ad["start_s"] if "start_s" in ad else ad["start"]),
                 "end_s": float(ad["end_s"] if "end_s" in ad else ad["end"]),
+                "type": str(ad.get("type") or ad.get("ad_type") or ""),
+                "label_method": str(ad.get("label_method") or ""),
+                "start_verified": ad.get("start_verified"),
+                "end_verified": ad.get("end_verified"),
+                "host_read": bool(ad.get("host_read") or False),
             }
         )
     return rows, float(duration) if duration else None, identity, label_source
+
+
+def _verify_human_labels(
+    ads: list[dict], declared: str
+) -> tuple[str, list[str]]:
+    """A ``human`` label must prove it came from listening to the audio.
+
+    The release pipeline turns ASR segment timestamps into ad spans, so a
+    label can say ``human`` while its boundaries are still an ASR artefact.
+    Requiring a per-ad review method plus explicit start/end verification
+    makes the claim auditable instead of aspirational.
+    """
+    if declared != "human":
+        return declared, []
+    problems = [
+        f"广告 {ad['start_s']:.2f}-{ad['end_s']:.2f} 缺少 label_method=human_audio_review"
+        for ad in ads
+        if str(ad.get("label_method") or "") != "human_audio_review"
+    ]
+    problems.extend(
+        f"广告 {ad['start_s']:.2f}-{ad['end_s']:.2f} 的起止未逐条人工复核"
+        for ad in ads
+        if ad.get("start_verified") is not True or ad.get("end_verified") is not True
+    )
+    return ("unverified", problems) if problems else ("human", [])
+
+
+def _scope_ground_truth(
+    ads: list[dict], min_ad_s: float
+) -> tuple[list[dict], list[dict]]:
+    """Drop ground-truth ads shorter than the product's minimum ad length.
+
+    The decoder cannot emit an event shorter than ``min_ad_s``, so counting
+    such an ad in the denominator would manufacture a guaranteed false
+    negative. Inference and evaluation must share one ad definition.
+    """
+    kept = [ad for ad in ads if ad["end_s"] - ad["start_s"] >= min_ad_s]
+    excluded = [ad for ad in ads if ad["end_s"] - ad["start_s"] < min_ad_s]
+    return kept, excluded
 
 
 def _identity_checks(
@@ -123,21 +168,29 @@ def _independence_check(
     timeline_audio: dict,
     model_meta: dict,
     feed: str,
+    feed_url: str = "",
+    feed_key: str = "",
 ) -> tuple[dict, list[str]]:
     """Verify the input was not part of the training set.
 
     ``data_version`` only proves that the model is a particular training batch;
     it cannot answer whether this exact audio or feed was seen during training.
     Models therefore carry an explicit training identity list.
+
+    Feed isolation keys off ``feed_key`` (a hash of the canonical feed URL)
+    rather than the display name: the same show may be listed under different
+    names, and a renamed or re-hosted feed would otherwise slip through.
     """
     training = model_meta.get("training_identity") or {}
     training_ids = set(training.get("audio_ids") or [])
     training_hashes = set(training.get("source_sha256") or [])
     training_feeds = set(training.get("feeds") or [])
+    training_keys = set(training.get("feed_keys") or [])
     audio_id = str(timeline_audio.get("id") or "")
     source_hash = str(timeline_audio.get("source_sha256") or "")
+    key = feed_key or canonical_feed_key(feed, feed_url)
     problems: list[str] = []
-    if not training_ids and not training_hashes and not training_feeds:
+    if not training_ids and not training_hashes and not training_feeds and not training_keys:
         problems.append("模型缺少 training_identity，无法证明盲测音频未参与训练")
     audio_seen = bool(
         (audio_id and audio_id in training_ids)
@@ -145,15 +198,18 @@ def _independence_check(
     )
     if audio_seen:
         problems.append("输入音频的 audio_id/source_sha256 出现在训练集")
-    feed_seen = bool(feed and feed in training_feeds)
+    feed_seen = bool(
+        (key in training_keys)
+        or (training_keys == set() and feed and feed in training_feeds)
+    )
     if feed_seen:
-        problems.append(f"输入 feed {feed!r} 出现在训练集")
-    if feed:
+        problems.append(f"输入 feed {feed!r}（{key}）出现在训练集")
+    if feed or key:
         scope = "same_feed_holdout" if feed_seen else "unseen_feed_blind_test"
     else:
         scope = "unknown_feed"
     independent = bool(
-        (training_ids or training_hashes or training_feeds)
+        (training_ids or training_hashes or training_feeds or training_keys)
         and not audio_seen
         and scope == "unseen_feed_blind_test"
     )
@@ -161,6 +217,8 @@ def _independence_check(
         {
             "audio_id_seen_in_training": audio_seen,
             "feed": feed,
+            "feed_key": key,
+            "feed_url": feed_url,
             "feed_seen_in_training": feed_seen,
             "scope": scope,
             "independent": independent,
@@ -205,6 +263,16 @@ def main() -> int:
         help="输入音频所属节目；用于检查该 feed 是否参与训练",
     )
     parser.add_argument(
+        "--feed-url",
+        default="",
+        help="输入的 RSS URL；有值时用规范化 URL 哈希做 feed 隔离",
+    )
+    parser.add_argument(
+        "--feed-key",
+        default="",
+        help="已有的规范化 feed 标识（优先于 --feed-url）",
+    )
+    parser.add_argument(
         "--require-independent-test",
         action="store_true",
         help="要求输入音频和 feed 都未出现在训练集，否则拒绝验收",
@@ -242,7 +310,11 @@ def main() -> int:
 
     timeline_audio = timeline.get("audio") or {}
     independence, independence_problems = _independence_check(
-        timeline_audio, timeline.get("model") or {}, args.feed
+        timeline_audio,
+        timeline.get("model") or {},
+        args.feed,
+        feed_url=args.feed_url,
+        feed_key=args.feed_key,
     )
     if independence_problems:
         for problem in independence_problems:
@@ -277,6 +349,17 @@ def main() -> int:
     ground_truth, gt_duration, gt_identity, label_source = _load_ground_truth(
         args.ground_truth
     )
+    label_source, label_problems = _verify_human_labels(ground_truth, label_source)
+    for problem in label_problems:
+        print(f"[labels] {problem}", file=sys.stderr)
+    if label_problems and not args.allow_unverified_ground_truth:
+        print(
+            "[labels] 拒绝按 human 真值验收：每条广告都需要人工音频复核记录；"
+            "仅调试时可用 --allow-unverified-ground-truth",
+            file=sys.stderr,
+        )
+        return 3
+    ground_truth, excluded_short_ads = _scope_ground_truth(ground_truth, args.min_ad)
     input_is_local = bool(timeline_audio.get("source_sha256"))
     missing, mismatches, identity_warnings = _identity_checks(
         timeline_audio, gt_identity, input_is_local
@@ -312,28 +395,47 @@ def main() -> int:
         **ACCEPTANCE,
         "false_positives_per_hour": args.max_fp_per_hour,
     }
-    checks = {
-        "event_precision": (
-            metrics["event_precision"] is not None
-            and metrics["event_precision"] >= acceptance["event_precision"]
-        ),
-        "event_recall": (
-            metrics["event_recall"] is not None
-            and metrics["event_recall"] >= acceptance["event_recall"]
-        ),
-        "boundary_p95_s": (
-            metrics["boundary_p95_s"] is not None
-            and metrics["boundary_p95_s"] <= acceptance["boundary_p95_s"]
-        ),
-        "false_positives_per_hour": (
-            args.max_fp_per_hour <= 0
-            or (
-                metrics["false_positives_per_hour"] is not None
-                and metrics["false_positives_per_hour"] <= args.max_fp_per_hour
-            )
-        ),
-    }
-    passed = all(checks.values())
+    empty_ground_truth = int(metrics.get("ground_truth_events") or 0) == 0
+    if empty_ground_truth:
+        # 无广告集没有 precision/recall/P95 可算；唯一可验收的是"完全没误报"。
+        checks = {
+            "event_precision": None,
+            "event_recall": None,
+            "boundary_p95_s": None,
+            "false_positives_per_hour": (
+                True
+                if args.max_fp_per_hour <= 0
+                else bool(
+                    metrics["false_positives_per_hour"] is not None
+                    and metrics["false_positives_per_hour"] <= args.max_fp_per_hour
+                )
+            ),
+            "zero_false_positives": int(metrics.get("false_positives") or 0) == 0,
+        }
+        passed = all(value for value in checks.values() if value is not None)
+    else:
+        checks = {
+            "event_precision": (
+                metrics["event_precision"] is not None
+                and metrics["event_precision"] >= acceptance["event_precision"]
+            ),
+            "event_recall": (
+                metrics["event_recall"] is not None
+                and metrics["event_recall"] >= acceptance["event_recall"]
+            ),
+            "boundary_p95_s": (
+                metrics["boundary_p95_s"] is not None
+                and metrics["boundary_p95_s"] <= acceptance["boundary_p95_s"]
+            ),
+            "false_positives_per_hour": (
+                args.max_fp_per_hour <= 0
+                or (
+                    metrics["false_positives_per_hour"] is not None
+                    and metrics["false_positives_per_hour"] <= args.max_fp_per_hour
+                )
+            ),
+        }
+        passed = all(checks.values())
     report = {
         "audio": args.audio,
         "duration_s": timeline["duration_s"],
@@ -360,6 +462,15 @@ def main() -> int:
         "passed": passed,
         "independence": independence,
         "labels_source": label_source,
+        "label_problems": label_problems,
+        "ground_truth_scope": {
+            "min_ad_s": args.min_ad,
+            "excluded_short_ads": len(excluded_short_ads),
+            "excluded_short_ads_s": [
+                round(float(ad["end_s"] - ad["start_s"]), 3)
+                for ad in excluded_short_ads
+            ],
+        },
         "performance_targets_met": (
             passed
             if independence["independent"] and label_source == "human"

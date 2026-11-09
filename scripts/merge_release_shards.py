@@ -27,7 +27,28 @@ def _key(row: dict) -> tuple[str, str]:
     return (str(row.get("feed") or "unknown"), str(row.get("episode") or ""))
 
 
-def _merge_jsonl(sources: list[Path], target: Path) -> int:
+def _priority(row: dict) -> tuple[int, str]:
+    """Rank candidate rows for the same episode.
+
+    Every shard starts from the repository cache, so the same episode often
+    appears in several shard artifacts. A plain "later input wins" merge lets a
+    stale shard copy of an ``llm_error`` row overwrite a successful retry from
+    another shard. Success must outrank failure; within the same status, the
+    newest timestamp wins, and only then does input order act as a tie-break.
+    """
+    failed = bool(row.get("llm_error"))
+    stamp = str(
+        row.get("generated_at")
+        or row.get("annotated_at")
+        or row.get("updated_at")
+        or ""
+    )
+    return (0 if failed else 1, stamp)
+
+
+def _merge_jsonl(
+    sources: list[Path], target: Path, conflicts: dict[str, int] | None = None
+) -> int:
     rows: dict[tuple[str, str], dict] = {}
     order: list[tuple[str, str]] = []
     for source in sources:
@@ -38,9 +59,16 @@ def _merge_jsonl(sources: list[Path], target: Path) -> int:
                 continue
             row = json.loads(line)
             key = _key(row)
+            existing = rows.get(key)
             if key not in rows:
                 order.append(key)
-            rows[key] = row
+            elif existing is not None and json.dumps(
+                existing, sort_keys=True, ensure_ascii=False
+            ) != json.dumps(row, sort_keys=True, ensure_ascii=False):
+                if conflicts is not None:
+                    conflicts[str(target.name)] = conflicts.get(str(target.name), 0) + 1
+            if existing is None or _priority(row) >= _priority(existing):
+                rows[key] = row
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8") as handle:
         for key in order:
@@ -65,11 +93,16 @@ def main() -> int:
         print("没有可合并的输入目录", flush=True)
         return 1
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    conflicts: dict[str, int] = {}
 
     for name in JSONL_FILES:
-        count = _merge_jsonl([path / name for path in inputs], args.out_dir / name)
+        count = _merge_jsonl(
+            [path / name for path in inputs], args.out_dir / name, conflicts
+        )
         if count:
             print(f"[merge] {name}: {count} rows", flush=True)
+    if conflicts:
+        print(f"[merge] conflicting rows: {json.dumps(conflicts, ensure_ascii=False)}", flush=True)
 
     gt_files = 0
     target_gt = args.out_dir / "blind_gt"

@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from dai_detect.feed_identity import canonical_feed_key
 from dai_detect.llm import classify_transcript_segments, merge_ad_segments
 from scripts.snapshot_audio import snapshot
 
@@ -247,6 +248,7 @@ def main() -> int:
         args.ground_truth_dir.mkdir(parents=True, exist_ok=True)
 
     # 已完成的集会被跳过，但训练/盲测仍要解码音频：先补齐缺失快照。
+    prefetch_failures: dict[tuple[str, str], str] = {}
     for row in rows:
         source = str(row.get("audio_url") or row.get("audio") or "")
         digest_hint = str(row.get("source_sha256") or "")
@@ -263,11 +265,16 @@ def main() -> int:
             target, _ = snapshot(source, args.snapshot_dir, None, False)
             print(f"[snapshot] 补齐: {target.name}", flush=True)
         except Exception as exc:  # noqa: BLE001 - 单集下载失败不应终止整批
-            print(f"[snapshot] 补齐失败，稍后重试: {type(exc).__name__}: {exc}", flush=True)
+            detail = f"{type(exc).__name__}: {exc}"
+            prefetch_failures[
+                (str(row.get("feed") or "unknown"), str(row.get("episode") or ""))
+            ] = detail
+            print(f"[snapshot] 补齐失败，记录为不可用: {detail}", flush=True)
 
     total_ads = 0
     total_episodes = 0
     failures: list[dict] = []
+    unavailable: list[dict] = []
     for row in rows:
         source = str(row.get("audio_url") or row.get("audio") or "")
         if not source:
@@ -277,6 +284,17 @@ def main() -> int:
         key = (feed, episode)
         if key in done_annotations:
             print(f"[resume] 跳过已完成: {feed}/{episode}", flush=True)
+            continue
+        if key in prefetch_failures:
+            unavailable.append(
+                {
+                    "feed": feed,
+                    "episode": episode,
+                    "audio": source,
+                    "reason": prefetch_failures[key],
+                }
+            )
+            print(f"[unavailable] {feed}/{episode}: 音频快照不可用，跳过", flush=True)
             continue
         print(f"[annotate] {feed} / {episode}", flush=True)
         cached = cached_transcripts.get(key)
@@ -294,7 +312,20 @@ def main() -> int:
                 if existing:
                     audio_path = str(existing)
                 else:
-                    target, digest = snapshot(source, args.snapshot_dir, None, False)
+                    try:
+                        target, digest = snapshot(source, args.snapshot_dir, None, False)
+                    except Exception as exc:  # noqa: BLE001
+                        detail = f"{type(exc).__name__}: {exc}"
+                        unavailable.append(
+                            {
+                                "feed": feed,
+                                "episode": episode,
+                                "audio": source,
+                                "reason": detail,
+                            }
+                        )
+                        print(f"[unavailable] {feed}/{episode}: 快照补下载失败 {detail}", flush=True)
+                        continue
                     audio_path = str(target)
                     print(f"[resume] 补齐音频快照: {target.name}", flush=True)
             classified = not cached.get("llm_error")
@@ -311,20 +342,46 @@ def main() -> int:
                 target, digest = reused, digest_hint
                 print(f"[resume] 复用音频快照: {target.name}", flush=True)
             else:
-                target, digest = snapshot(source, args.snapshot_dir, None, False)
+                try:
+                    target, digest = snapshot(source, args.snapshot_dir, None, False)
+                except Exception as exc:  # noqa: BLE001
+                    detail = f"{type(exc).__name__}: {exc}"
+                    unavailable.append(
+                        {
+                            "feed": feed,
+                            "episode": episode,
+                            "audio": source,
+                            "reason": detail,
+                        }
+                    )
+                    print(f"[unavailable] {feed}/{episode}: 音频下载失败 {detail}", flush=True)
+                    continue
             # Reuse snapshot_audio's identity extraction without a second download.
             from dai_detect.single_episode import extract_features
 
-            mono, forensic = extract_features(str(target), proxy=None)
-            duration = min(
-                float(mono.get("duration_s") or 0.0),
-                float(forensic.get("duration_s") or 0.0),
-            )
+            try:
+                mono, forensic = extract_features(str(target), proxy=None)
+                duration = min(
+                    float(mono.get("duration_s") or 0.0),
+                    float(forensic.get("duration_s") or 0.0),
+                )
+                asr_began = time.time()
+                segments = _transcribe(target, whisper, args.language)
+            except Exception as exc:  # noqa: BLE001 - 单集损坏不应拖垮整个分片
+                detail = f"{type(exc).__name__}: {exc}"
+                unavailable.append(
+                    {
+                        "feed": feed,
+                        "episode": episode,
+                        "audio": source,
+                        "reason": detail,
+                    }
+                )
+                print(f"[unavailable] {feed}/{episode}: 解码/转写失败 {detail}", flush=True)
+                continue
             audio_path = str(target)
             audio_id = str(mono.get("audio_id") or "")
             audio_id_kind = str(mono.get("audio_id_kind") or "")
-            asr_began = time.time()
-            segments = _transcribe(target, whisper, args.language)
             print(
                 f"[asr] {feed}/{episode}: {len(segments)} 段, "
                 f"{time.time() - asr_began:.0f}s",
@@ -403,6 +460,13 @@ def main() -> int:
             and not (blind_handle and args.ground_truth_dir)
         ):
             print(f"[skip] {feed}/{episode}: LLM 未找到第三方插入广告", flush=True)
+            failures.append(
+                {
+                    "feed": feed,
+                    "episode": episode,
+                    "error": "no_ads_and_allow_empty_ads_disabled",
+                }
+            )
             continue
         ads = [
             {**ad, "type": "third_party_inserted"}
@@ -437,6 +501,10 @@ def main() -> int:
                         {
                             "audio": audio_path,
                             "feed": feed,
+                            "feed_url": str(row.get("feed_url") or ""),
+                            "feed_key": canonical_feed_key(
+                                feed, str(row.get("feed_url") or "")
+                            ),
                             "episode": episode,
                             "ground_truth": str(gt_path),
                         },
@@ -453,6 +521,40 @@ def main() -> int:
     transcript_handle.close()
     if blind_handle:
         blind_handle.close()
+
+    # 覆盖率是发布门禁的输入：任何未产出标注、未产出真值或快照不可用的行
+    # 都必须显式记账，不能靠"退出码 0"掩盖。
+    produced = {_episode_key(row) for row in _load_jsonl(args.annotations_out)}
+    expected = {_episode_key(row) for row in rows}
+    covered: list[dict] = []
+    for row in rows:
+        key = _episode_key(row)
+        if key in produced:
+            covered.append({"feed": key[0], "episode": key[1], "status": "annotated"})
+        else:
+            covered.append({"feed": key[0], "episode": key[1], "status": "missing"})
+    unavailable_keys = {_episode_key(row) for row in unavailable}
+    incomplete = [
+        item
+        for item in covered
+        if item["status"] != "annotated"
+        and (item["feed"], item["episode"]) not in unavailable_keys
+    ]
+    coverage = {
+        "annotations": str(args.annotations_out),
+        "manifest_rows": len(expected),
+        "annotated_rows": len(expected & produced),
+        "unavailable_rows": len(unavailable),
+        "failed_rows": len(failures),
+        "missing_rows": len(incomplete),
+        "complete": not incomplete and not unavailable,
+        "unavailable": unavailable,
+        "failed": failures,
+    }
+    coverage_path = args.annotations_out.with_suffix(".coverage.json")
+    coverage_path.write_text(
+        json.dumps(coverage, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     print(
         json.dumps(
             {
@@ -461,11 +563,25 @@ def main() -> int:
                 "labels_source": args.labels_source,
                 "annotations": str(args.annotations_out),
                 "transcripts": str(args.transcripts_out),
+                "coverage": str(coverage_path),
+                "manifest_rows": coverage["manifest_rows"],
+                "annotated_rows": coverage["annotated_rows"],
+                "unavailable_rows": coverage["unavailable_rows"],
+                "failed_rows": coverage["failed_rows"],
+                "missing_rows": coverage["missing_rows"],
                 "failed": failures,
+                "unavailable": unavailable,
             },
             ensure_ascii=False,
         )
     )
+    if incomplete or unavailable:
+        print(
+            "[coverage] 本分片没有被完整处理：存在失败或不可用行。"
+            "发布流程应拒绝发布；请修复后重跑，或从清单中显式移除该集。",
+            flush=True,
+        )
+        return 2
     return 0
 
 
