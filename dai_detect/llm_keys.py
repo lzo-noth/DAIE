@@ -41,11 +41,25 @@ def load_keys(env_name: str, fallback: str = "") -> list[str]:
 
 
 class RotatingChatClient:
-    """Drop-in for ``OpenAI`` that rotates keys on key-level failures."""
+    """Drop-in for ``OpenAI`` that rotates keys on key-level failures.
 
-    def __init__(self, factory: Callable[[str], object], keys: list[str]) -> None:
+    ``start`` rotates the starting point so concurrent shards do not all hit
+    key #1 at the same moment (they would exhaust its per-minute limit and
+    then march through the pool in lockstep).
+    """
+
+    def __init__(
+        self,
+        factory: Callable[[str], object],
+        keys: list[str],
+        start: int = 0,
+    ) -> None:
         self._factory = factory
-        self._keys = list(keys)
+        keys = list(keys)
+        if keys and start:
+            offset = start % len(keys)
+            keys = keys[offset:] + keys[:offset]
+        self._keys = keys
         self._index = 0
         self._clients: dict[int, object] = {}
         self._exhausted: dict[int, str] = {}

@@ -60,9 +60,17 @@ def _client_and_model(model: str):
             else OpenAI(api_key=key, timeout=120.0, max_retries=0)
         )
 
-    client = RotatingChatClient(factory, keys)
-    print(f"[llm] key 池: {len(keys)} 个可用 key", flush=True)
+    client = RotatingChatClient(factory, keys, start=_shard_offset())
+    print(f"[llm] key 池: {len(keys)} 个可用 key，起始 key #{client.active_key_number}", flush=True)
     return client, model_name
+
+
+def _shard_offset() -> int:
+    """1-based shard index from CI, so parallel shards start on different keys."""
+    try:
+        return max(0, int(os.environ.get("SHARD_INDEX", "1")) - 1)
+    except ValueError:
+        return 0
 
 
 GEMINI_MODEL_CANDIDATES = (

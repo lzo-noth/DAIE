@@ -241,13 +241,17 @@ def _daily_quota_exhausted(exc: Exception) -> bool:
     """A 429 caused by a per-day quota will not recover within a retry window.
 
     Retrying it with exponential backoff only burns hours (each episode took
-    ~28 minutes in practice). Rate-per-minute limits still deserve retries.
+    ~28 minutes in practice). Rate-per-minute limits still deserve retries:
+    Gemini's per-minute message also says "quota exceeded"/"resource
+    exhausted", so those words alone must not mark a key as permanently dead.
     """
     text = str(exc).lower()
     status = getattr(exc, "status_code", None) or getattr(
         getattr(exc, "response", None), "status_code", None
     )
     if status != 429 and "429" not in text:
+        return False
+    if "per minute" in text or "per-minute" in text or "perminute" in text:
         return False
     return any(
         marker in text
@@ -265,17 +269,17 @@ def _daily_quota_exhausted(exc: Exception) -> bool:
 def is_key_failure(exc: Exception) -> bool:
     """True when another API key might succeed where this one failed.
 
-    Daily quota, exhausted rate limits and auth/permission rejections are
-    properties of the key, not of the request. Anything else (malformed
-    prompt, model not found, transient network error) must not silently burn
-    through the whole key pool.
+    Daily quota (the key is dead until tomorrow) and auth/permission
+    rejections are properties of the key. Everything else -- including
+    per-minute rate limits, malformed prompts and unknown models -- must not
+    advance to the next key, or one busy minute would exhaust the whole pool.
     """
     status = getattr(exc, "status_code", None) or getattr(
         getattr(exc, "response", None), "status_code", None
     )
     if _daily_quota_exhausted(exc):
         return True
-    return status in (401, 403, 429)
+    return status in (401, 403)
 
 
 def _create_with_retry(client, attempts: int | None = None, **kwargs):
