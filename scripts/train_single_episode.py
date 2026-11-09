@@ -60,6 +60,7 @@ from dai_detect.temporal_decoder import decode_windows
 MIN_BOUNDARY_EVENT_RECALL = 0.80
 MAX_BOUNDARY_FALSE_POSITIVES_PER_HOUR = 15.0
 MAX_EVENT_FALSE_POSITIVES_PER_HOUR = 15.0
+MIN_AD_S = 10.0
 MAX_CALIBRATION_ROUNDS = 5
 THRESHOLD_TOLERANCE = 0.01
 
@@ -1059,7 +1060,10 @@ def _choose_boundary_thresholds(
                     "onset_threshold": onset_threshold,
                     "offset_threshold": offset_threshold,
                 }
-                refined = refine_events(item["events"], change, search_s=2.5, min_duration=6.0)
+                # 与部署端一致：精修不能把事件缩到比最短广告时长还短。
+                refined = refine_events(
+                    item["events"], change, search_s=2.5, min_duration=MIN_AD_S
+                )
             else:
                 refined = []
             metrics = evaluate_events(refined, item["gt"])
@@ -1539,7 +1543,9 @@ def _event_metrics(
                     "scores": sample.change_scores,
                     "kind": "heuristic",
                 }
-            refined = refine_events(events, change, search_s=2.5, min_duration=6.0)
+            refined = refine_events(
+                events, change, search_s=2.5, min_duration=MIN_AD_S
+            )
         else:
             refined = [
                 {
