@@ -511,6 +511,31 @@ class SeedCacheTest(unittest.TestCase):
             self.assertEqual(kept[0]["source_sha256"], "s" * 64)
             self.assertEqual(report["transcripts.jsonl"]["from_other_set"], 1)
 
+    def test_malformed_blind_index_row_is_dropped_so_it_can_be_rewritten(self) -> None:
+        from scripts.seed_annotation_cache import seed
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "base"
+            out = root / "out"
+            base.mkdir()
+            out.mkdir()
+            identity = {"feed": "B", "episode": "1", "source_sha256": "s" * 64}
+            train = root / "train.jsonl"
+            train.write_text("", encoding="utf-8")
+            blind = root / "blind.jsonl"
+            blind.write_text(json.dumps(identity) + "\n", encoding="utf-8")
+            (base / "blind_generated.jsonl").write_text(
+                json.dumps({**identity, "segments": [{"start_s": 0.0, "end_s": 1.0}]})
+                + "\n",
+                encoding="utf-8",
+            )
+            report = seed(base, out, train, blind)
+            self.assertEqual(
+                (out / "blind_generated.jsonl").read_text(encoding="utf-8"), ""
+            )
+            self.assertEqual(report["blind_generated.jsonl"]["kept"], 0)
+
     def test_transcript_rows_never_leak_into_blind_generated(self) -> None:
         from scripts.seed_annotation_cache import seed
 

@@ -110,11 +110,16 @@ def seed(
             # 同一份转写可能因盲测轮换而换了侧，复用时不重复消耗 ASR；
             # 但只有同 schema 的对端文件才允许补位。
             kept_keys = list(merged)
-            _write(out_dir / name, [merged[key] for key in kept_keys])
+            kept_rows = [merged[key] for key in kept_keys]
+            if name == "blind_generated.jsonl":
+                # 该文件是"真值索引"，没有 ground_truth 的行是历史污染的
+                # 转写行。留着它会占住身份键，让正式索引行再也写不回来。
+                kept_rows = [row for row in kept_rows if row.get("ground_truth")]
+            _write(out_dir / name, kept_rows)
             report[name] = {
                 "candidates": len(seen),
-                "kept": len(kept_keys),
-                "dropped": len(seen) - len(kept_keys),
+                "kept": len(kept_rows),
+                "dropped": len(seen) - len(kept_rows),
                 "from_other_set": len([key for key in kept_keys if key not in own_keys]),
             }
     return report

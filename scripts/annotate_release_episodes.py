@@ -292,7 +292,13 @@ def main() -> int:
     if args.blind_manifest_out:
         args.blind_manifest_out.parent.mkdir(parents=True, exist_ok=True)
         existing_blind = (
-            {_identity_key(row) for row in _load_jsonl(args.blind_manifest_out)}
+            {
+                _identity_key(row)
+                for row in _load_jsonl(args.blind_manifest_out)
+                # 缺 ground_truth 的行不是有效索引（旧版本混进来的转写行），
+                # 必须重写成正式索引行。
+                if row.get("ground_truth")
+            }
             if args.resume
             else set()
         )
