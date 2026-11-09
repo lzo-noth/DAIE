@@ -263,6 +263,46 @@ class CoverageGateTest(unittest.TestCase):
             self.assertFalse(report["complete"])
             self.assertTrue(report["blind_generated_missing"])
 
+    def test_non_index_row_without_ground_truth_is_reported_not_crashed(self) -> None:
+        """A transcript row leaking into blind_generated must fail the gate."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            train = root / "train.jsonl"
+            train.write_text("", encoding="utf-8")
+            blind = root / "blind.jsonl"
+            blind.write_text(
+                json.dumps({"feed": "B", "episode": "9", "source_sha256": "s" * 64})
+                + "\n",
+                encoding="utf-8",
+            )
+            data = root / "data"
+            data.mkdir()
+            (data / "annotations.jsonl").write_text("", encoding="utf-8")
+            (data / "blind_annotations.jsonl").write_text(
+                json.dumps({"feed": "B", "episode": "9", "source_sha256": "s" * 64})
+                + "\n",
+                encoding="utf-8",
+            )
+            (data / "blind_generated.jsonl").write_text(
+                json.dumps(
+                    {
+                        "feed": "B",
+                        "episode": "9",
+                        "source_sha256": "s" * 64,
+                        "segments": [{"start_s": 0.0, "end_s": 2.0, "text": "hi"}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (data / "blind_gt").mkdir()
+            report = verify(train, blind, data, [], allow_unavailable=False)
+            self.assertFalse(report["complete"])
+            self.assertEqual(
+                report["blind_ground_truth_missing"],
+                [{"feed": "B", "episode": "9", "source_sha256": "s" * 64}],
+            )
+
     def test_explicit_unavailable_rows_are_accounted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -470,6 +510,39 @@ class SeedCacheTest(unittest.TestCase):
             self.assertEqual(len(kept), 1)
             self.assertEqual(kept[0]["source_sha256"], "s" * 64)
             self.assertEqual(report["transcripts.jsonl"]["from_other_set"], 1)
+
+    def test_transcript_rows_never_leak_into_blind_generated(self) -> None:
+        from scripts.seed_annotation_cache import seed
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "base"
+            out = root / "out"
+            base.mkdir()
+            out.mkdir()
+            identity = {"feed": "B", "episode": "1", "source_sha256": "s" * 64}
+            train = root / "train.jsonl"
+            train.write_text("", encoding="utf-8")
+            blind = root / "blind.jsonl"
+            blind.write_text(json.dumps(identity) + "\n", encoding="utf-8")
+            (base / "blind_transcripts.jsonl").write_text(
+                json.dumps({**identity, "segments": [{"start_s": 0.0, "end_s": 1.0, "text": "hi"}]})
+                + "\n",
+                encoding="utf-8",
+            )
+            (base / "blind_generated.jsonl").write_text(
+                json.dumps({**identity, "ground_truth": "b.json"}) + "\n",
+                encoding="utf-8",
+            )
+            seed(base, out, train, blind)
+            generated = [
+                json.loads(line)
+                for line in (out / "blind_generated.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(generated), 1)
+            self.assertEqual(generated[0]["ground_truth"], "b.json")
+            self.assertNotIn("segments", generated[0])
 
 
 class QuotaFailureTest(unittest.TestCase):

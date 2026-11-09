@@ -99,8 +99,11 @@ def verify(
     gt_missing: list[Identity] = []
     gt_sha_mismatch: list[dict] = []
     for row in generated_rows:
-        gt_path = gt_dir / Path(str(row.get("ground_truth") or "")).name
-        if not gt_path.exists():
+        # 空 ground_truth 说明该行不是真值索引（例如误把转写行写进来），
+        # 不能当成"文件名是空串"去读目录本身。
+        name = Path(str(row.get("ground_truth") or "")).name
+        gt_path = gt_dir / name if name else None
+        if gt_path is None or not gt_path.is_file():
             gt_missing.append(_identity(row))
             continue
         payload = json.loads(gt_path.read_text(encoding="utf-8"))

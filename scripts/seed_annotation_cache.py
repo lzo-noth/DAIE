@@ -8,7 +8,11 @@ no longer in the manifest and (b) leave stale ``blind_generated`` rows that the
 coverage gate correctly rejects.
 
 This copies only rows whose ``(feed, episode, source_sha256)`` identity is
-still part of the current train or blind manifest.
+still part of the current train or blind manifest. Reuse across the train/blind
+split is allowed only between files that carry the same payload: a demoted
+blind episode's transcript may seed ``transcripts.jsonl``, but it must never
+leak into ``blind_generated.jsonl`` -- that file is the list of ground-truth
+files, and a transcript row there has no ``ground_truth`` path at all.
 """
 
 from __future__ import annotations
@@ -23,6 +27,17 @@ BLIND_FILES = (
     "blind_transcripts.jsonl",
     "blind_generated.jsonl",
 )
+
+# Output file -> the same-schema file on the other side of the split.
+COUNTERPARTS = {
+    "annotations.jsonl": "blind_annotations.jsonl",
+    "transcripts.jsonl": "blind_transcripts.jsonl",
+    "blind_annotations.jsonl": "annotations.jsonl",
+    "blind_transcripts.jsonl": "transcripts.jsonl",
+    # blind_generated 只有一个用途（指向真值文件），没有可复用的对端；
+    # 混入别的文件会让覆盖率门禁读到没有 ground_truth 的行。
+    "blind_generated.jsonl": None,
+}
 
 
 def _load(path: Path) -> list[dict]:
@@ -64,14 +79,6 @@ def seed(
 ) -> dict:
     train_allowed = {_identity(row) for row in _load(train_manifest)}
     blind_allowed = {_identity(row) for row in _load(blind_manifest)}
-    pooled: dict[tuple[str, str, str], dict] = {}
-    # 同一份音频可能因盲测轮换从 blind 侧挪到 train 侧（或反之）。转写与
-    # 标签只绑定音频身份，所以按身份池化后可以跨文件复用，避免重复 ASR
-    # 和重复消耗 LLM 配额。
-    for name in (*TRAIN_FILES, *BLIND_FILES):
-        for source in (out_dir / name, base_dir / name):
-            for row in _load(source):
-                pooled.setdefault(_identity(row), row)
 
     report: dict[str, dict] = {}
     for names, allowed in (
@@ -79,19 +86,36 @@ def seed(
         (BLIND_FILES, blind_allowed),
     ):
         for name in names:
-            own: dict[tuple[str, str, str], dict] = {}
-            for source in (out_dir / name, base_dir / name):
-                for row in _load(source):
-                    own[_identity(row)] = row
-            merged = {**{key: row for key, row in pooled.items() if key in allowed}, **own}
-            kept_keys = [key for key in merged if key in allowed]
-            kept = [merged[key] for key in kept_keys]
-            _write(out_dir / name, kept)
+            merged: dict[tuple[str, str, str], dict] = {}
+            own_keys: set[tuple[str, str, str]] = set()
+            seen: set[tuple[str, str, str]] = set()
+            counterpart = COUNTERPARTS.get(name)
+            sources = [
+                (out_dir / name, True),
+                (base_dir / name, True),
+                (out_dir / counterpart, False) if counterpart else (None, False),
+                (base_dir / counterpart, False) if counterpart else (None, False),
+            ]
+            for path, is_own in sources:
+                if path is None:
+                    continue
+                for row in _load(path):
+                    key = _identity(row)
+                    seen.add(key)
+                    if key not in allowed or key in merged:
+                        continue
+                    merged[key] = row
+                    if is_own:
+                        own_keys.add(key)
+            # 同一份转写可能因盲测轮换而换了侧，复用时不重复消耗 ASR；
+            # 但只有同 schema 的对端文件才允许补位。
+            kept_keys = list(merged)
+            _write(out_dir / name, [merged[key] for key in kept_keys])
             report[name] = {
-                "candidates": len(merged),
-                "kept": len(kept),
-                "dropped": len(merged) - len(kept),
-                "from_other_set": len([key for key in kept_keys if key not in own]),
+                "candidates": len(seen),
+                "kept": len(kept_keys),
+                "dropped": len(seen) - len(kept_keys),
+                "from_other_set": len([key for key in kept_keys if key not in own_keys]),
             }
     return report
 
