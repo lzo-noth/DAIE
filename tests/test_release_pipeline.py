@@ -434,6 +434,43 @@ class SeedCacheTest(unittest.TestCase):
                 (out / "blind_generated.jsonl").read_text(encoding="utf-8"), ""
             )
 
+    def test_demoted_blind_episode_reuses_its_transcript_for_training(self) -> None:
+        from scripts.seed_annotation_cache import seed
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "base"
+            out = root / "out"
+            base.mkdir()
+            out.mkdir()
+            # 旧盲测集里的一集，现在被降级进训练清单。
+            demoted = {"feed": "A", "episode": "1", "source_sha256": "s" * 64}
+            train = root / "train.jsonl"
+            train.write_text(json.dumps(demoted) + "\n", encoding="utf-8")
+            blind = root / "blind.jsonl"
+            blind.write_text("", encoding="utf-8")
+            (base / "blind_transcripts.jsonl").write_text(
+                json.dumps(
+                    {
+                        **demoted,
+                        "segments": [{"start_s": 0.0, "end_s": 2.0, "text": "hi"}],
+                        "results": {},
+                        "ads": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            report = seed(base, out, train, blind)
+            kept = [
+                json.loads(line)
+                for line in (out / "transcripts.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(kept), 1)
+            self.assertEqual(kept[0]["source_sha256"], "s" * 64)
+            self.assertEqual(report["transcripts.jsonl"]["from_other_set"], 1)
+
 
 class QuotaFailureTest(unittest.TestCase):
     def test_daily_quota_is_not_retried(self) -> None:

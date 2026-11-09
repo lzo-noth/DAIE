@@ -64,22 +64,34 @@ def seed(
 ) -> dict:
     train_allowed = {_identity(row) for row in _load(train_manifest)}
     blind_allowed = {_identity(row) for row in _load(blind_manifest)}
+    pooled: dict[tuple[str, str, str], dict] = {}
+    # 同一份音频可能因盲测轮换从 blind 侧挪到 train 侧（或反之）。转写与
+    # 标签只绑定音频身份，所以按身份池化后可以跨文件复用，避免重复 ASR
+    # 和重复消耗 LLM 配额。
+    for name in (*TRAIN_FILES, *BLIND_FILES):
+        for source in (out_dir / name, base_dir / name):
+            for row in _load(source):
+                pooled.setdefault(_identity(row), row)
+
     report: dict[str, dict] = {}
     for names, allowed in (
         (TRAIN_FILES, train_allowed),
         (BLIND_FILES, blind_allowed),
     ):
         for name in names:
-            merged: dict[tuple[str, str, str], dict] = {}
+            own: dict[tuple[str, str, str], dict] = {}
             for source in (out_dir / name, base_dir / name):
                 for row in _load(source):
-                    merged[_identity(row)] = row
-            kept = [row for key, row in merged.items() if key in allowed]
+                    own[_identity(row)] = row
+            merged = {**{key: row for key, row in pooled.items() if key in allowed}, **own}
+            kept_keys = [key for key in merged if key in allowed]
+            kept = [merged[key] for key in kept_keys]
             _write(out_dir / name, kept)
             report[name] = {
                 "candidates": len(merged),
                 "kept": len(kept),
                 "dropped": len(merged) - len(kept),
+                "from_other_set": len([key for key in kept_keys if key not in own]),
             }
     return report
 
