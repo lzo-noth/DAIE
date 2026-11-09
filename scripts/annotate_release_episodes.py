@@ -25,37 +25,43 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dai_detect.feed_identity import canonical_feed_key
 from dai_detect.llm import classify_transcript_segments, merge_ad_segments
+from dai_detect.llm_keys import RotatingChatClient, load_keys
 from scripts.snapshot_audio import snapshot
 
 
 def _client_and_model(model: str):
-    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    gemini_keys = load_keys("GEMINI_API_KEYS", "GEMINI_API_KEY")
+    openai_keys = load_keys("OPENAI_API_KEYS", "OPENAI_API_KEY")
     provider = os.environ.get("LLM_PROVIDER", "").strip().lower()
-    use_gemini = bool(gemini_key) and provider in ("", "auto", "gemini")
-    use_openai = bool(openai_key) and (
+    use_gemini = bool(gemini_keys) and provider in ("", "auto", "gemini")
+    use_openai = bool(openai_keys) and (
         provider in ("", "auto", "openai") or not use_gemini
     )
+    from openai import OpenAI
+
     if use_gemini:
         base_url = os.environ.get(
             "GEMINI_BASE_URL",
             "https://generativelanguage.googleapis.com/v1beta/openai/",
         )
         model_name = model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
-        api_key = gemini_key
+        keys = gemini_keys
     elif use_openai:
         base_url = os.environ.get("OPENAI_BASE_URL") or None
         model_name = model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-        api_key = openai_key
+        keys = openai_keys
     else:
         return None, ""
-    from openai import OpenAI
 
-    client = (
-        OpenAI(api_key=api_key, base_url=base_url, timeout=120.0, max_retries=0)
-        if base_url
-        else OpenAI(api_key=api_key, timeout=120.0, max_retries=0)
-    )
+    def factory(key: str):
+        return (
+            OpenAI(api_key=key, base_url=base_url, timeout=120.0, max_retries=0)
+            if base_url
+            else OpenAI(api_key=key, timeout=120.0, max_retries=0)
+        )
+
+    client = RotatingChatClient(factory, keys)
+    print(f"[llm] key 池: {len(keys)} 个可用 key", flush=True)
     return client, model_name
 
 

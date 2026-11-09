@@ -262,6 +262,22 @@ def _daily_quota_exhausted(exc: Exception) -> bool:
     )
 
 
+def is_key_failure(exc: Exception) -> bool:
+    """True when another API key might succeed where this one failed.
+
+    Daily quota, exhausted rate limits and auth/permission rejections are
+    properties of the key, not of the request. Anything else (malformed
+    prompt, model not found, transient network error) must not silently burn
+    through the whole key pool.
+    """
+    status = getattr(exc, "status_code", None) or getattr(
+        getattr(exc, "response", None), "status_code", None
+    )
+    if _daily_quota_exhausted(exc):
+        return True
+    return status in (401, 403, 429)
+
+
 def _create_with_retry(client, attempts: int | None = None, **kwargs):
     if attempts is None:
         attempts = int(os.environ.get("LLM_RETRY_ATTEMPTS", "9"))
