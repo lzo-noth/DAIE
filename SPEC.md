@@ -150,6 +150,8 @@ DAI 会在同一 URL 背后按请求替换广告，因此 URL、文件名、RSS 
 3. 训练默认强制校验，缺失或冲突即中止；`--allow-unverified-audio` / `--allow-audio-mismatch` 只用于调试。
 4. 盲测在生成时间轴后校验身份：真值必须提供 `audio_id` 与 `audio_id_kind`，本地输入还必须提供 `source_sha256`；身份缺失或冲突都返回非零退出码且不评分。`--allow-audio-mismatch` 不能绕过身份缺失，只能绕过值不一致。
 5. 不能从 URL 重新下载替代快照；重新下载得到的可能是另一个广告变体。
+6. 内容身份 `(feed, episode, source_sha256)` 必须贯穿续跑缓存、分片合并、覆盖率门禁与人工复核；重新下载得到的哈希与清单不一致时，该集记为不可用并阻断发布。
+7. 人工边界复核结果必须绑定所复核音频的 `source_sha256`；无广告集需要 `reviewer`、`reviewed_at`、`listened` 与 `no_ads_confirmed` 的整集确认，`ambiguous_boundary=true` 的复核不能作为真值。
 
 ## 5. 验收标准
 
@@ -166,6 +168,10 @@ DAI 会在同一 URL 背后按请求替换广告，因此 URL、文件名、RSS 
 | 逐集 ASR | 0 | 同上 |
 
 检测范围：只检测 **时长 ≥ 10 秒**的第三方插入广告。训练标签、`min_ad_s` 解码下限与评测分母必须使用同一阈值，短于 10 秒的广告不计入召回分母。
+
+标签维度：每条广告同时记录 `ad_content_type`（第三方广告 / 自我推广 / 正文）、`ad_production_style`（预录制作 / 主播口播 / 不确定）与 `insertion_mechanism`（DAI / 原生剪辑 / 不确定）。单份音频的声学证据无法证明广告是通过 DAI 动态插入的，因此 `insertion_mechanism` 默认 `unknown`，不能把“第三方广告”直接当作“已确认的动态插入”。
+
+盲测集：曾经公开过标签的 episode 及其所属 feed 一律降级为开发集，可用于训练但不计入最终验收。正式盲测必须来自从未公开过真值的新 feed；`blind_manifest` 与 `blind_generated` 的 episode 集合必须完全一致，且每个 GT 的 `source_sha256` 与清单一致。
 
 盲测协议：把完整一集音频交给检测器，隐藏所有人工广告标注；检测器输出时间轴后再用真值评估。盲测脚本 `scripts/blind_test.py` 强制先检测、后评估。
 
