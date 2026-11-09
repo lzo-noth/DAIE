@@ -35,6 +35,10 @@ on:
         description: "跳过该清单里已有的 feed/episode，并与其合并"
         required: false
         default: "datasets/sampled_release_manifest.jsonl"
+      only_feeds:
+        description: "只采样这些 feed（逗号分隔的节目名），留空表示全部"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -64,18 +68,23 @@ jobs:
           LATEST_PER_FEED: ${{ inputs.latest_per_feed }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           EXCLUDE: ${{ inputs.exclude_manifest }}
+          ONLY_FEEDS: ${{ inputs.only_feeds }}
         run: |
           set -euo pipefail
           exclude_args=()
           if [ -n "$EXCLUDE" ] && [ -f "$EXCLUDE" ]; then
             exclude_args+=(--exclude-manifest "$EXCLUDE" --merged-manifest datasets/sampled_release_manifest.jsonl)
           fi
+          only_args=()
+          if [ -n "${ONLY_FEEDS:-}" ]; then
+            only_args+=(--only-feeds "$ONLY_FEEDS")
+          fi
           python scripts/sample_platform_feeds.py \
             --platforms platforms.json \
             --count "$COUNT" --seed "$SEED" \
             --max-per-feed "$MAX_PER_FEED" --latest-per-feed "$LATEST_PER_FEED" \
             --release-tag "$RELEASE_TAG" \
-            "${exclude_args[@]}" \
+            "${exclude_args[@]}" "${only_args[@]}" \
             --out-dir out/sample_audio \
             --manifest out/sample_audio_manifest.jsonl
           ls -lh out/sample_audio | head -30

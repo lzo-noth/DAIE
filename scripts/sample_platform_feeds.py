@@ -178,6 +178,11 @@ def main() -> int:
         type=Path,
         help="把本次结果与 --exclude-manifest 合并后写到该路径（按 feed/episode 去重）",
     )
+    parser.add_argument(
+        "--only-feeds",
+        default="",
+        help="只采样这些 feed（逗号分隔的 name）；用于按需扩充特定节目",
+    )
     args = parser.parse_args()
 
     excluded: set[tuple[str, str]] = set()
@@ -189,6 +194,13 @@ def main() -> int:
             excluded.add((str(row.get("feed") or ""), str(row.get("episode") or "")))
 
     feeds = _load_feeds(args.platforms)
+    only = [name.strip() for name in args.only_feeds.split(",") if name.strip()]
+    if only:
+        feeds = [feed for feed in feeds if feed["name"] in only]
+        found = {feed["name"] for feed in feeds}
+        for name in only:
+            if name not in found:
+                print(f"[feed] platforms.json 没有 {name}", file=sys.stderr)
     if not feeds:
         print("platforms.json 没有可用 feed", file=sys.stderr)
         return 1
