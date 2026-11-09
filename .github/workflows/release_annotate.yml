@@ -135,6 +135,15 @@ jobs:
           mkdir -p out/release
           if [[ "$TRAIN_URL" == http* ]]; then curl -fsSL "$TRAIN_URL" -o out/release/train_manifest.jsonl; else cp "$TRAIN_URL" out/release/train_manifest.jsonl; fi
           if [[ "$BLIND_URL" == http* ]]; then curl -fsSL "$BLIND_URL" -o out/release/blind_manifest.jsonl; else cp "$BLIND_URL" out/release/blind_manifest.jsonl; fi
+      - name: Filter resumed cache to the current manifests
+        if: inputs.resume_run_id != ''
+        run: |
+          set -euo pipefail
+          python scripts/seed_annotation_cache.py \
+            --base-dir out/base \
+            --out-dir out/release \
+            --train-manifest out/release/train_manifest.jsonl \
+            --blind-manifest out/release/blind_manifest.jsonl
       - name: Pick available LLM model
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

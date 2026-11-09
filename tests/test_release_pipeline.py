@@ -391,6 +391,50 @@ class CacheIdentityTest(unittest.TestCase):
             self.assertEqual(len(rows), 2)
 
 
+class SeedCacheTest(unittest.TestCase):
+    def test_resume_cache_is_filtered_to_current_manifests(self) -> None:
+        from scripts.seed_annotation_cache import seed
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "base"
+            out = root / "out"
+            base.mkdir()
+            out.mkdir()
+            train = root / "train.jsonl"
+            train.write_text(
+                json.dumps({"feed": "A", "episode": "1", "source_sha256": "s" * 64})
+                + "\n",
+                encoding="utf-8",
+            )
+            blind = root / "blind.jsonl"
+            blind.write_text("", encoding="utf-8")
+            rows = [
+                {"feed": "A", "episode": "1", "source_sha256": "s" * 64, "ads": []},
+                {"feed": "B", "episode": "1", "source_sha256": "t" * 64, "ads": []},
+            ]
+            (base / "annotations.jsonl").write_text(
+                "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+            )
+            (base / "blind_generated.jsonl").write_text(
+                json.dumps({"feed": "B", "episode": "1", "source_sha256": "t" * 64})
+                + "\n",
+                encoding="utf-8",
+            )
+            report = seed(base, out, train, blind)
+            kept = [
+                json.loads(line)
+                for line in (out / "annotations.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(kept), 1)
+            self.assertEqual(kept[0]["feed"], "A")
+            self.assertEqual(report["annotations.jsonl"]["dropped"], 1)
+            self.assertEqual(
+                (out / "blind_generated.jsonl").read_text(encoding="utf-8"), ""
+            )
+
+
 class QuotaFailureTest(unittest.TestCase):
     def test_daily_quota_is_not_retried(self) -> None:
         from dai_detect.llm import _daily_quota_exhausted

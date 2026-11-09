@@ -95,6 +95,11 @@ def main() -> int:
         default="",
         help="强制作为盲测的 feed 名称（逗号分隔）；给出后不再自动挑选盲测 feed",
     )
+    parser.add_argument(
+        "--blind-feeds-file",
+        type=Path,
+        help="每行一个 feed 名称；名称本身含逗号时用这个（优先于 --blind-feeds）",
+    )
     args = parser.parse_args()
 
     rows = _load(args.manifest)
@@ -117,6 +122,12 @@ def main() -> int:
         groups_by_name.setdefault(str(row.get("feed") or ""), set()).add(_group(row))
 
     forced = [name.strip() for name in args.blind_feeds.split(",") if name.strip()]
+    if args.blind_feeds_file and args.blind_feeds_file.exists():
+        forced = [
+            line.strip()
+            for line in args.blind_feeds_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
     if forced:
         forced_groups: set[str] = set()
         for name in forced:
