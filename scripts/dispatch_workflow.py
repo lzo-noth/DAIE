@@ -14,6 +14,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 
 def _token() -> str:
@@ -36,10 +37,12 @@ def main() -> int:
     parser.add_argument("--workflow", required=True, help="workflow 文件名，如 release_annotate.yml")
     parser.add_argument("--ref", default="main")
     parser.add_argument("--inputs", default="{}", help="workflow inputs 的 JSON")
+    parser.add_argument("--inputs-file", type=Path, help="从文件读取 inputs JSON（避免引号转义问题）")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    inputs = json.loads(args.inputs)
+    raw = args.inputs_file.read_text(encoding="utf-8") if args.inputs_file else args.inputs
+    inputs = json.loads(raw)
     payload = {"ref": args.ref, "inputs": {str(k): str(v) for k, v in inputs.items()}}
     if args.dry_run:
         print(json.dumps({"workflow": args.workflow, "payload": payload}, ensure_ascii=False))
