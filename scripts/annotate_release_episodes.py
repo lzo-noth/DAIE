@@ -338,7 +338,9 @@ def main() -> int:
         feed = str(row.get("feed") or "unknown")
         episode = str(row.get("episode") or Path(source).stem)
         key = _identity_key(row)
-        if key in done_annotations:
+        # 盲测的真值文件不在缓存里（artifact 里也没有），所以盲测行不能因为
+        # "标注已完成"就整集跳过，否则本次 artifact 会一代代丢失 blind_gt。
+        if key in done_annotations and not (blind_handle and args.ground_truth_dir):
             print(f"[resume] 跳过已完成（同一音频哈希）: {feed}/{episode}", flush=True)
             continue
         if key in prefetch_failures:
@@ -575,8 +577,9 @@ def main() -> int:
             for ad in ads
         ]
         annotation = {**identity, "ads": ads}
-        annotation_handle.write(json.dumps(annotation, ensure_ascii=False) + "\n")
-        annotation_handle.flush()
+        if key not in done_annotations:
+            annotation_handle.write(json.dumps(annotation, ensure_ascii=False) + "\n")
+            annotation_handle.flush()
         if blind_handle and args.ground_truth_dir:
             safe = "".join(
                 character if character.isalnum() or character in "-_." else "_"
