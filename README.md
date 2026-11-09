@@ -134,6 +134,12 @@ python scripts/review_ad_boundaries.py --annotations annotations.jsonl \
 
 feed 隔离使用规范化身份：manifest 记录 `feed_url`，隔离键是 URL 的哈希（`dai_detect/feed_identity.py`），显示名只作为没有 URL 时的兜底。这样 `This Week in Tech` 与 `TWiT` 不会因改名被当作两个节目，也不会因换 RSS 地址绕过隔离。
 
+音频内容身份贯穿全流程：续跑缓存、分片合并、覆盖率门禁与人工复核都使用 `(feed, episode, source_sha256)`，不再只用节目名+集名。DAI 会对同一集返回不同广告变体，按名字复用缓存会把 A 的标注贴到 B 上；重新下载到的哈希与清单不一致时，该集会被记为不可用并阻断发布，而不是悄悄换一份音频。
+
+盲测协议：曾经公开过标签、或所属 feed 曾公开过标签的 episode 全部降级为开发集（训练可用，不再计入最终验收）。正式盲测集必须来自**从未公开过真值的新 feed**，且 `blind_manifest == blind_generated`、每个 GT 的 `source_sha256` 与清单一致才算通过覆盖率门禁。仅把标签文件从当前分支删除是不够的：Git 历史里的定版提交仍可读取，所以泄露过的数据不能靠“删文件”恢复保密性。
+
+`llm_provider=auto` 的行为是“优先 Gemini”，**不会**在每日配额耗尽后自动切换到 OpenAI；配额熔断后需要手动把 `llm_provider` 改成 `openai` 再重跑（前提是仓库配置了 `OPENAI_API_KEY`）。
+
 ### 从 platforms.json 抽样并上传到 Release
 
 `sample-release-audio` 手动 workflow 读取仓库里的 [platforms.json](platforms.json)，解析每个 feed 的 RSS enclosure，取最近若干集，按 seed 随机抽取指定数量（优先覆盖不同 feed），下载音频、计算 `source_sha256`，上传 artifact，并附加到 `release_tag` 指定的 Release。它还会把清单写入 `datasets/sampled_release_manifest.jsonl`（可关闭提交）。
