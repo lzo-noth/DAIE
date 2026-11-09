@@ -22,8 +22,12 @@ import numpy as np
 DEFAULT_BOUNDARY_MODEL = Path(__file__).resolve().parents[1] / "models" / "boundary_model.json"
 BOUNDARY_GRID_S = 0.01
 HALF_WINDOW_S = 0.35
+LONG_WINDOW_S = 2.0
 FLUX_WINDOW_S = 0.15
 
+# 短窗（±0.35s）看到的是"变化瞬间"，长窗（±2s）看到的是"持续状态"。
+# 广告插入通常是一段数秒到数十秒的电平/频谱台阶，只有长窗能把它和
+# 节目内的普通剪辑区分开，所以两组尺度并存。
 BOUNDARY_FEATURES: list[str] = [
     "d_loud",
     "d_flat",
@@ -42,29 +46,74 @@ BOUNDARY_FEATURES: list[str] = [
     "s_corr",
     "s_width",
     "s_clip",
+    "d_loud_long",
+    "s_loud_long",
+    "d_flat_long",
+    "d_flux_long",
+    "d_hf_long",
+    "d_corr_long",
+    "d_width_long",
+    "d_rolloff",
+    "s_rolloff",
+    "d_phase",
+    "d_centroid",
+    "s_centroid",
+    "d_mfcc_max",
+    "d_loud_var",
 ]
 
-_SIGNED_INDEX = {
-    "s_loud": 10,
-    "s_flat": 11,
-    "s_hf": 12,
-    "s_entropy": 13,
-    "s_corr": 14,
-    "s_width": 15,
-    "s_clip": 16,
+_SIGNED_INDEX: dict[str, int] = {
+    name: BOUNDARY_FEATURES.index(name)
+    for name in (
+        "s_loud",
+        "s_flat",
+        "s_hf",
+        "s_entropy",
+        "s_corr",
+        "s_width",
+        "s_clip",
+        "s_loud_long",
+        "s_rolloff",
+        "s_centroid",
+    )
 }
 
 
 def _moving_mean(values: np.ndarray, half: int) -> tuple[np.ndarray, np.ndarray]:
+    """Prev/next window means around each frame.
+
+    Both windows include the current frame. Excluding it makes the "previous"
+    window empty at frame 0, so the mean collapses to 0.0 and the first frame of
+    every episode looks like a maximally strong boundary.
+    """
     values = np.asarray(values, dtype=np.float64)
     count = len(values)
     cumulative = np.concatenate(([0.0], np.cumsum(values)))
     index = np.arange(count)
     low = np.maximum(0, index - half)
     high = np.minimum(count, index + half)
-    pre = (cumulative[index] - cumulative[low]) / np.maximum(1, index - low)
+    pre = (cumulative[index + 1] - cumulative[low]) / np.maximum(1, index + 1 - low)
     post = (cumulative[high] - cumulative[index]) / np.maximum(1, high - index)
     return pre, post
+
+
+def _moving_std(values: np.ndarray, half: int) -> tuple[np.ndarray, np.ndarray]:
+    values = np.asarray(values, dtype=np.float64)
+    count = len(values)
+    cumulative = np.concatenate(([0.0], np.cumsum(values)))
+    cumulative2 = np.concatenate(([0.0], np.cumsum(values * values)))
+    index = np.arange(count)
+    low = np.maximum(0, index - half)
+    high = np.minimum(count, index + half)
+
+    def variance(start: np.ndarray, end: np.ndarray) -> np.ndarray:
+        span = np.maximum(1, end - start)
+        mean = (cumulative[end] - cumulative[start]) / span
+        mean2 = (cumulative2[end] - cumulative2[start]) / span
+        return np.maximum(0.0, mean2 - mean * mean)
+
+    return np.sqrt(variance(low, index + 1)), np.sqrt(variance(index, high))
+
 
 
 def _moving_max(values: np.ndarray, half: int) -> np.ndarray:
@@ -80,6 +129,7 @@ def boundary_change_matrix(mono: dict, forensic: dict) -> dict:
     """Compute boundary change features (absolute and signed) on the 10 ms grid."""
     grid = float(mono.get("fine_grid_s") or BOUNDARY_GRID_S)
     half = max(1, int(round(HALF_WINDOW_S / grid)))
+    long_half = max(half, int(round(LONG_WINDOW_S / grid)))
     flux_half = max(1, int(round(FLUX_WINDOW_S / grid)))
 
     loud = np.asarray(mono["fine_loudness_db"], dtype=np.float64)
@@ -94,6 +144,8 @@ def boundary_change_matrix(mono: dict, forensic: dict) -> dict:
     width = np.asarray(forensic["side_mid_db"], dtype=np.float64)
     clip = np.asarray(forensic["clip_ratio"], dtype=np.float64)
     bands = np.asarray(forensic["bands"], dtype=np.float64)
+    rolloff = np.asarray(forensic["rolloff_hz"], dtype=np.float64)
+    phase = np.asarray(forensic["phase_jump"], dtype=np.float64)
 
     count = min(len(loud), len(f_loud))
     if count == 0:
@@ -106,33 +158,71 @@ def boundary_change_matrix(mono: dict, forensic: dict) -> dict:
     loud, flat, mfcc, flux = loud[:count], flat[:count], mfcc[:count], flux[:count]
     f_loud, hf, entropy, corr = f_loud[:count], hf[:count], entropy[:count], corr[:count]
     width, clip, bands = width[:count], clip[:count], bands[:count]
+    rolloff, phase = rolloff[:count], phase[:count]
 
-    def change(series: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        pre, post = _moving_mean(series, half)
+    def change(
+        series: np.ndarray, window: int | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        pre, post = _moving_mean(series, half if window is None else window)
         return np.abs(post - pre), post - pre
 
+    def column(name: str) -> int:
+        return BOUNDARY_FEATURES.index(name)
+
     features = np.zeros((count, len(BOUNDARY_FEATURES)), dtype=np.float64)
-    features[:, 0], features[:, _SIGNED_INDEX["s_loud"]] = change(loud)
-    features[:, 1], features[:, _SIGNED_INDEX["s_flat"]] = change(flat)
+    features[:, column("d_loud")], features[:, column("s_loud")] = change(loud)
+    features[:, column("d_flat")], features[:, column("s_flat")] = change(flat)
 
     mfcc_delta = np.zeros_like(mfcc)
     for dimension in range(mfcc.shape[1]):
         pre, post = _moving_mean(mfcc[:, dimension], half)
         mfcc_delta[:, dimension] = post - pre
-    features[:, 2] = np.sqrt(np.mean(mfcc_delta ** 2, axis=1))
+    features[:, column("d_mfcc")] = np.sqrt(np.mean(mfcc_delta ** 2, axis=1))
+    features[:, column("d_mfcc_max")] = np.max(np.abs(mfcc_delta), axis=1)
     flux_abs, _ = change(flux)
-    features[:, 3] = np.maximum(_moving_max(flux, flux_half), flux_abs)
-    features[:, 4], features[:, _SIGNED_INDEX["s_hf"]] = change(hf)
-    features[:, 5], features[:, _SIGNED_INDEX["s_entropy"]] = change(entropy)
-    features[:, 6], features[:, _SIGNED_INDEX["s_corr"]] = change(corr)
-    features[:, 7], features[:, _SIGNED_INDEX["s_width"]] = change(width)
-    features[:, 8], features[:, _SIGNED_INDEX["s_clip"]] = change(clip)
+    features[:, column("d_flux")] = np.maximum(_moving_max(flux, flux_half), flux_abs)
+    features[:, column("d_hf")], features[:, column("s_hf")] = change(hf)
+    features[:, column("d_entropy")], features[:, column("s_entropy")] = change(entropy)
+    features[:, column("d_corr")], features[:, column("s_corr")] = change(corr)
+    features[:, column("d_width")], features[:, column("s_width")] = change(width)
+    features[:, column("d_clip")], features[:, column("s_clip")] = change(clip)
 
     band_delta = np.zeros_like(bands)
     for dimension in range(bands.shape[1]):
         pre, post = _moving_mean(bands[:, dimension], half)
         band_delta[:, dimension] = post - pre
-    features[:, 9] = np.sqrt(np.mean(band_delta ** 2, axis=1))
+    features[:, column("d_band")] = np.sqrt(np.mean(band_delta ** 2, axis=1))
+
+    # 长窗：整段广告的电平/频谱台阶，短窗只会看到台阶边缘的尖峰。
+    features[:, column("d_loud_long")], features[:, column("s_loud_long")] = change(
+        loud, long_half
+    )
+    features[:, column("d_flat_long")], _ = change(flat, long_half)
+    features[:, column("d_flux_long")], _ = change(flux, long_half)
+    features[:, column("d_hf_long")], _ = change(hf, long_half)
+    features[:, column("d_corr_long")], _ = change(corr, long_half)
+    features[:, column("d_width_long")], _ = change(width, long_half)
+
+    # 频谱重心与相位跳变：拼接式插入的广告常伴随滚降频率与相位不连续。
+    weights = np.power(10.0, bands / 10.0)
+    positions = np.arange(bands.shape[1], dtype=np.float64)
+    centroid = (weights @ positions) / np.maximum(
+        weights.sum(axis=1), 1e-9
+    )
+    features[:, column("d_centroid")], features[:, column("s_centroid")] = change(
+        centroid
+    )
+    features[:, column("d_rolloff")], features[:, column("s_rolloff")] = change(
+        rolloff
+    )
+    features[:, column("d_phase")], _ = change(phase)
+
+    # 电平起伏的变化率：广告段通常比节目本体电平更平稳（配音+固定音量）。
+    pre_std, post_std = _moving_std(loud, long_half)
+    features[:, column("d_loud_var")] = np.log(
+        (post_std + 1e-3) / (pre_std + 1e-3)
+    )
+
     features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
 
     times = np.arange(count, dtype=np.float64) * grid
@@ -233,9 +323,31 @@ class BoundaryModel:
         return self.offset.predict(features, names, self.features)
 
 
+_BASE_WEIGHTS = {
+    "d_loud": 0.30,
+    "d_flat": 0.02,
+    "d_mfcc": 0.18,
+    "d_flux": 0.02,
+    "d_hf": 0.12,
+    "d_entropy": 0.04,
+    "d_corr": 0.10,
+    "d_width": 0.06,
+    "d_clip": 0.02,
+    "d_band": 0.16,
+    "d_loud_long": 0.20,
+    "d_flat_long": 0.04,
+    "d_flux_long": 0.05,
+    "d_hf_long": 0.08,
+    "d_corr_long": 0.06,
+    "d_width_long": 0.04,
+    "d_rolloff": 0.05,
+    "d_phase": 0.05,
+    "d_centroid": 0.06,
+    "d_mfcc_max": 0.04,
+    "d_loud_var": 0.04,
+}
 BASE_WEIGHTS = np.asarray(
-    [0.30, 0.02, 0.18, 0.02, 0.12, 0.04, 0.10, 0.06, 0.02, 0.16, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    dtype=np.float64,
+    [_BASE_WEIGHTS.get(name, 0.0) for name in BOUNDARY_FEATURES], dtype=np.float64
 )
 DIRECTION_WEIGHTS = {
     "s_loud": 0.25,
@@ -245,6 +357,9 @@ DIRECTION_WEIGHTS = {
     "s_corr": 0.08,
     "s_width": 0.05,
     "s_clip": 0.02,
+    "s_loud_long": 0.20,
+    "s_centroid": 0.05,
+    "s_rolloff": 0.04,
 }
 
 

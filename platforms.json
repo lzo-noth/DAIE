@@ -14,6 +14,31 @@
         "name": "99% Invisible",
         "slug": "simplecast-99pi",
         "url": "https://feeds.simplecast.com/BqbsxVfO"
+      },
+      {
+        "name": "Freakonomics Radio",
+        "slug": "simplecast-freakonomics",
+        "url": "https://feeds.simplecast.com/Y8lFbOT4"
+      },
+      {
+        "name": "Radiolab",
+        "slug": "simplecast-radiolab",
+        "url": "https://feeds.simplecast.com/EmVW7VGp"
+      },
+      {
+        "name": "Conan O'Brien Needs a Friend",
+        "slug": "simplecast-conan",
+        "url": "https://feeds.simplecast.com/dHoohVNH"
+      },
+      {
+        "name": "Hidden Brain",
+        "slug": "simplecast-hiddenbrain",
+        "url": "https://feeds.simplecast.com/kwWc0lhf"
+      },
+      {
+        "name": "Last Podcast On The Left",
+        "slug": "simplecast-lpotl",
+        "url": "https://feeds.simplecast.com/dCXMIpJz"
       }
     ]
   },
@@ -27,6 +52,41 @@
         "name": "The Rest Is History",
         "slug": "megaphone-restishistory",
         "url": "https://feeds.megaphone.fm/GLT4787413333"
+      },
+      {
+        "name": "The Rewatchables",
+        "slug": "megaphone-rewatchables",
+        "url": "https://feeds.megaphone.fm/the-rewatchables"
+      },
+      {
+        "name": "How I Built This with Guy Raz",
+        "slug": "megaphone-howibuiltthis",
+        "url": "https://feeds.megaphone.fm/VMP2035168248"
+      },
+      {
+        "name": "The Vergecast",
+        "slug": "megaphone-vergecast",
+        "url": "https://feeds.megaphone.fm/vergecast"
+      },
+      {
+        "name": "Criminal",
+        "slug": "megaphone-criminal",
+        "url": "https://feeds.megaphone.fm/VMP7924981569"
+      },
+      {
+        "name": "The Bill Simmons Podcast",
+        "slug": "megaphone-billsimmons",
+        "url": "https://feeds.megaphone.fm/the-bill-simmons-podcast"
+      },
+      {
+        "name": "Pivot",
+        "slug": "megaphone-pivot",
+        "url": "https://feeds.megaphone.fm/pivot"
+      },
+      {
+        "name": "The Prof G Pod",
+        "slug": "megaphone-profg",
+        "url": "https://feeds.megaphone.fm/WWO6655869236"
       }
     ]
   },
@@ -58,6 +118,29 @@
         "name": "The Dollop",
         "slug": "art19-dollop",
         "url": "https://rss.art19.com/dollop"
+      },
+      {
+        "name": "Armchair Expert with Dax Shepard",
+        "slug": "art19-armchair",
+        "url": "https://rss.art19.com/armchair-expert"
+      }
+    ]
+  },
+  {
+    "platform": "Audioboom",
+    "owner": "Audioboom",
+    "delivery": "rss_stitched",
+    "notes": "Dynamic ad insertion on download; Crooked Media shows are hosted here.",
+    "feeds": [
+      {
+        "name": "Pod Save America",
+        "slug": "audioboom-psa",
+        "url": "https://audioboom.com/channels/5166624.rss"
+      },
+      {
+        "name": "Lovett or Leave It",
+        "slug": "audioboom-lovett",
+        "url": "https://audioboom.com/channels/5166622.rss"
       }
     ]
   },
@@ -71,6 +154,16 @@
         "name": "Australian Financial Review: Tech Zero",
         "slug": "omny-afr",
         "url": "https://www.omnycontent.com/d/playlist/88b564ea-a9a6-4751-910a-a5d800019396/2f793617-f686-467c-af79-ae9f005cd5a4/d784902e-c17c-4f15-a2a0-ae9f005e7efa/podcast.rss"
+      },
+      {
+        "name": "My Favorite Murder",
+        "slug": "omny-mfm",
+        "url": "https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/bdde8bb3-169d-43b1-91d3-b24c0047969c/f450d41f-16bc-4ecd-8f6c-b24c004796e2/podcast.rss"
+      },
+      {
+        "name": "Revisionist History",
+        "slug": "omny-revisionist",
+        "url": "https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/0e563f45-9d14-4ce8-8ef0-ae32006cd7e7/0d4cc74d-fff7-4b89-8818-ae32006cd7f0/podcast.rss"
       }
     ]
   },
@@ -182,6 +275,37 @@
         "name": "Programming Throwdown",
         "slug": "feedburner-throwdown",
         "url": "https://feeds.feedburner.com/ProgrammingThrowdown"
+      }
+    ]
+  },
+  {
+    "platform": "NPR",
+    "owner": "NPR",
+    "delivery": "rss_stitched",
+    "notes": "Underwriting credits read by hosts, not stitched third-party ad blocks; useful as hard negatives.",
+    "feeds": [
+      {
+        "name": "Planet Money",
+        "slug": "npr-planetmoney",
+        "url": "https://feeds.npr.org/510289/podcast.xml"
+      },
+      {
+        "name": "Fresh Air",
+        "slug": "npr-freshair",
+        "url": "https://feeds.npr.org/381444908/podcast.xml"
+      }
+    ]
+  },
+  {
+    "platform": "Transistor",
+    "owner": "Transistor.fm",
+    "delivery": "rss_stitched",
+    "notes": "Host-read sponsorships; served from the origin feed.",
+    "feeds": [
+      {
+        "name": "Acquired",
+        "slug": "transistor-acquired",
+        "url": "https://feeds.transistor.fm/acquired"
       }
     ]
   },
