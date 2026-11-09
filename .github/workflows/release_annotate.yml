@@ -23,6 +23,10 @@ on:
         description: "LLM 模型（留空则自动探测可用模型）"
         required: false
         default: ""
+      llm_provider:
+        description: "LLM 提供方：auto / gemini / openai（Gemini 配额耗尽时切 openai）"
+        required: false
+        default: "auto"
       labels_source:
         description: "标签来源（llm_weak 待人工校对；人工改完后填 human）"
         required: false
@@ -136,10 +140,12 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           LLM_MODEL: ${{ inputs.llm_model }}
+          LLM_PROVIDER: ${{ inputs.llm_provider }}
         run: |
           set -euo pipefail
           for attempt in 1 2 3; do
-            if python scripts/annotate_release_episodes.py --pick-model --model "$LLM_MODEL" | tee pick_model.log; then
+            if python scripts/annotate_release_episodes.py --pick-model \
+              --provider "$LLM_PROVIDER" --model "$LLM_MODEL" | tee pick_model.log; then
               break
             fi
             echo "model probe failed (attempt $attempt)"
@@ -159,6 +165,7 @@ jobs:
           REQUEST_INTERVAL: ${{ inputs.request_interval }}
           SHARD_INDEX: ${{ matrix.shard }}
           SHARD_COUNT: ${{ inputs.shard_count }}
+          LLM_PROVIDER: ${{ inputs.llm_provider }}
         run: |
           set -euo pipefail
           python scripts/annotate_release_episodes.py \
@@ -167,7 +174,7 @@ jobs:
             --transcripts-out out/release/transcripts.jsonl \
             --snapshot-dir out/release/snapshots \
             --whisper-model "$WHISPER_MODEL" --language "$LANGUAGE" \
-            --model "$LLM_MODEL" \
+            --model "$LLM_MODEL" --provider "$LLM_PROVIDER" \
             --labels-source "$LABELS_SOURCE" --allow-empty-ads \
             --batch-size "$BATCH_SIZE" --request-interval "$REQUEST_INTERVAL" \
             --shard-index "$((SHARD_INDEX - 1))" --shard-count "$SHARD_COUNT" \
@@ -183,6 +190,7 @@ jobs:
           REQUEST_INTERVAL: ${{ inputs.request_interval }}
           SHARD_INDEX: ${{ matrix.shard }}
           SHARD_COUNT: ${{ inputs.shard_count }}
+          LLM_PROVIDER: ${{ inputs.llm_provider }}
         run: |
           set -euo pipefail
           python scripts/annotate_release_episodes.py \
@@ -193,7 +201,7 @@ jobs:
             --ground-truth-dir out/release/blind_gt \
             --blind-manifest-out out/release/blind_generated.jsonl \
             --whisper-model "$WHISPER_MODEL" --language "$LANGUAGE" \
-            --model "$LLM_MODEL" \
+            --model "$LLM_MODEL" --provider "$LLM_PROVIDER" \
             --labels-source "$LABELS_SOURCE" --allow-empty-ads \
             --batch-size "$BATCH_SIZE" --request-interval "$REQUEST_INTERVAL" \
             --shard-index "$((SHARD_INDEX - 1))" --shard-count "$SHARD_COUNT" \

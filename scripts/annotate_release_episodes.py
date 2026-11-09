@@ -31,14 +31,19 @@ from scripts.snapshot_audio import snapshot
 def _client_and_model(model: str):
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
     openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if gemini_key:
+    provider = os.environ.get("LLM_PROVIDER", "").strip().lower()
+    use_gemini = bool(gemini_key) and provider in ("", "auto", "gemini")
+    use_openai = bool(openai_key) and (
+        provider in ("", "auto", "openai") or not use_gemini
+    )
+    if use_gemini:
         base_url = os.environ.get(
             "GEMINI_BASE_URL",
             "https://generativelanguage.googleapis.com/v1beta/openai/",
         )
         model_name = model or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
         api_key = gemini_key
-    elif openai_key:
+    elif use_openai:
         base_url = os.environ.get("OPENAI_BASE_URL") or None
         model_name = model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         api_key = openai_key
@@ -61,6 +66,21 @@ GEMINI_MODEL_CANDIDATES = (
     "gemini-2.5-flash",
     "gemini-2.0-flash-lite",
 )
+OPENAI_MODEL_CANDIDATES = (
+    "gpt-4o-mini",
+    "gpt-4.1-mini",
+    "gpt-4.1-nano",
+    "gpt-5-mini",
+)
+
+
+def _candidate_models(llm_model: str) -> list[str]:
+    provider = os.environ.get("LLM_PROVIDER", "").strip().lower()
+    if provider == "openai" or (provider in ("", "auto") and not os.environ.get("GEMINI_API_KEY", "").strip()):
+        pool = OPENAI_MODEL_CANDIDATES
+    else:
+        pool = GEMINI_MODEL_CANDIDATES
+    return [llm_model] + [name for name in pool if name != llm_model]
 
 
 def _probe_model(client, model: str) -> str:
@@ -157,6 +177,11 @@ def main() -> int:
     parser.add_argument("--compute-type", default="int8")
     parser.add_argument("--model", default="", help="LLM 模型名")
     parser.add_argument(
+        "--provider",
+        default="",
+        help="强制 provider：gemini / openai（留空按 LLM_PROVIDER 或自动优先 Gemini）",
+    )
+    parser.add_argument(
         "--pick-model", action="store_true", help="探测可用 LLM 模型，成功时打印 MODEL=<name>"
     )
     parser.add_argument("--batch-size", type=int, default=12)
@@ -171,16 +196,22 @@ def main() -> int:
     parser.add_argument("--max-gap", type=float, default=1.0)
     parser.add_argument("--min-confidence", type=float, default=0.5)
     parser.add_argument("--allow-empty-ads", action="store_true")
+    parser.add_argument(
+        "--max-consecutive-llm-failures",
+        type=int,
+        default=2,
+        help="连续多少次 LLM 失败后中止分片（配额耗尽时避免空转数小时），0 表示不限制",
+    )
     args = parser.parse_args()
+    if args.provider:
+        os.environ["LLM_PROVIDER"] = args.provider
 
     client, llm_model = _client_and_model(args.model)
     if client is None:
         print("缺少 GEMINI_API_KEY/OPENAI_API_KEY，无法生成 LLM 标注", file=sys.stderr)
         return 2
     if args.pick_model:
-        candidates = [llm_model]
-        if os.environ.get("GEMINI_API_KEY", "").strip():
-            candidates += [name for name in GEMINI_MODEL_CANDIDATES if name != llm_model]
+        candidates = _candidate_models(llm_model)
         for candidate in candidates:
             error = _probe_model(client, candidate)
             if not error:
@@ -275,6 +306,8 @@ def main() -> int:
     total_episodes = 0
     failures: list[dict] = []
     unavailable: list[dict] = []
+    consecutive_llm_failures = 0
+    aborted_reason = ""
     for row in rows:
         source = str(row.get("audio_url") or row.get("audio") or "")
         if not source:
@@ -413,6 +446,7 @@ def main() -> int:
                 # 单集失败不终止整批：转写立即落盘，配额恢复后 --resume 只重跑 LLM。
                 detail = f"{type(exc).__name__}: {str(exc).replace(chr(10), ' ')[:500]}"
                 failures.append({"feed": feed, "episode": episode, "error": detail})
+                consecutive_llm_failures += 1
                 print(
                     f"[fail] {feed}/{episode}: LLM 分类失败，已保留转写; "
                     f"耗时 {time.time() - began:.0f}s; 错误 {detail}",
@@ -432,7 +466,18 @@ def main() -> int:
                     + "\n"
                 )
                 transcript_handle.flush()
+                if (
+                    args.max_consecutive_llm_failures > 0
+                    and consecutive_llm_failures >= args.max_consecutive_llm_failures
+                ):
+                    aborted_reason = (
+                        f"连续 {consecutive_llm_failures} 集 LLM 调用失败，"
+                        f"疑似配额耗尽：{detail}"
+                    )
+                    print(f"[abort] {aborted_reason}", flush=True)
+                    break
                 continue
+            consecutive_llm_failures = 0
             ads = merge_ad_segments(
                 segments, results, max_gap_s=args.max_gap, min_confidence=args.min_confidence
             )
@@ -549,6 +594,7 @@ def main() -> int:
         "failed_rows": len(failures),
         "missing_rows": len(incomplete),
         "complete": not incomplete and not unavailable,
+        "aborted": aborted_reason,
         "unavailable": unavailable,
         "failed": failures,
     }

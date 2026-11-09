@@ -43,13 +43,56 @@ def _native_models(key: str) -> tuple[int | None, list[str], str]:
         return first_status, [], f"{type(exc).__name__}: {exc}"[:200]
 
 
+def _probe_openai(key: str) -> dict:
+    """Probe the OpenAI key independently of the Gemini key.
+
+    Both keys can be configured at once; Gemini wins in the annotation script,
+    so a Gemini daily-quota exhaustion hides whether OpenAI still has capacity.
+    """
+    from openai import OpenAI
+
+    client = OpenAI(api_key=key, timeout=60.0, max_retries=0)
+    candidates = ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-5-mini"]
+    results = []
+    for model in candidates:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "Reply with JSON: {\"ok\":true}."},
+                    {"role": "user", "content": "ping"},
+                ],
+                temperature=0,
+            )
+            text = response.choices[0].message.content or ""
+            results.append({"model": model, "ok": True, "text": text[:120]})
+            print("openai model ok:", model, text[:80])
+        except Exception as exc:  # noqa: BLE001
+            detail = f"{type(exc).__name__}: {exc}"[:220]
+            results.append({"model": model, "ok": False, "error": detail})
+            print("openai model failed:", model, detail[:160])
+    return {"key_present": True, "models": results}
+
+
 def main() -> int:
     key = os.environ.get("GEMINI_API_KEY", "").strip()
+    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    result: dict = {}
+    if openai_key:
+        result["openai"] = _probe_openai(openai_key)
+    else:
+        result["openai"] = {"key_present": False}
+        print("OPENAI_API_KEY is not configured")
     if not key:
         print("GEMINI_API_KEY is not configured")
-        return 1
+        out = Path("out")
+        out.mkdir(exist_ok=True)
+        (out / "llm_check.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return 0 if openai_key else 1
 
-    result: dict = {"key_present": True}
+    result["key_present"] = True
     status, models, mode = _native_models(key)
     result.update({"native_status": status, "auth_mode": mode, "models": models[:80]})
     print(f"native models status={status} auth={mode} count={len(models)}")

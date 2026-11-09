@@ -20,6 +20,7 @@ jobs:
       - name: Check key and models
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           mkdir -p out
           python scripts/check_llm.py | tee out/check.log
