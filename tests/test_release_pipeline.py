@@ -289,6 +289,28 @@ class PublishHoldoutTest(unittest.TestCase):
             self.assertFalse(index["holdout"]["published"])
 
 
+class QuotaFailureTest(unittest.TestCase):
+    def test_daily_quota_is_not_retried(self) -> None:
+        from dai_detect.llm import _daily_quota_exhausted
+
+        class QuotaError(Exception):
+            status_code = 429
+
+        self.assertTrue(
+            _daily_quota_exhausted(
+                QuotaError("429 quota exceeded: generate_content_per_day")
+            )
+        )
+
+    def test_per_minute_rate_limit_is_retried(self) -> None:
+        from dai_detect.llm import _daily_quota_exhausted
+
+        class RateError(Exception):
+            status_code = 429
+
+        self.assertFalse(_daily_quota_exhausted(RateError("429 too many requests per minute")))
+
+
 class FeedIdentityTest(unittest.TestCase):
     def test_same_url_different_names_share_a_key(self) -> None:
         url = "https://feeds.megaphone.fm/GLT4787413333/"

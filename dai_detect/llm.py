@@ -237,11 +237,41 @@ def _describe_error(exc: Exception) -> str:
     return f"{type(exc).__name__}(status={status}): {text}"
 
 
-def _create_with_retry(client, attempts: int = 9, **kwargs):
+def _daily_quota_exhausted(exc: Exception) -> bool:
+    """A 429 caused by a per-day quota will not recover within a retry window.
+
+    Retrying it with exponential backoff only burns hours (each episode took
+    ~28 minutes in practice). Rate-per-minute limits still deserve retries.
+    """
+    text = str(exc).lower()
+    status = getattr(exc, "status_code", None) or getattr(
+        getattr(exc, "response", None), "status_code", None
+    )
+    if status != 429 and "429" not in text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "perday",
+            "per day",
+            "daily",
+            "quota exceeded",
+            "quotaexceeded",
+            "resource_exhausted",
+        )
+    )
+
+
+def _create_with_retry(client, attempts: int | None = None, **kwargs):
+    if attempts is None:
+        attempts = int(os.environ.get("LLM_RETRY_ATTEMPTS", "9"))
     for attempt in range(attempts):
         try:
             return client.chat.completions.create(**kwargs)
         except Exception as exc:  # noqa: BLE001
+            if _daily_quota_exhausted(exc):
+                _log(f"每日配额耗尽，立即放弃本轮: {_describe_error(exc)}")
+                raise
             retryable = _retryable(exc)
             _log(
                 f"请求失败（第 {attempt + 1}/{attempts} 次，"
@@ -251,7 +281,7 @@ def _create_with_retry(client, attempts: int = 9, **kwargs):
                 raise
             delay = _retry_after_seconds(exc)
             if delay is None:
-                delay = min(300.0, 15.0 * (2 ** attempt))
+                delay = min(120.0, 10.0 * (2 ** attempt))
             _log(f"等待 {delay:.0f}s 后重试")
             time.sleep(delay)
 
