@@ -291,6 +291,30 @@ jobs:
           mkdir -p out/gate
           if [[ "$TRAIN_URL" == http* ]]; then curl -fsSL "$TRAIN_URL" -o out/gate/train_manifest.jsonl; else cp "$TRAIN_URL" out/gate/train_manifest.jsonl; fi
           if [[ "$BLIND_URL" == http* ]]; then curl -fsSL "$BLIND_URL" -o out/gate/blind_manifest.jsonl; else cp "$BLIND_URL" out/gate/blind_manifest.jsonl; fi
+      - name: Apply reviewed spans
+        env:
+          BLIND_REVIEW_B64: ${{ secrets.BLIND_REVIEW_B64 }}
+        run: |
+          set -euo pipefail
+          # 训练侧的复核结果随仓库发布（可审计）；盲测真值的复核结果等同于
+          # 真值本身，只能放在 Secret 里，不能进公开仓库。
+          if [ -f datasets/release_annotations/review_spans.jsonl ]; then
+            python scripts/review_ad_boundaries.py \
+              --annotations out/release/annotations.jsonl \
+              --apply datasets/release_annotations/review_spans.jsonl \
+              --labels-source human
+          fi
+          if [ -n "${BLIND_REVIEW_B64:-}" ]; then
+            printf '%s' "$BLIND_REVIEW_B64" | base64 -d > out/release/blind_reviews.jsonl
+            python scripts/review_ad_boundaries.py \
+              --blind-annotations out/release/blind_annotations.jsonl \
+              --ground-truth-dir out/release/blind_gt \
+              --blind-generated out/release/blind_generated.jsonl \
+              --apply out/release/blind_reviews.jsonl \
+              --labels-source human
+          else
+            echo "::warning::未配置 BLIND_REVIEW_B64，盲测真值保持机器标签，不能作为验收依据"
+          fi
       - name: Enforce manifest coverage
         run: |
           set -euo pipefail

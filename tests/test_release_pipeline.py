@@ -640,6 +640,42 @@ class ResumeCompactionTest(unittest.TestCase):
             self.assertEqual(len(kept_transcripts[0]["segments"]), 1)
             self.assertEqual([row["feed"] for row in kept_annotations], ["B"])
 
+    def test_reviewed_repo_row_beats_stale_artifact_row(self) -> None:
+        from scripts.seed_annotation_cache import seed
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "base"
+            out = root / "out"
+            base.mkdir()
+            out.mkdir()
+            identity = {"feed": "A", "episode": "1", "source_sha256": "s" * 64}
+            train = root / "train.jsonl"
+            train.write_text(json.dumps(identity) + "\n", encoding="utf-8")
+            blind = root / "blind.jsonl"
+            blind.write_text("", encoding="utf-8")
+            # 仓库里已经复核过的行
+            (out / "annotations.jsonl").write_text(
+                json.dumps({**identity, "ads": [{"start_s": 10.0, "end_s": 20.0}], "labels_source": "human"})
+                + "\n",
+                encoding="utf-8",
+            )
+            # artifact 里的旧机器标注
+            (base / "annotations.jsonl").write_text(
+                json.dumps({**identity, "ads": [], "labels_source": "ai_reviewed"})
+                + "\n",
+                encoding="utf-8",
+            )
+            seed(base, out, train, blind)
+            kept = [
+                json.loads(line)
+                for line in (out / "annotations.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(kept), 1)
+            self.assertEqual(kept[0]["labels_source"], "human")
+            self.assertEqual(len(kept[0]["ads"]), 1)
+
 
 class QuotaFailureTest(unittest.TestCase):
     def test_daily_quota_is_not_retried(self) -> None:

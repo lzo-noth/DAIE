@@ -39,6 +39,14 @@ COUNTERPARTS = {
     "blind_generated.jsonl": None,
 }
 
+# 人工级标签比机器标签更可信：续跑时若仓库里已有复核过的行，不能被
+# artifact 里的旧机器标注覆盖回去。
+LABEL_PRIORITY = {"human": 3, "ai_reviewed": 2, "llm_weak": 1}
+
+
+def _rank(row: dict) -> int:
+    return LABEL_PRIORITY.get(str(row.get("labels_source") or ""), 0)
+
 
 def _load(path: Path) -> list[dict]:
     if not path.exists():
@@ -102,7 +110,16 @@ def seed(
                 for row in _load(path):
                     key = _identity(row)
                     seen.add(key)
-                    if key not in allowed or key in merged:
+                    if key not in allowed:
+                        continue
+                    if key in merged:
+                        # 同一身份出现两次时不能"先到先得"：续跑 artifact 里
+                        # 的旧机器标注会覆盖仓库里已经复核过的行。
+                        if _rank(merged[key]) >= _rank(row):
+                            continue
+                        merged[key] = row
+                        if is_own:
+                            own_keys.add(key)
                         continue
                     merged[key] = row
                     if is_own:
