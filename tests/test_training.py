@@ -151,6 +151,24 @@ class GroupedCrossValidationTest(unittest.TestCase):
         self.assertEqual(sorted(held_feeds), ["A", "B", "C"])
         self.assertEqual(sum(len(held) for held in folds), len(groups))
 
+    def test_default_fold_count_is_bounded_and_keeps_feeds_whole(self) -> None:
+        feeds = [f"feed-{index}" for index in range(12)]
+        groups = [feed for feed in feeds for _ in range(2)]
+        folds = _group_folds(groups)
+        self.assertEqual(len(folds), 6)
+        for fold in folds:
+            assigned = [groups[index] for index in fold]
+            # 折内可以有多档节目，但不能把同一档节目拆到两折。
+            self.assertEqual(len(set(assigned)), 2)
+        covered = [groups[index] for fold in folds for index in fold]
+        self.assertEqual(sorted(covered), sorted(groups))
+
+    def test_zero_folds_means_leave_one_feed_out(self) -> None:
+        groups = ["A", "B", "C", "D"]
+        folds = _group_folds(groups, k=10**6)
+        self.assertEqual(len(folds), 4)
+        self.assertEqual(sum(len(fold) for fold in folds), 4)
+
     def test_single_feed_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             _group_folds(["A", "A", "A"])

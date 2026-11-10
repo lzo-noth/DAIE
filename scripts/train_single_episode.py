@@ -555,12 +555,34 @@ def _calibration_validity(
     }
 
 
-def _group_folds(groups: list[str]) -> list[list[int]]:
-    """Leave-one-feed-out folds: each fold returns the held-out indices.
+OUTER_FOLDS = 6
+INNER_FOLDS = 4
 
-    The caller marks exactly these indices as test rows. Returning the
-    complement here would train on the held-out feed and test on everything
-    else, which is the reverse of grouped cross-validation.
+
+def _assign_folds(groups: list[str], k: int) -> list[list[str]]:
+    """Split feeds into at most ``k`` groups, never splitting one feed.
+
+    Feeds are ordered by a hash so the assignment is deterministic but does not
+    correlate with feed names, and every fold still holds whole feeds.
+    """
+    unique = sorted(
+        set(groups), key=lambda group: hashlib.sha256(str(group).encode()).hexdigest()
+    )
+    k = max(2, min(k, len(unique)))
+    buckets: list[list[str]] = [[] for _ in range(k)]
+    for index, group in enumerate(unique):
+        buckets[index % k].append(group)
+    return buckets
+
+
+def _group_folds(groups: list[str], k: int | None = None) -> list[list[int]]:
+    """Grouped K-fold folds: each fold returns the held-out indices.
+
+    Feeds are the validation group, so no fold can test on a feed it trained
+    on. Leave-one-feed-out with 34 feeds means 34 outer folds and ~1100 model
+    fits, which does not finish inside a CI job; the default is a bounded
+    grouped K-fold instead, which keeps the grouping guarantee at a fraction of
+    the cost.
     """
     unique = sorted(set(groups))
     if len(unique) < 2:
@@ -568,10 +590,14 @@ def _group_folds(groups: list[str]) -> list[list[int]]:
             "至少需要两个独立节目（feed）才能做分组交叉验证；"
             "同一节目内部高度相似，单节目评测会过于乐观"
         )
-    return [
-        [index for index, group in enumerate(groups) if group == held]
-        for held in unique
-    ]
+    buckets = _assign_folds(
+        [str(group) for group in groups], OUTER_FOLDS if k is None else k
+    )
+    fold_of = {group: index for index, bucket in enumerate(buckets) for group in bucket}
+    folds: list[list[int]] = [[] for _ in buckets]
+    for index, group in enumerate(groups):
+        folds[fold_of[str(group)]].append(index)
+    return [fold for fold in folds if fold]
 
 
 def _window_rows(indices: list[int], samples: list[EpisodeSample], offsets: dict[int, tuple[int, int]], total: int) -> np.ndarray:
@@ -582,14 +608,20 @@ def _window_rows(indices: list[int], samples: list[EpisodeSample], offsets: dict
     return mask
 
 
-def _inner_folds(train_indices: list[int], samples: list[EpisodeSample]) -> tuple[list[list[int]], str]:
+def _inner_folds(
+    train_indices: list[int], samples: list[EpisodeSample], k: int | None = None
+) -> tuple[list[list[int]], str]:
     """Folds used only inside an outer training set for threshold selection."""
     feeds = sorted({samples[index].feed for index in train_indices})
     if len(feeds) >= 2:
-        return (
-            [[index for index in train_indices if samples[index].feed == feed] for feed in feeds],
-            "inner_grouped_cv",
-        )
+        buckets = _assign_folds(feeds, INNER_FOLDS if k is None else k)
+        fold_of = {
+            feed: index for index, bucket in enumerate(buckets) for feed in bucket
+        }
+        folds: list[list[int]] = [[] for _ in buckets]
+        for index in train_indices:
+            folds[fold_of[samples[index].feed]].append(index)
+        return [fold for fold in folds if fold], "inner_grouped_cv"
     ordered = sorted(train_indices)
     if len(ordered) >= 2:
         middle = len(ordered) // 2
@@ -1758,6 +1790,18 @@ def main() -> int:
         help="分类阈值和最终流水线允许的最大每小时误报数；<=0 表示不约束",
     )
     parser.add_argument(
+        "--outer-folds",
+        type=int,
+        default=6,
+        help="外层分组折数（feed 不跨折）；<=0 表示 leave-one-feed-out",
+    )
+    parser.add_argument(
+        "--inner-folds",
+        type=int,
+        default=4,
+        help="内层分组折数（阈值选择用）；<=0 表示 leave-one-feed-out",
+    )
+    parser.add_argument(
         "--allow-cross-feed-duplicates",
         action="store_true",
         help="允许同一 audio_id/source_sha256 出现在多个 feed（默认拒绝，防止数据泄漏）",
@@ -1773,6 +1817,10 @@ def main() -> int:
         help="要求每个广告区间显式标注 type=third_party_inserted",
     )
     args = parser.parse_args()
+
+    global OUTER_FOLDS, INNER_FOLDS
+    OUTER_FOLDS = args.outer_folds if args.outer_folds > 0 else 10**6
+    INNER_FOLDS = args.inner_folds if args.inner_folds > 0 else 10**6
 
     annotations_path = args.annotations
     weak_mode = False

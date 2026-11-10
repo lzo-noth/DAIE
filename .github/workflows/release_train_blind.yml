@@ -34,7 +34,7 @@ permissions:
 jobs:
   release-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 540
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -94,6 +94,7 @@ jobs:
             --annotations out/release/annotations.jsonl \
             --model-out out/release/ad_model.json \
             --boundary-out out/release/boundary_model.json \
+            --outer-folds 6 --inner-folds 4 \
             --require-ad-type
       - name: Blind test release audio batch
         env:
