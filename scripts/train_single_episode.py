@@ -27,6 +27,7 @@ import json
 import math
 import os
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -104,6 +105,40 @@ def _resolve_audio(value: str, base: Path) -> str:
     if local.exists():
         return str(local)
     return str(candidate)
+
+
+def _extract_episode(job: dict) -> dict:
+    """Decode one episode into window features and boundary-change features.
+
+    Runs in a worker process: feature extraction is CPU-bound and dominates a
+    90-episode run, so episodes are decoded in parallel instead of serially.
+    """
+    mono, forensic = extract_features(job["audio"], proxy=job.get("proxy"))
+    windows = build_windows(mono, forensic)
+    change = boundary_change_matrix(mono, forensic)
+    return {
+        "audio_id": str(mono.get("audio_id") or ""),
+        "audio_id_kind": str(mono.get("audio_id_kind") or ""),
+        "windows": windows,
+        "change_features": change["features"].astype(np.float16),
+        "change_times": change["times"],
+        "scores": heuristic_boundary_scores(change["features"]),
+    }
+
+
+def _extract_all(
+    audios: list[str], proxy: Optional[str], skip_boundary: bool
+) -> list[dict]:
+    jobs = [{"audio": audio, "proxy": proxy} for audio in audios]
+    workers = int(os.environ.get("TRAIN_EXTRACT_WORKERS", "0") or 0)
+    if workers <= 0:
+        workers = min(4, os.cpu_count() or 1)
+    workers = max(1, min(workers, len(jobs)))
+    if workers == 1 or len(jobs) == 1:
+        return [_extract_episode(job) for job in jobs]
+    print(f"[extract] 并行解码 {len(jobs)} 集，workers={workers}", flush=True)
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(_extract_episode, jobs))
 
 
 def _positive_frames(times: np.ndarray, edges: list[float], half: float = 0.30) -> list[int]:
@@ -1874,8 +1909,11 @@ def main() -> int:
     boundary_groups: list[str] = []
     boundary_episode_indices: list[int] = []
     audio_index = 0
-    for entry in entries:
-        audio = _resolve_audio(str(entry["audio"]), base)
+    resolved = [(entry, _resolve_audio(str(entry["audio"]), base)) for entry in entries]
+    extracted = _extract_all(
+        [audio for _, audio in resolved], args.proxy, args.skip_boundary
+    )
+    for (entry, audio), result in zip(resolved, extracted):
         feed = str(entry.get("feed") or "unknown")
         name = str(entry.get("episode") or Path(audio).name)
         if not weak_mode and (
@@ -1885,8 +1923,10 @@ def main() -> int:
             print(f"[data] {name}: feed 或 episode 标识为空", flush=True)
             if not args.allow_invalid_annotations:
                 return 1
-        print(f"[extract] {feed} / {name}", flush=True)
-        mono, forensic = extract_features(audio, proxy=args.proxy)
+        mono = {
+            "audio_id": result["audio_id"],
+            "audio_id_kind": result["audio_id_kind"],
+        }
         identity, identity_warnings = _identity_problems(
             entry,
             audio,
@@ -1902,7 +1942,7 @@ def main() -> int:
             if not args.allow_audio_mismatch:
                 print("[identity] 中止训练；如确认音频一致可用 --allow-audio-mismatch 覆盖")
                 return 1
-        windows = build_windows(mono, forensic)
+        windows = result["windows"]
         duration = float(windows["duration_s"])
         if not weak_mode:
             ads = [
@@ -1947,8 +1987,11 @@ def main() -> int:
         if len(indices) == 0:
             print(f"[skip] {name}: 无可用标注窗口")
             continue
-        change = boundary_change_matrix(mono, forensic)
-        scores = heuristic_boundary_scores(change["features"])
+        change = {
+            "features": result["change_features"],
+            "times": result["change_times"],
+        }
+        scores = result["scores"]
         if not weak_mode and not args.skip_boundary and ads is not None:
             heads = _sample_boundary_heads(change, ads, seed=audio_index + 7)
             if len(heads["onset_y"]) or len(heads["offset_y"]):
