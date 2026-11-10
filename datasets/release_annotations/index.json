@@ -1,27 +1,28 @@
 {
-  "published_at": "2026-11-08T11:19:25+00:00",
-  "run_id": "42474789281",
+  "published_at": "2026-11-10T00:43:53+00:00",
+  "run_id": "42723977359",
   "llm_model": "",
   "labels_sources": [
     "ai_reviewed"
   ],
   "files": {
     "annotations.jsonl": {
-      "rows": 21,
-      "sha256": "0c508b7f8d8474e10e031e0cedcf2177823c17aa40502c95fc3af80cd349e051"
+      "rows": 90,
+      "sha256": "48b8f22afa354a5a8ca44d38fd0a49c7e1c25805dcdd010c69f39ab61f0981ac"
     },
     "transcripts.jsonl": {
-      "rows": 21,
-      "sha256": "2b58c93c9afd18eec60e87213b4ce38b90650625bc1dce9f7b2b6e4209261db0"
+      "rows": 90,
+      "sha256": "e14d242a5f5b7e61eae6c856eceacd7809c9ae50e76d12a6d33d1d560ad6d592"
     }
   },
-  "episodes": 21,
-  "feeds": 9,
-  "ads": 55,
+  "episodes": 90,
+  "feeds": 34,
+  "ads": 119,
   "holdout": {
     "published": false,
-    "episodes": 13,
+    "episodes": 11,
     "location": "actions_artifact",
     "note": "盲测标签不进入公开仓库，避免评测集被逐步适配"
-  }
+  },
+  "removed_holdout_files": []
 }
