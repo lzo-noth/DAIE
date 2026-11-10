@@ -1,6 +1,6 @@
 {
-  "published_at": "2026-11-10T00:43:53+00:00",
-  "run_id": "42723977359",
+  "published_at": "2026-11-10T03:17:29+00:00",
+  "run_id": "42734856000",
   "llm_model": "",
   "labels_sources": [
     "ai_reviewed"
@@ -8,16 +8,16 @@
   "files": {
     "annotations.jsonl": {
       "rows": 90,
-      "sha256": "48b8f22afa354a5a8ca44d38fd0a49c7e1c25805dcdd010c69f39ab61f0981ac"
+      "sha256": "eb51e91d545b925f2f76f3f4bc99c542c5c5e33eb814b83fa0d2fc68bd9a72f4"
     },
     "transcripts.jsonl": {
       "rows": 90,
-      "sha256": "e14d242a5f5b7e61eae6c856eceacd7809c9ae50e76d12a6d33d1d560ad6d592"
+      "sha256": "a55e07c80f0ee44eb81066200725a87ee4816b27db017dac612ef8461b23b36c"
     }
   },
   "episodes": 90,
   "feeds": 34,
-  "ads": 119,
+  "ads": 144,
   "holdout": {
     "published": false,
     "episodes": 11,
