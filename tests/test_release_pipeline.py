@@ -303,6 +303,35 @@ class CoverageGateTest(unittest.TestCase):
                 [{"feed": "B", "episode": "9", "source_sha256": "s" * 64}],
             )
 
+    def test_empty_transcript_blocks_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            train = root / "train.jsonl"
+            train.write_text(
+                json.dumps({"feed": "A", "episode": "1", "source_sha256": "s" * 64})
+                + "\n",
+                encoding="utf-8",
+            )
+            blind = root / "blind.jsonl"
+            blind.write_text("", encoding="utf-8")
+            data = root / "data"
+            data.mkdir()
+            (data / "annotations.jsonl").write_text(
+                json.dumps({"feed": "A", "episode": "1", "source_sha256": "s" * 64, "ads": []})
+                + "\n",
+                encoding="utf-8",
+            )
+            (data / "transcripts.jsonl").write_text(
+                json.dumps({"feed": "A", "episode": "1", "source_sha256": "s" * 64, "segments": []})
+                + "\n",
+                encoding="utf-8",
+            )
+            (data / "blind_annotations.jsonl").write_text("", encoding="utf-8")
+            (data / "blind_generated.jsonl").write_text("", encoding="utf-8")
+            report = verify(train, blind, data, [], allow_unavailable=False)
+            self.assertFalse(report["complete"])
+            self.assertEqual(len(report["transcripts_without_segments"]), 1)
+
     def test_explicit_unavailable_rows_are_accounted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -570,6 +599,48 @@ class SeedCacheTest(unittest.TestCase):
             self.assertNotIn("segments", generated[0])
 
 
+class ResumeCompactionTest(unittest.TestCase):
+    def test_empty_transcripts_are_dropped_so_the_episode_runs_again(self) -> None:
+        from scripts.annotate_release_episodes import _compact_resume_files
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            annotations = root / "annotations.jsonl"
+            transcripts = root / "transcripts.jsonl"
+            stale = {"feed": "A", "episode": "1", "source_sha256": "s" * 64}
+            good = {"feed": "B", "episode": "2", "source_sha256": "t" * 64}
+            transcripts.write_text(
+                json.dumps({**stale, "segments": []})
+                + "\n"
+                + json.dumps({**good, "segments": [{"start_s": 0.0, "end_s": 1.0, "text": "hi"}]})
+                + "\n"
+                + json.dumps({**good, "segments": [{"start_s": 0.0, "end_s": 2.0, "text": "hi"}]})
+                + "\n",
+                encoding="utf-8",
+            )
+            annotations.write_text(
+                json.dumps({**stale, "ads": []})
+                + "\n"
+                + json.dumps({**good, "ads": []})
+                + "\n",
+                encoding="utf-8",
+            )
+            _compact_resume_files(annotations, transcripts)
+            kept_transcripts = [
+                json.loads(line)
+                for line in transcripts.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            kept_annotations = [
+                json.loads(line)
+                for line in annotations.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual([row["feed"] for row in kept_transcripts], ["B"])
+            self.assertEqual(len(kept_transcripts[0]["segments"]), 1)
+            self.assertEqual([row["feed"] for row in kept_annotations], ["B"])
+
+
 class QuotaFailureTest(unittest.TestCase):
     def test_daily_quota_is_not_retried(self) -> None:
         from dai_detect.llm import _daily_quota_exhausted
@@ -710,6 +781,46 @@ class ManualReviewTest(unittest.TestCase):
         updated, rejected = apply_review(rows, [review])
         self.assertEqual(updated[0]["labels_source"], "ai_reviewed")
         self.assertEqual(len(rejected), 1)
+
+    def test_agent_transcript_review_must_not_claim_audio_listening(self) -> None:
+        rows = [
+            {
+                "feed": "A",
+                "episode": "1",
+                "source_sha256": "s" * 64,
+                "duration_s": 200.0,
+                "ads": [],
+                "labels_source": "ai_reviewed",
+            }
+        ]
+        ad = {
+            "start_s": 120.0,
+            "end_s": 151.42,
+            "start_verified": True,
+            "end_verified": True,
+        }
+        base = {
+            "feed": "A",
+            "episode": "1",
+            "source_sha256": "s" * 64,
+            "reviewer": "agent",
+            "reviewed_at": "2026-11-09T00:00:00",
+            "label_method": "agent_transcript_review",
+            "ads": [ad],
+        }
+        _, rejected = apply_review(rows, [{**base, "listened": True, "review_basis": "transcript"}])
+        self.assertTrue(rejected)
+
+        _, rejected = apply_review(rows, [{**base, "listened": False, "review_basis": "audio"}])
+        self.assertTrue(rejected)
+
+        updated, rejected = apply_review(
+            rows, [{**base, "listened": False, "review_basis": "transcript"}]
+        )
+        self.assertEqual(rejected, [])
+        self.assertEqual(updated[0]["labels_source"], "human")
+        self.assertEqual(updated[0]["ads"][0]["label_method"], "agent_transcript_review")
+        self.assertFalse(updated[0]["boundary_review"]["listened"])
 
     def test_verified_review_marks_episode_human(self) -> None:
         rows = [

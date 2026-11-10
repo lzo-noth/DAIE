@@ -161,6 +161,40 @@ def _identity_key(row: dict) -> tuple[str, str, str]:
     return (*_episode_key(row), str(row.get("source_sha256") or ""))
 
 
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+        + ("\n" if rows else ""),
+        encoding="utf-8",
+    )
+
+
+def _compact_resume_files(annotations_path: Path, transcripts_path: Path) -> None:
+    """Drop resume rows that cannot support a re-run.
+
+    Early runs stored transcript rows without segments. ``--resume`` then treats
+    the episode as finished and reuses an empty transcript forever, so the
+    published labels never had a reviewable text behind them. Empty-transcript
+    rows (and their derived annotations) are removed here so the episode is
+    re-transcribed and re-classified instead of silently skipped.
+    """
+    transcripts = _load_jsonl(transcripts_path)
+    if not transcripts:
+        return
+    empty = {_identity_key(row) for row in transcripts if not row.get("segments")}
+    deduped: dict[tuple[str, str, str], dict] = {}
+    for row in transcripts:
+        if row.get("segments"):
+            deduped[_identity_key(row)] = row
+    _write_jsonl(transcripts_path, list(deduped.values()))
+    if empty:
+        _write_jsonl(
+            annotations_path,
+            [row for row in _load_jsonl(annotations_path) if _identity_key(row) not in empty],
+        )
+        print(f"[resume] 丢弃 {len(empty)} 集空转写，重新转写", flush=True)
+
+
 def _clamp_ads(ads: list[dict], duration: float, min_span_s: float = 1.0) -> list[dict]:
     """Trim ad spans to the decoded duration.
 
@@ -271,6 +305,8 @@ def main() -> int:
     args.annotations_out.parent.mkdir(parents=True, exist_ok=True)
     args.transcripts_out.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if args.resume else "w"
+    if args.resume:
+        _compact_resume_files(args.annotations_out, args.transcripts_out)
     done_annotations = (
         {_identity_key(row) for row in _load_jsonl(args.annotations_out)}
         if args.resume

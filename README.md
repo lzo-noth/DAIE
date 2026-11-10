@@ -105,15 +105,20 @@ python scripts/annotate_release_episodes.py \
 {"audio":"https://github.com/<owner>/<repo>/releases/download/<tag>/show_b_ep1.mp3","feed":"Show B","episode":"Ep 1","ground_truth":"https://raw.githubusercontent.com/.../show_b_ep1.json"}
 ```
 
-重要：ASR + LLM 生成的是 `labels_source=llm_weak` 的弱标签，可用于训练或人工预标注，但**不是人工真值**。只有盲测真值显式包含 `"labels_source": "human"` 时，`performance_targets_met` 才可能为 true；而且 `human` 现在需要可审计的证据：每条广告必须带 `label_method="human_audio_review"`、`start_verified=true`、`end_verified=true`。缺任何一项都会被降级为 `unverified` 并拒绝评分（调试可加 `--allow-unverified-ground-truth`）。
+重要：ASR + LLM 生成的是 `labels_source=llm_weak` 的弱标签，可用于训练或人工预标注，但**不是人工真值**。只有盲测真值显式包含 `"labels_source": "human"` 时，`performance_targets_met` 才可能为 true；`human` 必须可审计：每条广告带 `start_verified=true`、`end_verified=true`，并用 `label_method` 注明边界是怎么确立的：
 
-人工边界复核流程：
+- `human_audio_review`：听过音频，复核行必须 `listened=true`；
+- `agent_transcript_review`：逐条对照带时间戳的转写裁决起止与前后文，**没有**听音频，复核行必须 `listened=false`、`review_basis="transcript"`。
+
+两种方法都不允许用 `listened=true` 冒充听审；缺字段会被降级并拒绝评分（调试可加 `--allow-unverified-ground-truth`）。
+
+边界复核流程：
 
 ```bash
 # 1) 导出待复核清单（保留原始 AI 候选边界）
 python scripts/review_ad_boundaries.py --annotations annotations.jsonl \
   --blind-annotations blind_annotations.jsonl --worklist-out review_worklist.jsonl
-# 2) 听音频、填 start_s/end_s 并逐条确认起止
+# 2) 逐条填 start_s/end_s、确认起止（label_method 注明是听审还是转写裁决）
 python scripts/review_ad_boundaries.py --annotations annotations.jsonl \
   --blind-annotations blind_annotations.jsonl \
   --ground-truth-dir blind_gt --blind-generated blind_generated.jsonl \

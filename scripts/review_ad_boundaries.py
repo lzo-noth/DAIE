@@ -10,8 +10,7 @@ splice point. This script separates the two claims:
     back exact times.
   * ``--apply`` merges a reviewed file and records how the boundary was
     established. ``labels_source`` only becomes ``human`` when every ad in the
-    episode carries ``label_method=human_audio_review`` and both edges are
-    explicitly verified.
+    episode carries a ``label_method`` and both edges are explicitly verified.
 
 Review file format (one JSON object per line)::
 
@@ -25,6 +24,17 @@ Review file format (one JSON object per line)::
          "start_verified": true, "end_verified": true}
       ]
     }
+
+Two review methods are recorded separately, because they support different
+claims:
+
+  * ``human_audio_review`` -- someone listened to the episode and must set
+    ``listened: true``.
+  * ``agent_transcript_review`` -- every ad boundary was adjudicated against
+    the timestamped transcript (start/end of the spoken ad, what precedes and
+    follows it), but nobody listened to the audio. It must declare
+    ``listened: false`` and ``review_basis: "transcript"`` so the record never
+    claims an audio check that did not happen.
 """
 
 from __future__ import annotations
@@ -100,12 +110,22 @@ def build_worklist(rows: list[dict], labels_source: str) -> list[dict]:
 def _verify_review(review: dict, row: dict) -> tuple[list[dict], list[str]]:
     """Validate one episode review against the audio it claims to describe."""
     problems: list[str] = []
+    method = str(review.get("label_method") or "human_audio_review")
+    if method not in ("human_audio_review", "agent_transcript_review"):
+        problems.append(f"未知 label_method: {method}")
     if not str(review.get("reviewer") or "").strip():
         problems.append("缺少 reviewer")
     if not str(review.get("reviewed_at") or "").strip():
         problems.append("缺少 reviewed_at")
-    if review.get("listened") is not True:
-        problems.append("未标记听过整集音频")
+    if method == "human_audio_review":
+        if review.get("listened") is not True:
+            problems.append("未标记听过整集音频")
+    else:
+        # 转写复核必须如实声明没有听音频，不能借 listened=true 冒充听审。
+        if review.get("listened") is not False:
+            problems.append("agent_transcript_review 必须显式 listened=false")
+        if str(review.get("review_basis") or "") != "transcript":
+            problems.append("agent_transcript_review 需要 review_basis=transcript")
 
     row_sha = str(row.get("source_sha256") or "")
     review_sha = str(review.get("source_sha256") or "")
@@ -158,7 +178,7 @@ def _verify_review(review: dict, row: dict) -> tuple[list[dict], list[str]]:
                 "ad_content_type": str(ad.get("ad_content_type") or "third_party_ad"),
                 "ad_production_style": str(ad.get("ad_production_style") or "unknown"),
                 "insertion_mechanism": str(ad.get("insertion_mechanism") or "unknown"),
-                "label_method": "human_audio_review",
+                "label_method": method,
                 "start_verified": True,
                 "end_verified": True,
                 "ambiguous_boundary": False,
@@ -215,7 +235,8 @@ def apply_review(
             "reviewer": str(review.get("reviewer") or ""),
             "reviewed_at": str(review.get("reviewed_at") or ""),
             "source_sha256": key[2],
-            "listened": True,
+            "label_method": str(review.get("label_method") or "human_audio_review"),
+            "listened": bool(review.get("listened") is True),
             "no_ads_confirmed": bool(review.get("no_ads_confirmed") or False),
             "ambiguous_boundary": False,
             "labels_source": labels_source,

@@ -120,6 +120,17 @@ def verify(
 
     accounted = unavailable_keys | failed_keys
 
+    # 空转写等于没有可复核的文本：标签无法被核对，也无从重建真值。这类行
+    # 过去会被 --resume 永久复用，必须在发布前挡住。
+    transcripts_without_segments = [
+        _short(_identity(row))
+        for row in (
+            _load_jsonl(data_dir / "transcripts.jsonl")
+            + _load_jsonl(data_dir / "blind_transcripts.jsonl")
+        )
+        if not (row.get("segments") or [])
+    ]
+
     def unresolved(items: list[Identity]) -> list[Identity]:
         return [item for item in items if item not in accounted]
 
@@ -135,6 +146,7 @@ def verify(
         or unresolved_gt
         or generated_extra
         or gt_sha_mismatch
+        or transcripts_without_segments
     )
     if not allow_unavailable and (unavailable_keys or failed_keys):
         complete = False
@@ -151,6 +163,7 @@ def verify(
         "blind_generated_extra": [_short(item) for item in generated_extra],
         "blind_ground_truth_missing": [_short(item) for item in gt_missing],
         "blind_ground_truth_sha_mismatch": gt_sha_mismatch,
+        "transcripts_without_segments": transcripts_without_segments,
         "unresolved": [_short(item) for item in unresolved_train + unresolved_blind],
         "unresolved_ground_truth": [
             _short(item) for item in unresolved_generated + unresolved_gt

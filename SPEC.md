@@ -88,6 +88,7 @@
 - 校准覆盖信息必须分别记录 `classifier_folds_completed`、`onset_folds_completed`、`offset_folds_completed`、`pipeline_folds_completed` 与 `folds_attempted`；跳过折不能算作已完成折。完整流水线折指分类器与 onset/offset 头均训练成功，并对该折**全部有标签留出集**（包括 `ads=[]` 的无广告节目）完成预测。另需分别记录 `positive_boundary_episodes` 与 `negative_control_episodes`：无广告节目没有真实边界误差，不能进入 P95 分母，但必须参与边界精修和误报检查。需要边界模型时，学习型边界头缺失不得静默回退启发式精修，该折不计入完整流水线覆盖。
 - 最终部署参数必须有一个组合级验收记录，至少包含 `valid`、`calibration_process_valid`、`deployment_eligible`、`cv_quality`、`converged`、`event_threshold_valid`、`event_false_positive_rate_valid`、`final_coverage_valid`、`onset_threshold_valid`、`offset_threshold_valid`、`final_pipeline_valid` 和 `final_recalibrated`。这些字段必须基于最终返回的参数组合重新运行完整检测链路，而不是拼接各参数单独选择时的结果；`deployment_eligible` 还要求 `cv_quality=strict_nested_grouped_cv`。`valid=false` 时不禁止写出模型，但禁止宣称校准验收通过。
 - ASR + LLM 全集转写生成的广告区间必须标记 `labels_source=llm_weak`，只能作为弱监督训练或人工预标注，禁止当作人工真值。盲测真值必须显式标记 `labels_source=human` 才能写 `performance_targets_met=true`；缺失或非 human 时只能用于流程验证。
+- `labels_source=human` 表示"逐条裁决过边界"的真值级别，有两种可追溯方法，必须用 `label_method` 区分并逐条记录：`human_audio_review`（听过音频，`listened=true`）与 `agent_transcript_review`（逐条对照带时间戳的转写裁决起止与前后文，但**没有**听音频，必须 `listened=false`、`review_basis=transcript`）。两种方法都要求 `reviewer`、`reviewed_at`、绑定 `source_sha256`、`start_verified`、`end_verified`，并且不得用 `listened=true` 冒充听审。
 - 音频可以从 GitHub Release asset 获取，但必须先快照并记录 `source_sha256`、`audio_id`、`audio_id_kind`；同一 release asset 视为同一 DAI 变体。训练和盲测用的 feed 必须分开，盲测清单中的 feed 不能出现在 `training_identity.feeds`。
 - `calibration_process_valid` 只表示阈值校准流程有效；产品性能目标必须单独由独立盲测判定。训练输出 `performance_targets_met=null`、`performance_targets_source="independent_blind_test_required"`；盲测脚本按事件 precision ≥0.90、recall ≥0.90、边界 P95 ≤0.50 s 写入 `performance_targets_met`。
 - 严格部署模式必须支持 `--require-calibrated-models`：分类模型和边界模型都要求 `calibration_process_valid`、`deployment_eligible`、`final_pipeline_valid`、`converged` 为 true，`cv_quality=strict_nested_grouped_cv`，且两个模型的 onset/offset 阈值一致；任一条件失败时拒绝部署。训练 workflow 默认启用该检查，只有显式 `allow_uncalibrated_models=true` 的调试运行可以放行，并必须保留警告。
@@ -177,7 +178,7 @@ DAI 会在同一 URL 背后按请求替换广告，因此 URL、文件名、RSS 
 
 验收前置条件（缺一不可）：
 
-1. `labels_source=human` 的每条广告都带 `label_method=human_audio_review`、`start_verified=true`、`end_verified=true`，并保留原始 AI 候选边界。
+1. `labels_source=human` 的每条广告都带 `label_method`（`human_audio_review` 或 `agent_transcript_review`）、`start_verified=true`、`end_verified=true`，并保留原始 AI 候选边界；`agent_transcript_review` 必须如实记录 `listened=false`。
 2. 盲测真值与盲测转录不进入公开仓库，只存在于私有 artifact / 独立评测仓库。
 3. 数据发布必须通过覆盖率门禁：清单每一行都有成功标注或显式不可用记录，且所有分片成功。
 4. 模型通过严格嵌套分组 CV 校准；本次盲测启用了 `--require-calibrated-models`。诊断运行（关闭校准门禁或使用非人工真值）永远不会写 `performance_targets_met=true`。
