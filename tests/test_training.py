@@ -23,9 +23,11 @@ from scripts.train_single_episode import (
     _cv_quality,
     _duplicate_identity_problems,
     _event_metrics,
+    _fit_logistic,
     _group_folds,
     _identity_problems,
     _inner_folds,
+    _predict,
     _select_boundary_candidate,
     _training_artifacts_complete,
 )
@@ -210,6 +212,29 @@ class GroupedCrossValidationTest(unittest.TestCase):
         offsets = {id(samples[0]): (0, 2), id(samples[1]): (2, 4)}
         _, metrics = _choose_classifier_threshold([0, 1], samples, X, y, offsets, seed=1)
         self.assertEqual(metrics["source"], "within_feed_fallback")
+
+    def test_cached_boundary_scores_match_recomputed_scores(self) -> None:
+        """预计算边界分数不能改变指标，只是省掉重复预测。"""
+        samples = [_boundary_episode("A")]
+        index = 0
+        features = samples[index].boundary_features.astype(np.float32)
+        y = (np.abs(np.arange(len(features)) * samples[index].change_grid_s - 10.0) <= 0.2)
+        head = _fit_logistic(features, y.astype(np.float64))
+        heads = {index: (head, head, 0.5, 0.5)}
+        probabilities = {index: np.where(samples[index].labels > 0, 0.9, 0.1)}
+        without = _event_metrics(
+            samples, [index], probabilities, thresholds=0.5, boundary_heads=heads
+        )
+        cached = {index: (_predict(head, features), _predict(head, features))}
+        with_cache = _event_metrics(
+            samples,
+            [index],
+            probabilities,
+            thresholds=0.5,
+            boundary_heads=heads,
+            boundary_scores=cached,
+        )
+        self.assertEqual(without, with_cache)
 
     def test_window_metrics_use_each_fold_threshold(self) -> None:
         samples = [_sample("A", [1, 0]), _sample("B", [1, 0])]

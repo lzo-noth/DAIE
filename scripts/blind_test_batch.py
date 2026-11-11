@@ -287,6 +287,12 @@ def _resolve(value: str, base: Path) -> str:
     candidate = base / path
     if candidate.exists():
         return str(candidate)
+    # 清单里的路径可能是相对仓库根写的（历史 artifact 里有
+    # "out/release/blind_gt/x.json"），再拼一次 base 就变成
+    # "out/release/out/release/..."；先按当前工作目录试一次。
+    direct = Path(path)
+    if direct.exists():
+        return str(direct)
     # 兼容历史清单：音频可能落在另一个快照目录。
     for alternative in ("blind_snapshots", "snapshots"):
         fallback = base / alternative / path.name

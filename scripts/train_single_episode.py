@@ -688,6 +688,7 @@ def _choose_event_threshold(
     folds, fold_kind = _inner_folds(train_indices, samples)
     inner_full: dict[int, np.ndarray] = {}
     inner_heads: dict[int, tuple[dict, dict, float, float]] = {}
+    inner_scores: dict[int, tuple[np.ndarray, np.ndarray]] = {}
     has_events = False
     pipeline_required = bool(boundary_episode_indices)
     folds_attempted = len(folds)
@@ -738,6 +739,13 @@ def _choose_event_threshold(
                     boundary_thresholds[0],
                     boundary_thresholds[1],
                 )
+                # 边界分数只取决于该折的边界头和特征，与分类阈值无关；候选
+                # 阈值有 37 个，逐次重算等于把同一份 50 万点预测做 37 遍。
+                features = samples[index].boundary_features.astype(np.float32)
+                inner_scores[index] = (
+                    _predict(onset_head, features),
+                    _predict(offset_head, features),
+                )
 
     folds_completed = pipeline_completed if pipeline_required else classifier_completed
 
@@ -753,6 +761,7 @@ def _choose_event_threshold(
                 thresholds=float(candidate),
                 refine=True,
                 boundary_heads=inner_heads,
+                boundary_scores=inner_scores,
             )
             if not metrics:
                 continue
@@ -1558,6 +1567,7 @@ def _event_metrics(
     thresholds: dict[int, float] | float,
     refine: bool = True,
     boundary_heads: Optional[dict[int, tuple[dict, dict, float, float]]] = None,
+    boundary_scores: Optional[dict[int, tuple[np.ndarray, np.ndarray]]] = None,
     require_boundary: bool = False,
 ) -> dict:
     labeled = [index for index in indices if samples[index].ads is not None]
@@ -1594,11 +1604,14 @@ def _event_metrics(
         if refine:
             if boundary_heads and index in boundary_heads:
                 onset_head, offset_head, onset_threshold, offset_threshold = boundary_heads[index]
-                features = sample.boundary_features.astype(np.float32)
-                onset_scores = _predict(onset_head, features)
-                offset_scores = _predict(offset_head, features)
+                if boundary_scores and index in boundary_scores:
+                    onset_scores, offset_scores = boundary_scores[index]
+                else:
+                    features = sample.boundary_features.astype(np.float32)
+                    onset_scores = _predict(onset_head, features)
+                    offset_scores = _predict(offset_head, features)
                 change = {
-                    "times": np.arange(len(features)) * sample.change_grid_s,
+                    "times": np.arange(len(onset_scores)) * sample.change_grid_s,
                     "onset_scores": onset_scores,
                     "offset_scores": offset_scores,
                     "scores": np.maximum(onset_scores, offset_scores),
