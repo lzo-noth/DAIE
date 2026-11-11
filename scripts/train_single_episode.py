@@ -1910,9 +1910,11 @@ def main() -> int:
     boundary_episode_indices: list[int] = []
     audio_index = 0
     resolved = [(entry, _resolve_audio(str(entry["audio"]), base)) for entry in entries]
+    extract_began = time.time()
     extracted = _extract_all(
         [audio for _, audio in resolved], args.proxy, args.skip_boundary
     )
+    print(f"[time] 特征提取完成: {time.time() - extract_began:.0f}s", flush=True)
     for (entry, audio), result in zip(resolved, extracted):
         feed = str(entry.get("feed") or "unknown")
         name = str(entry.get("episode") or Path(audio).name)
@@ -2054,6 +2056,7 @@ def main() -> int:
     all_indices = list(range(len(samples)))
 
     for fold_index, held in enumerate(folds):
+        fold_began = time.time()
         held_set = set(held)
         outer_train = [index for index in all_indices if index not in held_set]
         train_rows = _window_rows(outer_train, samples, per_episode_offset, len(y_all))
@@ -2182,7 +2185,8 @@ def main() -> int:
         )
         print(
             f"[fold {fold_index + 1}/{len(folds)}] 留出 {len(held)} 集, "
-            f"threshold={fold_threshold:.3f}, events={events}",
+            f"threshold={fold_threshold:.3f}, events={events}, "
+            f"用时 {time.time() - fold_began:.0f}s",
             flush=True,
         )
 

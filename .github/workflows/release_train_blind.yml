@@ -26,7 +26,10 @@ on:
         description: "复用该 run 的已训练模型，跳过训练（仅重跑盲测），可留空"
         required: false
         default: ""
-
+      train_max_episodes:
+        description: "只用前 N 集训练（0=全部）；用于诊断训练时长"
+        required: false
+        default: "0"
 permissions:
   contents: read
   actions: read
@@ -88,14 +91,19 @@ jobs:
           ls -la out/release/ad_model.json out/release/boundary_model.json
       - name: Train single-recording models
         if: inputs.models_run_id == ''
+        env:
+          TRAIN_MAX_EPISODES: ${{ inputs.train_max_episodes }}
         run: |
           set -euo pipefail
-          python scripts/train_single_episode.py \
-            --annotations out/release/annotations.jsonl \
-            --model-out out/release/ad_model.json \
-            --boundary-out out/release/boundary_model.json \
-            --outer-folds 6 --inner-folds 4 \
-            --require-ad-type
+          args=(--annotations out/release/annotations.jsonl
+                --model-out out/release/ad_model.json
+                --boundary-out out/release/boundary_model.json
+                --outer-folds 6 --inner-folds 4
+                --require-ad-type)
+          if [ "${TRAIN_MAX_EPISODES:-0}" != "0" ]; then
+            args+=(--max-episodes "$TRAIN_MAX_EPISODES")
+          fi
+          python scripts/train_single_episode.py "${args[@]}"
       - name: Blind test release audio batch
         env:
           ALLOW_WEAK: ${{ inputs.allow_weak_blind_labels }}
