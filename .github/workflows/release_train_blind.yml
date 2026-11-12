@@ -30,6 +30,10 @@ on:
         description: "只用前 N 集训练（0=全部）；用于诊断训练时长"
         required: false
         default: "0"
+      skip_boundary:
+        description: "1=训练时跳过边界头（只做窗口诊断，显著更快）"
+        required: false
+        default: "0"
 permissions:
   contents: read
   actions: read
@@ -93,15 +97,20 @@ jobs:
         if: inputs.models_run_id == ''
         env:
           TRAIN_MAX_EPISODES: ${{ inputs.train_max_episodes }}
+          SKIP_BOUNDARY: ${{ inputs.skip_boundary }}
         run: |
           set -euo pipefail
           args=(--annotations out/release/annotations.jsonl
                 --model-out out/release/ad_model.json
                 --boundary-out out/release/boundary_model.json
+                --oof-summary out/release/oof_summary.jsonl
                 --outer-folds 6 --inner-folds 4
                 --require-ad-type)
           if [ "${TRAIN_MAX_EPISODES:-0}" != "0" ]; then
             args+=(--max-episodes "$TRAIN_MAX_EPISODES")
+          fi
+          if [ "${SKIP_BOUNDARY:-0}" = "1" ]; then
+            args+=(--skip-boundary)
           fi
           python scripts/train_single_episode.py "${args[@]}"
       - name: Blind test release audio batch

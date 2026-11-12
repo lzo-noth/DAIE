@@ -1795,12 +1795,65 @@ def _final_joint_metrics(
     return metrics
 
 
+def _write_oof_summary(
+    samples: list[EpisodeSample],
+    oof: np.ndarray,
+    offsets: dict[int, tuple[int, int]],
+    path: Path,
+    thresholds: tuple[float, ...] = (0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99),
+) -> None:
+    """Persist per-episode out-of-fold counts so failures can be attributed.
+
+    Event precision is decided by windows the classifier marks as ad inside
+    ordinary content. Aggregating out-of-fold window predictions per episode
+    answers whether those false positives are concentrated in a few feeds
+    (domain shift, data problem) or spread evenly (feature capacity problem)
+    without re-running the cross-validation.
+    """
+    rows = []
+    for index, sample in enumerate(samples):
+        start, end = offsets[id(sample)]
+        probabilities = oof[start:end]
+        labels = sample.labels
+        if probabilities.size != labels.size:
+            continue
+        positive = labels > 0
+        hours = float(sample.duration_s) / 3600.0 if sample.duration_s else 0.0
+        counts = {}
+        for threshold in thresholds:
+            predicted = probabilities >= threshold
+            false_positive = int(np.count_nonzero(predicted & ~positive))
+            counts[f"{threshold:.2f}"] = {
+                "tp": int(np.count_nonzero(predicted & positive)),
+                "fp": false_positive,
+                "fn": int(np.count_nonzero(~predicted & positive)),
+                "fp_per_hour": round(false_positive / hours, 3) if hours else None,
+            }
+        rows.append(
+            {
+                "feed": sample.feed,
+                "episode": sample.episode,
+                "windows": int(labels.size),
+                "positive_windows": int(np.count_nonzero(positive)),
+                "duration_s": round(float(sample.duration_s), 1),
+                "thresholds": counts,
+            }
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--annotations", type=Path, help="完全监督标注 JSONL")
     parser.add_argument("--labels", type=Path, help="LLM 候选标注（弱监督）")
     parser.add_argument("--audio-manifest", type=Path, help="弱监督音频清单 JSONL")
     parser.add_argument("--model-out", type=Path, default=Path("models/ad_segment_model.json"))
+    parser.add_argument(
+        "--oof-summary",
+        type=Path,
+        help="把每集 OOF 窗口判定汇总写到该 JSONL，用于定位误报来源",
+    )
     parser.add_argument("--boundary-out", type=Path, default=Path("models/boundary_model.json"))
     parser.add_argument("--proxy", help="HTTP(S) 代理")
     parser.add_argument("--max-episodes", type=int, default=0, help="最多处理多少集，0 表示全部")
@@ -2361,6 +2414,9 @@ def main() -> int:
     args.model_out.parent.mkdir(parents=True, exist_ok=True)
     args.model_out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[model] {args.model_out}")
+    if args.oof_summary:
+        _write_oof_summary(samples, oof, offsets, args.oof_summary)
+        print(f"[oof] {args.oof_summary}")
     print(json.dumps({key: payload["metrics"][key] for key in ("window", "event")}, ensure_ascii=False))
 
     boundary_written = False
