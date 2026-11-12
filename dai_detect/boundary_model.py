@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -37,7 +38,6 @@ BOUNDARY_FEATURES: list[str] = [
     "d_entropy",
     "d_corr",
     "d_width",
-    "d_clip",
     "d_band",
     "s_loud",
     "s_flat",
@@ -45,7 +45,6 @@ BOUNDARY_FEATURES: list[str] = [
     "s_entropy",
     "s_corr",
     "s_width",
-    "s_clip",
     "d_loud_long",
     "s_loud_long",
     "d_flat_long",
@@ -71,7 +70,6 @@ _SIGNED_INDEX: dict[str, int] = {
         "s_entropy",
         "s_corr",
         "s_width",
-        "s_clip",
         "s_loud_long",
         "s_rolloff",
         "s_centroid",
@@ -142,7 +140,6 @@ def boundary_change_matrix(mono: dict, forensic: dict) -> dict:
     entropy = np.asarray(forensic["entropy"], dtype=np.float64)
     corr = np.asarray(forensic["stereo_corr"], dtype=np.float64)
     width = np.asarray(forensic["side_mid_db"], dtype=np.float64)
-    clip = np.asarray(forensic["clip_ratio"], dtype=np.float64)
     bands = np.asarray(forensic["bands"], dtype=np.float64)
     rolloff = np.asarray(forensic["rolloff_hz"], dtype=np.float64)
     phase = np.asarray(forensic["phase_jump"], dtype=np.float64)
@@ -157,7 +154,7 @@ def boundary_change_matrix(mono: dict, forensic: dict) -> dict:
         }
     loud, flat, mfcc, flux = loud[:count], flat[:count], mfcc[:count], flux[:count]
     f_loud, hf, entropy, corr = f_loud[:count], hf[:count], entropy[:count], corr[:count]
-    width, clip, bands = width[:count], clip[:count], bands[:count]
+    width, bands = width[:count], bands[:count]
     rolloff, phase = rolloff[:count], phase[:count]
 
     def change(
@@ -185,7 +182,8 @@ def boundary_change_matrix(mono: dict, forensic: dict) -> dict:
     features[:, column("d_entropy")], features[:, column("s_entropy")] = change(entropy)
     features[:, column("d_corr")], features[:, column("s_corr")] = change(corr)
     features[:, column("d_width")], features[:, column("s_width")] = change(width)
-    features[:, column("d_clip")], features[:, column("s_clip")] = change(clip)
+    # 削波比例在正常母带的播客里恒为 0，作为特征只会给标准化带来除零噪声；
+    # 实测该维在真值边界上的 AUC 恰好 0.000（全常数）。
 
     band_delta = np.zeros_like(bands)
     for dimension in range(bands.shape[1]):
@@ -287,6 +285,14 @@ class BoundaryModel:
             return None
         try:
             features = [str(name) for name in payload["features"]]
+            if features != BOUNDARY_FEATURES:
+                # 旧模型按名字取特征；特征集变化后它只能静默退化成启发式，
+                # 而项目里禁止边界头静默回退，所以这里直接拒绝加载。
+                print(
+                    "[boundary] 模型特征集与当前代码不一致，已忽略；请重新训练",
+                    file=sys.stderr,
+                )
+                return None
             if payload.get("kind") == "onset_offset":
                 onset = _Head.from_payload(payload["onset"])
                 offset = _Head.from_payload(payload["offset"])
@@ -332,7 +338,6 @@ _BASE_WEIGHTS = {
     "d_entropy": 0.04,
     "d_corr": 0.10,
     "d_width": 0.06,
-    "d_clip": 0.02,
     "d_band": 0.16,
     "d_loud_long": 0.20,
     "d_flat_long": 0.04,
@@ -356,7 +361,6 @@ DIRECTION_WEIGHTS = {
     "s_entropy": 0.05,
     "s_corr": 0.08,
     "s_width": 0.05,
-    "s_clip": 0.02,
     "s_loud_long": 0.20,
     "s_centroid": 0.05,
     "s_rolloff": 0.04,

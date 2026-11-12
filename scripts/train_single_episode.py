@@ -44,7 +44,7 @@ from dai_detect.boundary_model import (
     boundary_change_matrix,
     heuristic_boundary_scores,
 )
-from dai_detect.decode_config import resolve_thresholds
+from dai_detect.decode_config import DEFAULT_SEARCH_S, resolve_thresholds
 from dai_detect.evaluation import evaluate_events
 from dai_detect.metrics import (
     best_f1_threshold,
@@ -1148,7 +1148,7 @@ def _choose_boundary_thresholds(
                 }
                 # 与部署端一致：精修不能把事件缩到比最短广告时长还短。
                 refined = refine_events(
-                    item["events"], change, search_s=2.5, min_duration=MIN_AD_S
+                    item["events"], change, search_s=DEFAULT_SEARCH_S, min_duration=MIN_AD_S
                 )
             else:
                 refined = []
@@ -1634,7 +1634,7 @@ def _event_metrics(
                     "kind": "heuristic",
                 }
             refined = refine_events(
-                events, change, search_s=2.5, min_duration=MIN_AD_S
+                events, change, search_s=DEFAULT_SEARCH_S, min_duration=MIN_AD_S
             )
         else:
             refined = [

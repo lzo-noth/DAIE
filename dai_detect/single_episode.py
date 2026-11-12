@@ -20,7 +20,7 @@ from typing import Callable, Optional
 from .ad_classifier import HeuristicAdModel, load_ad_model
 from .audio import DownmixResampler, iter_pcm_stereo, source_sha256
 from .boundary_model import load_boundary_model, score_boundaries
-from .decode_config import resolve_thresholds
+from .decode_config import DEFAULT_SEARCH_S, resolve_thresholds
 from .features import FeatureExtractor
 from .forensic import StereoForensicExtractor
 from .refinement import refine_events
@@ -39,7 +39,7 @@ class SingleConfig:
     max_gap_s: float = 2.0
     enter_threshold: Optional[float] = None
     exit_threshold: Optional[float] = None
-    search_s: float = 2.5
+    search_s: float = DEFAULT_SEARCH_S
     refine: bool = True
     min_confidence: float = 0.0
     model_path: Optional[str] = None

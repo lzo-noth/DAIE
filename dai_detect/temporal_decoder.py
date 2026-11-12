@@ -13,6 +13,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from dai_detect.decode_config import DEFAULT_MAX_GAP_S
+
 
 @dataclass
 class DecodedEvent:
@@ -63,10 +65,11 @@ def decode_windows(
     hop_s: float,
     span_s: float,
     min_ad_s: float = 10.0,
-    max_gap_s: float = 2.0,
+    max_gap_s: float = DEFAULT_MAX_GAP_S,
     max_ad_s: float = 600.0,
     enter_threshold: float = 0.55,
     exit_threshold: float = 0.40,
+    core_threshold: float | None = None,
 ) -> list[DecodedEvent]:
     if len(times) == 0 or len(probabilities) == 0:
         return []
@@ -91,9 +94,45 @@ def decode_windows(
         if event.duration < min_ad_s:
             continue
         for piece in _split(event, max_ad_s, smooth, times, span_s):
-            if piece.duration >= min_ad_s:
-                kept.append(piece)
+            trimmed = _trim_core(piece, smooth, times, span_s, core_threshold)
+            if trimmed.duration >= min_ad_s:
+                kept.append(trimmed)
     return kept
+
+
+def _trim_core(
+    event: DecodedEvent,
+    smooth: np.ndarray,
+    times: np.ndarray,
+    span_s: float,
+    core_threshold: float | None,
+) -> DecodedEvent:
+    """Pull event edges back to where the evidence is still strong.
+
+    Hysteresis keeps an event alive through dips, so a break whose trailing
+    content scores just above the exit threshold stays attached to the ad and
+    pushes its end tens of seconds late. Trimming from each edge until the
+    smoothed probability is back above ``core_threshold`` removes that tail
+    without touching the interior of the break.
+    """
+    if core_threshold is None:
+        return event
+    first, last = event.first_index, event.last_index
+    while first < last and smooth[first] < core_threshold:
+        first += 1
+    while last > first and smooth[last] < core_threshold:
+        last -= 1
+    if first == event.first_index and last == event.last_index:
+        return event
+    window = smooth[first: last + 1]
+    return DecodedEvent(
+        start=max(0.0, float(times[first] - span_s / 2.0)),
+        end=float(times[last] + span_s / 2.0),
+        probability=float(np.mean(window)) if len(window) else 0.0,
+        peak=float(np.max(window)) if len(window) else 0.0,
+        first_index=first,
+        last_index=last,
+    )
 
 
 def _make_event(
