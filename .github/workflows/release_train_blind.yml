@@ -114,6 +114,7 @@ jobs:
           fi
           python scripts/train_single_episode.py "${args[@]}"
       - name: Blind test release audio batch
+        if: inputs.skip_boundary != '1'
         env:
           ALLOW_WEAK: ${{ inputs.allow_weak_blind_labels }}
           MIN_EVENTS: ${{ inputs.min_events }}
@@ -140,6 +141,12 @@ jobs:
             "${args[@]}" \
             --reports-out-dir out/release/blind_reports \
             --out out/release/blind_summary.json
+      - name: Drop audio snapshots before upload
+        if: always()
+        run: |
+          set -euo pipefail
+          find out/release -type f \( -name '*.mp3' -o -name '*.m4a' -o -name '*.wav' -o -name '*.opus' \) -delete
+          du -sh out/release
       - uses: actions/upload-artifact@v4
         if: always()
         with:
