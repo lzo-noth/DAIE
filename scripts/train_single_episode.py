@@ -2415,7 +2415,7 @@ def main() -> int:
     args.model_out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[model] {args.model_out}")
     if args.oof_summary:
-        _write_oof_summary(samples, oof, offsets, args.oof_summary)
+        _write_oof_summary(samples, oof, per_episode_offset, args.oof_summary)
         print(f"[oof] {args.oof_summary}")
     print(json.dumps({key: payload["metrics"][key] for key in ("window", "event")}, ensure_ascii=False))
 

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import numpy as np
@@ -30,6 +33,7 @@ from scripts.train_single_episode import (
     _predict,
     _select_boundary_candidate,
     _training_artifacts_complete,
+    _write_oof_summary,
 )
 
 
@@ -235,6 +239,32 @@ class GroupedCrossValidationTest(unittest.TestCase):
             boundary_scores=cached,
         )
         self.assertEqual(without, with_cache)
+
+    def test_oof_summary_counts_are_per_episode(self) -> None:
+        """OOF 汇总必须按集统计，否则无法判断误报是否集中在少数节目。"""
+        samples = [_boundary_episode("A"), _boundary_episode("B")]
+        probabilities = []
+        offsets = {}
+        cursor = 0
+        for sample in samples:
+            count = len(sample.labels)
+            probabilities.extend(np.resize(np.asarray([0.9, 0.1]), count))
+            offsets[id(sample)] = (cursor, cursor + count)
+            cursor += count
+            sample.labels[:] = 0.0
+            sample.labels[0] = 1.0
+        probabilities = np.asarray(probabilities, dtype=np.float64)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oof.jsonl"
+            _write_oof_summary(samples, probabilities, offsets, path, thresholds=(0.9,))
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            counts = row["thresholds"]["0.90"]
+            self.assertEqual(counts["tp"], 1)
+            self.assertEqual(counts["fn"], 0)
+            self.assertGreater(counts["fp"], 0)
 
     def test_window_metrics_use_each_fold_threshold(self) -> None:
         samples = [_sample("A", [1, 0]), _sample("B", [1, 0])]
