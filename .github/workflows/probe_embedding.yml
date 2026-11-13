@@ -1,0 +1,80 @@
+name: probe-embedding
+
+on:
+  workflow_dispatch:
+    inputs:
+      annotation_run_id:
+        description: "release-annotate 的 run id（提供人工校对后的标注与音频地址）"
+        required: true
+      max_episodes:
+        description: "只取前 N 集做可行性验证（0=全部）"
+        required: false
+        default: "24"
+      skip_embedding:
+        description: "1=只跑 77 维基线，用于通道自检"
+        required: false
+        default: "0"
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          python -m pip install --quiet "numpy" "tensorflow-cpu>=2.16,<2.21" "tensorflow-hub>=0.16"
+      - name: Verify AudioSet model loads
+        if: inputs.skip_embedding != '1'
+        run: |
+          python - <<'PY'
+          import numpy as np
+          import tensorflow_hub as hub
+          model = hub.load("https://tfhub.dev/google/yamnet/1")
+          _, embeddings, _ = model(np.zeros(15360, dtype=np.float32))
+          print("yamnet ok", embeddings.shape)
+          PY
+      - name: Download annotation artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANNOTATION_RUN: ${{ inputs.annotation_run_id }}
+        run: |
+          set -euo pipefail
+          name=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ANNOTATION_RUN/artifacts" \
+            --jq '.artifacts[] | select(.name | test("^dai-release-annotations-[0-9]+$")) | .name' \
+            | sort -t- -k4 -n | tail -1)
+          if [ -z "$name" ]; then
+            echo "run $ANNOTATION_RUN 没有 dai-release-annotations artifact" >&2
+            exit 1
+          fi
+          mkdir -p out/release
+          gh run download "$ANNOTATION_RUN" -n "$name" -D out/release --repo "$GITHUB_REPOSITORY"
+          test -s out/release/annotations.jsonl
+      - name: Probe hand-crafted features vs AudioSet embeddings
+        env:
+          MAX_EPISODES: ${{ inputs.max_episodes }}
+          SKIP_EMBEDDING: ${{ inputs.skip_embedding }}
+        run: |
+          set -euo pipefail
+          args=(--annotations out/release/annotations.jsonl
+                --out out/probe/probe_result.json
+                --max-episodes "$MAX_EPISODES")
+          if [ "$SKIP_EMBEDDING" = "1" ]; then
+            args+=(--skip-embedding)
+          fi
+          python scripts/probe_embedding.py "${args[@]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dai-probe-embedding-${{ github.run_number }}
+          path: out/probe/
+          if-no-files-found: warn
+          retention-days: 14
