@@ -31,16 +31,22 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
-          python -m pip install --quiet "numpy" "tensorflow-cpu>=2.16,<2.21" "tensorflow-hub>=0.16"
+          python -m pip install --quiet "numpy" "onnxruntime>=1.18"
       - name: Verify AudioSet model loads
         if: inputs.skip_embedding != '1'
+        env:
+          YAMNET_MODEL_PATH: out/probe/yamnet.onnx
         run: |
+          set -euo pipefail
+          mkdir -p out/probe
           python - <<'PY'
           import numpy as np
-          import tensorflow_hub as hub
-          model = hub.load("https://tfhub.dev/google/yamnet/1")
-          _, embeddings, _ = model(np.zeros(15360, dtype=np.float32))
-          print("yamnet ok", embeddings.shape)
+          from dai_detect.acoustic_embedding import YamnetEmbedder
+          example = (np.random.default_rng(0).standard_normal(16000) * 0.05).astype(np.float32)
+          embedder = YamnetEmbedder()
+          embedder.push(example)
+          embeddings, centres = embedder.finish()
+          print("yamnet ok", embeddings.shape, centres[:3])
           PY
       - name: Download annotation artifact
         env:
@@ -62,6 +68,7 @@ jobs:
         env:
           MAX_EPISODES: ${{ inputs.max_episodes }}
           SKIP_EMBEDDING: ${{ inputs.skip_embedding }}
+          YAMNET_MODEL_PATH: out/probe/yamnet.onnx
         run: |
           set -euo pipefail
           args=(--annotations out/release/annotations.jsonl

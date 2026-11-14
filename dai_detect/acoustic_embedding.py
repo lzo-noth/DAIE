@@ -4,10 +4,19 @@ Production detection must stay dependency free, so the shipped pipeline keeps
 using the 77 hand-crafted window features. This module exists to answer one
 question offline: do pretrained acoustic embeddings separate ads from ordinary
 content where the hand-crafted features cap out? Only
-``scripts/probe_embedding.py`` imports it; TensorFlow is loaded lazily.
+``scripts/probe_embedding.py`` imports it, and ONNX Runtime is imported lazily.
+
+The weights are Google's YAMNet (AudioSet, 521 classes) exported to ONNX. Tensor
+Flow Hub's original endpoints are retired, so the model is fetched from Hugging
+Face mirrors that accept raw audio and expose the 1024-d embeddings.
 """
 
 from __future__ import annotations
+
+import os
+import urllib.request
+from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -16,8 +25,30 @@ PATCH_SAMPLES = 15360  # YAMNet's 0.96 s receptive field
 HOP_SAMPLES = 7680  # 0.48 s, YAMNet's own frame hop
 EMBEDDING_DIM = 1024
 
-_MODEL_URL = "https://tfhub.dev/google/yamnet/1"
-_MODEL_FALLBACK_URL = "https://storage.googleapis.com/tfhub-modules/google/yamnet/1.tar.gz"
+MODEL_URLS = (
+    "https://huggingface.co/andrelgomes/yamnet-onnx/resolve/main/yamnet.onnx",
+    "https://huggingface.co/zeropointnine/yamnet-onnx/resolve/main/yamnet.onnx",
+)
+
+
+def ensure_model(path: Path) -> Path:
+    """Download the ONNX weights once; they are a few megabytes."""
+    if path.exists() and path.stat().st_size > 1_000_000:
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    errors = []
+    for url in MODEL_URLS:
+        try:
+            with urllib.request.urlopen(url, timeout=180) as response:
+                payload = response.read()
+            if len(payload) < 1_000_000:
+                errors.append(f"{url}: 只有 {len(payload)} 字节")
+                continue
+            path.write_bytes(payload)
+            return path
+        except Exception as exc:  # 网络/镜像不可用，换下一个源
+            errors.append(f"{url}: {exc}")
+    raise RuntimeError("无法下载 YAMNet ONNX 权重：" + "; ".join(errors))
 
 
 class YamnetEmbedder:
@@ -27,11 +58,18 @@ class YamnetEmbedder:
     centres land on the detector's 0.5 s window grid.
     """
 
-    def __init__(self, batch_size: int = 64, model_url: str = _MODEL_URL) -> None:
-        self.batch_size = max(1, int(batch_size))
-        self.model_url = model_url
-        self._hub = None
-        self._model = None
+    def __init__(
+        self,
+        model_path: Optional[Path] = None,
+        threads: int = 1,
+    ) -> None:
+        self.model_path = Path(
+            model_path or os.environ.get("YAMNET_MODEL_PATH") or "out/probe/yamnet.onnx"
+        )
+        self.threads = max(1, int(threads))
+        self._session = None
+        self._input = ""
+        self._embedding_output = ""
         self._buffer = np.zeros(0, dtype=np.float32)
         self._pending: list[np.ndarray] = []
         self._patches = 0
@@ -39,16 +77,26 @@ class YamnetEmbedder:
         self._times: list[np.ndarray] = []
 
     def _load(self) -> None:
-        if self._model is not None:
+        if self._session is not None:
             return
-        import tensorflow_hub as hub
+        import onnxruntime as ort
 
-        self._hub = hub
-        try:
-            self._model = hub.load(self.model_url)
-        except Exception:
-            # tfhub.dev 迁移期间不可用时退回同模型的 GCS 分发包。
-            self._model = hub.load(_MODEL_FALLBACK_URL)
+        path = ensure_model(self.model_path)
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = self.threads
+        options.inter_op_num_threads = 1
+        self._session = ort.InferenceSession(
+            str(path), sess_options=options, providers=["CPUExecutionProvider"]
+        )
+        self._input = self._session.get_inputs()[0].name
+        for output in self._session.get_outputs():
+            shape = output.shape
+            if len(shape) == 2 and shape[1] == EMBEDDING_DIM:
+                self._embedding_output = output.name
+                break
+        if not self._embedding_output:
+            names = [(item.name, item.shape) for item in self._session.get_outputs()]
+            raise ValueError(f"YAMNet ONNX 没有 {EMBEDDING_DIM} 维 embedding 输出: {names}")
 
     def push(self, samples: np.ndarray) -> None:
         if samples.size == 0:
@@ -59,27 +107,25 @@ class YamnetEmbedder:
         while len(self._buffer) >= PATCH_SAMPLES:
             self._pending.append(self._buffer[:PATCH_SAMPLES])
             self._buffer = self._buffer[HOP_SAMPLES:]
-            if len(self._pending) >= self.batch_size:
+            if len(self._pending) >= 32:
                 self._flush()
 
     def _flush(self) -> None:
         if not self._pending:
             return
         self._load()
-        batch = np.stack(self._pending)
+        values = []
+        for patch in self._pending:
+            outputs = self._session.run([self._embedding_output], {self._input: patch})
+            frames = np.asarray(outputs[0], dtype=np.float32)
+            if frames.ndim != 2 or frames.shape[1] != EMBEDDING_DIM:
+                raise ValueError(f"YAMNet embedding 形状异常: {frames.shape}")
+            values.append(frames.mean(axis=0).astype(np.float16))
         first_patch = self._patches
         count = len(self._pending)
         self._pending.clear()
         self._patches += count
-        _, embeddings, _ = self._model(batch)
-        values = np.asarray(embeddings, dtype=np.float32)
-        if values.ndim == 3:
-            values = values.mean(axis=1)
-        if values.ndim != 2 or values.shape[1] != EMBEDDING_DIM or values.shape[0] != count:
-            raise ValueError(
-                f"YAMNet 输出形状异常: {values.shape}（期望 ({count}, {EMBEDDING_DIM})）"
-            )
-        self._embeddings.append(values.astype(np.float16))
+        self._embeddings.append(np.stack(values))
         starts = (first_patch + np.arange(count)) * HOP_SAMPLES
         self._times.append((starts + PATCH_SAMPLES / 2.0) / SAMPLE_RATE)
 
