@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from dai_detect.acoustic_embedding import EMBEDDING_DIM, window_embeddings
-from scripts.probe_embedding import _recall_at_specificity
+from scripts.probe_embedding import _recall_at_specificity, _window_folds
 
 
 class WindowEmbeddingTest(unittest.TestCase):
@@ -32,6 +32,15 @@ class WindowEmbeddingTest(unittest.TestCase):
         )
         self.assertEqual(out.shape, (1, EMBEDDING_DIM))
         self.assertFalse(out.any())
+
+
+class WindowFoldsTest(unittest.TestCase):
+    def test_episode_folds_expand_to_window_rows(self) -> None:
+        """折里装的是集编号时必须展开成窗口行，否则会训在全量、测在前几行。"""
+        bounds = [(0, 3), (3, 5), (5, 9)]
+        folds = _window_folds([[0, 2], [1]], bounds)
+        self.assertEqual(folds, [[0, 1, 2, 5, 6, 7, 8], [3, 4]])
+        self.assertEqual(sum(len(fold) for fold in folds), 9)
 
 
 class RecallAtSpecificityTest(unittest.TestCase):

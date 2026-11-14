@@ -135,6 +135,21 @@ def _recall_at_specificity(
     }
 
 
+def _window_folds(
+    episode_folds: list[list[int]], bounds: list[tuple[int, int]]
+) -> list[list[int]]:
+    """Expand episode-level folds into the window-row indices they cover.
+
+    ``_group_folds`` groups episodes; the probe evaluates single windows, so a
+    fold has to become a list of window rows. Indexing the window matrix with
+    episode ids silently trains on everything and tests on the first few rows.
+    """
+    return [
+        [row for episode in fold for row in range(*bounds[episode])]
+        for fold in episode_folds
+    ]
+
+
 def _evaluate(
     name: str,
     X: np.ndarray,
@@ -209,7 +224,14 @@ def main() -> int:
     base = np.vstack([item["base"] for item in extracted])
     groups = [item["feed"] for item in extracted]
     hours = sum(item["duration_s"] for item in extracted) / 3600.0
-    folds = _group_folds(groups, k=args.folds)
+    bounds: list[tuple[int, int]] = []
+    cursor = 0
+    for item in extracted:
+        bounds.append((cursor, cursor + len(item["labels"])))
+        cursor += len(item["labels"])
+    folds = _window_folds(_group_folds(groups, k=args.folds), bounds)
+    if sum(len(fold) for fold in folds) != len(labels):
+        raise SystemExit("折划分没有覆盖全部窗口行，指标会失真")
 
     reports = {
         "episodes": len(extracted),
