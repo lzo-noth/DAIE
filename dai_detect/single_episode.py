@@ -20,7 +20,7 @@ from typing import Callable, Optional
 from .ad_classifier import HeuristicAdModel, load_ad_model
 from .audio import DownmixResampler, iter_pcm_stereo, source_sha256
 from .boundary_model import load_boundary_model, score_boundaries
-from .decode_config import DEFAULT_SEARCH_S, resolve_thresholds
+from .decode_config import DEFAULT_MAX_GAP_S, DEFAULT_SEARCH_S, resolve_thresholds
 from .features import FeatureExtractor
 from .forensic import StereoForensicExtractor
 from .refinement import refine_events
@@ -36,7 +36,9 @@ class SingleConfig:
     span_s: float = 1.0
     min_ad_s: float = 10.0
     max_ad_s: float = 600.0
-    max_gap_s: float = 2.0
+    # 必须与 decode_config 的训练默认值同源：训练不改这个值时用的是 8 s，
+    # 推理若用 2 s，同一段概率序列会切出不同事件，训练指标就不描述部署行为。
+    max_gap_s: float = DEFAULT_MAX_GAP_S
     enter_threshold: Optional[float] = None
     exit_threshold: Optional[float] = None
     search_s: float = DEFAULT_SEARCH_S

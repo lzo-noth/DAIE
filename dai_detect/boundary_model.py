@@ -20,11 +20,23 @@ from typing import Optional
 
 import numpy as np
 
+from .forensic import (
+    DEEP_SILENCE_DBFS,
+    DIGITAL_SILENCE_DBFS,
+    silence_run_s,
+)
+
 DEFAULT_BOUNDARY_MODEL = Path(__file__).resolve().parents[1] / "models" / "boundary_model.json"
 BOUNDARY_GRID_S = 0.01
 HALF_WINDOW_S = 0.35
 LONG_WINDOW_S = 2.0
 FLUX_WINDOW_S = 0.15
+# 边界前后各取 1–6 s：短窗看变化瞬间，±2 s 看持续状态，这一段补充
+# "广告位整体是另一种制作"的证据（响度基准、频谱质心、平坦度台阶）。
+CONTEXT_GAP_S = 1.0
+CONTEXT_WINDOW_S = 6.0
+# 特征集合变更必须换 schema，加载端据此拒绝按旧列训练的边界模型。
+BOUNDARY_FEATURE_SCHEMA = "boundary_v2"
 
 # 短窗（±0.35s）看到的是"变化瞬间"，长窗（±2s）看到的是"持续状态"。
 # 广告插入通常是一段数秒到数十秒的电平/频谱台阶，只有长窗能把它和
@@ -59,6 +71,19 @@ BOUNDARY_FEATURES: list[str] = [
     "s_centroid",
     "d_mfcc_max",
     "d_loud_var",
+    "pre_loudness_1_6s",
+    "post_loudness_1_6s",
+    "loudness_step_1_6s",
+    "pre_centroid_1_6s",
+    "post_centroid_1_6s",
+    "centroid_step_1_6s",
+    "pre_flatness_1_6s",
+    "post_flatness_1_6s",
+    "flatness_step_1_6s",
+    "d_silence_deep",
+    "s_silence_deep",
+    "d_silence_digital",
+    "s_silence_digital",
 ]
 
 _SIGNED_INDEX: dict[str, int] = {
@@ -73,6 +98,11 @@ _SIGNED_INDEX: dict[str, int] = {
         "s_loud_long",
         "s_rolloff",
         "s_centroid",
+        "loudness_step_1_6s",
+        "centroid_step_1_6s",
+        "flatness_step_1_6s",
+        "s_silence_deep",
+        "s_silence_digital",
     )
 }
 
@@ -121,6 +151,41 @@ def _moving_max(values: np.ndarray, half: int) -> np.ndarray:
     padded = np.pad(values, half, mode="edge")
     windows = np.lib.stride_tricks.sliding_window_view(padded, 2 * half + 1)
     return windows.max(axis=1)
+
+
+def _outer_means(
+    values: np.ndarray, gap: int, far: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Means over [t-far, t-gap) and (t+gap, t+far].
+
+    Empty sides become NaN and are filled with the episode median by the caller:
+    filling them with 0 would look like a full-scale level and invent a step at
+    the very first and last seconds of every episode.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    count = len(values)
+    if count == 0:
+        empty = np.zeros(0, dtype=np.float64)
+        return empty, empty
+    cumulative = np.concatenate(([0.0], np.cumsum(values)))
+    index = np.arange(count)
+    pre_start = np.clip(index - far, 0, count)
+    pre_end = np.clip(index - gap, 0, count)
+    post_start = np.clip(index + gap, 0, count)
+    post_end = np.clip(index + far, 0, count)
+    pre_span = pre_end - pre_start
+    post_span = post_end - post_start
+    pre = np.where(
+        pre_span > 0,
+        (cumulative[pre_end] - cumulative[pre_start]) / np.maximum(pre_span, 1),
+        np.nan,
+    )
+    post = np.where(
+        post_span > 0,
+        (cumulative[post_end] - cumulative[post_start]) / np.maximum(post_span, 1),
+        np.nan,
+    )
+    return pre, post
 
 
 def boundary_change_matrix(mono: dict, forensic: dict) -> dict:
@@ -221,6 +286,48 @@ def boundary_change_matrix(mono: dict, forensic: dict) -> dict:
         (post_std + 1e-3) / (pre_std + 1e-3)
     )
 
+    # 1–6 s 前/后统计：广告位整体是不是另一种制作，而不只是边界处有没有台阶。
+    gap = max(1, int(round(CONTEXT_GAP_S / grid)))
+    far = max(gap + 1, int(round(CONTEXT_WINDOW_S / grid)))
+    pre_loud, post_loud = _outer_means(loud, gap, far)
+    pre_centroid, post_centroid = _outer_means(centroid, gap, far)
+    pre_flat, post_flat = _outer_means(flat, gap, far)
+    loud_fill = float(np.median(loud))
+    centroid_fill = float(np.median(centroid))
+    flat_fill = float(np.median(flat))
+    pre_loud = np.where(np.isnan(pre_loud), loud_fill, pre_loud)
+    post_loud = np.where(np.isnan(post_loud), loud_fill, post_loud)
+    pre_centroid = np.where(np.isnan(pre_centroid), centroid_fill, pre_centroid)
+    post_centroid = np.where(np.isnan(post_centroid), centroid_fill, post_centroid)
+    pre_flat = np.where(np.isnan(pre_flat), flat_fill, pre_flat)
+    post_flat = np.where(np.isnan(post_flat), flat_fill, post_flat)
+    features[:, column("pre_loudness_1_6s")] = pre_loud
+    features[:, column("post_loudness_1_6s")] = post_loud
+    features[:, column("loudness_step_1_6s")] = post_loud - pre_loud
+    features[:, column("pre_centroid_1_6s")] = pre_centroid
+    features[:, column("post_centroid_1_6s")] = post_centroid
+    features[:, column("centroid_step_1_6s")] = post_centroid - pre_centroid
+    features[:, column("pre_flatness_1_6s")] = pre_flat
+    features[:, column("post_flatness_1_6s")] = post_flat
+    features[:, column("flatness_step_1_6s")] = post_flat - pre_flat
+
+    # 静音运行长度的边缘：拼接点常是"深静音结束"或"深静音开始"。
+    rms_db = np.asarray(forensic.get("rms_db", np.zeros(0)), dtype=np.float64)
+    if rms_db.size:
+        if len(rms_db) < count:
+            rms_db = np.pad(rms_db, (0, count - len(rms_db)), mode="edge")
+        else:
+            rms_db = rms_db[:count]
+        deep_run = np.log1p(silence_run_s(rms_db, DEEP_SILENCE_DBFS))
+        features[:, column("d_silence_deep")], features[:, column("s_silence_deep")] = change(
+            deep_run
+        )
+        digital_run = np.log1p(silence_run_s(rms_db, DIGITAL_SILENCE_DBFS))
+        (
+            features[:, column("d_silence_digital")],
+            features[:, column("s_silence_digital")],
+        ) = change(digital_run)
+
     features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
 
     times = np.arange(count, dtype=np.float64) * grid
@@ -285,6 +392,14 @@ class BoundaryModel:
             return None
         try:
             features = [str(name) for name in payload["features"]]
+            if payload.get("feature_schema") != BOUNDARY_FEATURE_SCHEMA:
+                # 没有 schema 的模型是按旧列训练的；按名字取列不会报错，只会
+                # 少看新增证据并悄悄退化，而项目里禁止边界头静默回退。
+                print(
+                    "[boundary] 模型缺少当前特征 schema，已忽略；请重新训练",
+                    file=sys.stderr,
+                )
+                return None
             if features != BOUNDARY_FEATURES:
                 # 旧模型按名字取特征；特征集变化后它只能静默退化成启发式，
                 # 而项目里禁止边界头静默回退，所以这里直接拒绝加载。
@@ -350,6 +465,11 @@ _BASE_WEIGHTS = {
     "d_centroid": 0.06,
     "d_mfcc_max": 0.04,
     "d_loud_var": 0.04,
+    "loudness_step_1_6s": 0.10,
+    "centroid_step_1_6s": 0.04,
+    "flatness_step_1_6s": 0.03,
+    "d_silence_deep": 0.05,
+    "d_silence_digital": 0.04,
 }
 BASE_WEIGHTS = np.asarray(
     [_BASE_WEIGHTS.get(name, 0.0) for name in BOUNDARY_FEATURES], dtype=np.float64
@@ -364,6 +484,11 @@ DIRECTION_WEIGHTS = {
     "s_loud_long": 0.20,
     "s_centroid": 0.05,
     "s_rolloff": 0.04,
+    "loudness_step_1_6s": 0.08,
+    "centroid_step_1_6s": 0.03,
+    "flatness_step_1_6s": 0.02,
+    "s_silence_deep": 0.04,
+    "s_silence_digital": 0.03,
 }
 
 

@@ -12,7 +12,7 @@ import numpy as np
 
 from dai_detect.audio import ffmpeg_path
 from dai_detect.single_episode import SingleConfig, analyze_single, extract_features
-from dai_detect.single_features import WINDOW_FEATURES, build_windows, window_labels
+from dai_detect.single_features import WINDOW_FEATURE_SCHEMA, WINDOW_FEATURES, build_windows, window_labels
 from scripts.train_single_episode import _balance, _fit_logistic
 from tests import synth
 
@@ -91,6 +91,7 @@ class HardCaseTest(unittest.TestCase):
         payload = {
             "version": 1,
             "kind": "logistic",
+            "feature_schema": WINDOW_FEATURE_SCHEMA,
             "features": list(WINDOW_FEATURES),
             **model,
             "threshold": 0.5,
@@ -155,6 +156,37 @@ class HardCaseTest(unittest.TestCase):
         self.assertGreaterEqual(captured, 8.0, best)
         self.assertLessEqual(abs(best["start"] - 15.0), 2.5, best)
         self.assertLessEqual(abs(best["end"] - 27.0), 2.5, best)
+
+    def test_silence_bracketed_ad_is_detected(self) -> None:
+        speech_a = synth.stereo(synth.speech(15.0, 2101, amplitude=0.08, sr=SR48), 2101, sr=SR48)
+        music = synth.stereo(synth.ad(12.0, seed=222, amplitude=0.3, sr=SR48), 2222, sr=SR48)
+        speech_b = synth.stereo(synth.speech(15.0, 2102, amplitude=0.08, sr=SR48), 2102, sr=SR48)
+        silence = np.zeros((int(0.5 * SR48), 2), dtype=np.float32)
+        path = self._write("digital_silence.wav", [speech_a, silence, music, silence, speech_b])
+        timeline = analyze_single(str(path), SingleConfig())
+        self.assertTrue(timeline["ads"], timeline)
+
+    def test_deep_silence_bracketed_ad_is_detected(self) -> None:
+        speech_a = synth.stereo(synth.speech(15.0, 2201, amplitude=0.08, sr=SR48), 2201, sr=SR48)
+        music = synth.stereo(synth.ad(12.0, seed=223, amplitude=0.3, sr=SR48), 2233, sr=SR48)
+        speech_b = synth.stereo(synth.speech(15.0, 2202, amplitude=0.08, sr=SR48), 2202, sr=SR48)
+        # -75 dBFS 噪声底：低于深静音门限，但不是全零 PCM。
+        rng = np.random.default_rng(2200)
+        floor = (rng.standard_normal(int(1.4 * SR48)) * 1.8e-4).astype(np.float32)
+        silence = np.stack((floor, floor[::-1]), axis=1)
+        path = self._write("deep_silence.wav", [speech_a, silence, music, silence, speech_b])
+        timeline = analyze_single(str(path), SingleConfig())
+        self.assertTrue(timeline["ads"], timeline)
+
+    def test_silence_between_normal_edits_is_not_an_ad(self) -> None:
+        parts = [
+            synth.stereo(synth.speech(15.0, 2301, amplitude=0.1, sr=SR48), 2301, sr=SR48),
+            np.zeros((int(0.6 * SR48), 2), dtype=np.float32),
+            synth.stereo(synth.speech(15.0, 2302, amplitude=0.1, sr=SR48), 2302, sr=SR48),
+        ]
+        path = self._write("edits_with_pause.wav", parts)
+        timeline = analyze_single(str(path), SingleConfig())
+        self.assertEqual(timeline["ads"], [], timeline["ads"])
 
     def test_reencoded_mp3_ad_is_detected(self) -> None:
         path = self._loud_ad_episode("source.wav", 6)

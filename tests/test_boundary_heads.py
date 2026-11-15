@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from dai_detect.boundary_model import (
+    BOUNDARY_FEATURE_SCHEMA,
     BOUNDARY_FEATURES,
     BoundaryModel,
     _SIGNED_INDEX,
@@ -88,6 +89,7 @@ class BoundaryHeadTest(unittest.TestCase):
         payload = {
             "version": 1,
             "kind": "onset_offset",
+            "feature_schema": BOUNDARY_FEATURE_SCHEMA,
             "features": list(BOUNDARY_FEATURES),
             "onset": head,
             "offset": offset_head,
@@ -111,6 +113,7 @@ class BoundaryHeadTest(unittest.TestCase):
         payload = {
             "version": 1,
             "kind": "logistic",
+            "feature_schema": BOUNDARY_FEATURE_SCHEMA,
             "features": list(BOUNDARY_FEATURES),
             "mean": [0.0] * len(BOUNDARY_FEATURES),
             "scale": [1.0] * len(BOUNDARY_FEATURES),

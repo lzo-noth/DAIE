@@ -19,11 +19,41 @@ FORENSIC_SAMPLE_RATE = 48000
 FRAME = 1024
 HOP = 480
 FRAME_GRID_S = HOP / float(FORENSIC_SAMPLE_RATE)
+# 独立于频谱帧的 10 ms 能量序列：频谱帧长 21.3 ms，静音/拼接点的持续时间
+# 需要更细且无重叠的网格，否则 0.5 s 的数字静音只能落到两三个帧里。
+RMS_HOP = 480
+DIGITAL_SILENCE_DBFS = -80.0
+DEEP_SILENCE_DBFS = -70.0
 
 N_BANDS = 16
 BAND_EDGES_HZ = np.geomspace(200.0, 20000.0, N_BANDS + 1)
 HF_START_HZ = 12000.0
 PHASE_BAND_HZ = (1000.0, 8000.0)
+
+
+def silence_run_s(levels_db: np.ndarray, threshold_db: float) -> np.ndarray:
+    """Length in seconds of the contiguous below-threshold run at each frame.
+
+    MinusPod 的拼接证据不是"这一帧很静"，而是"静音持续了多久"；运行长度把
+    持续时间变成逐帧可用的数值，窗口和边界两边都能直接聚合。
+    """
+    values = np.asarray(levels_db, dtype=np.float64)
+    if values.size == 0:
+        return np.zeros(0, dtype=np.float64)
+    below = values <= threshold_db
+    if not below.any():
+        return np.zeros(len(below), dtype=np.float64)
+    edges = np.diff(below.astype(np.int8))
+    starts = np.flatnonzero(edges == 1) + 1
+    ends = np.flatnonzero(edges == -1) + 1
+    if below[0]:
+        starts = np.concatenate(([0], starts))
+    if below[-1]:
+        ends = np.concatenate((ends, [len(below)]))
+    runs = np.zeros(len(below), dtype=np.float64)
+    for start, end in zip(starts, ends):
+        runs[start:end] = (end - start) * FRAME_GRID_S
+    return runs
 
 
 def _band_bins(freqs: np.ndarray) -> list[tuple[int, int]]:
@@ -39,6 +69,8 @@ def _empty() -> dict:
     return {
         "duration_s": 0.0,
         "frame_grid_s": FRAME_GRID_S,
+        "rms_db": np.zeros(0, dtype=np.float32),
+        "zero_fraction": np.zeros(0, dtype=np.float32),
         "loudness_db": np.zeros(0, dtype=np.float32),
         "hf_ratio": np.zeros(0, dtype=np.float32),
         "rolloff_hz": np.zeros(0, dtype=np.float32),
@@ -57,6 +89,7 @@ class StereoForensicExtractor:
 
     def __init__(self) -> None:
         self._carry = np.zeros((0, 2), dtype=np.float32)
+        self._rms_carry = np.zeros((0, 2), dtype=np.float32)
         self._window = np.hanning(FRAME).astype(np.float32)
         self._freqs = np.fft.rfftfreq(FRAME, 1.0 / FORENSIC_SAMPLE_RATE)
         self._bands = _band_bins(self._freqs)
@@ -68,6 +101,8 @@ class StereoForensicExtractor:
         self._rows: dict[str, list[np.ndarray]] = {
             key: []
             for key in (
+                "rms_db",
+                "zero_fraction",
                 "loudness_db",
                 "hf_ratio",
                 "rolloff_hz",
@@ -81,6 +116,24 @@ class StereoForensicExtractor:
             )
         }
 
+    def _rms_stream(self, stereo: np.ndarray) -> None:
+        """10 ms non-overlapping RMS, independent of the 21 ms spectral frames."""
+        self._rms_carry = np.concatenate((self._rms_carry, stereo), axis=0)
+        blocks = len(self._rms_carry) // RMS_HOP
+        if blocks <= 0:
+            return
+        chunk = self._rms_carry[: blocks * RMS_HOP]
+        self._rms_carry = self._rms_carry[blocks * RMS_HOP:]
+        energy = np.mean(chunk.reshape(blocks, RMS_HOP, -1) ** 2, axis=(1, 2))
+        self._rows["rms_db"].append(
+            (20.0 * np.log10(np.sqrt(energy) + 1e-7)).astype(np.float32)
+        )
+        # -80 dBFS 只是数字静音的代理；真实 PCM 里"全是零采样"是另一条证据，
+        # 编码器填充/重采样会在两者之间制造差异，所以分开记录。
+        self._rows["zero_fraction"].append(
+            np.mean(chunk.reshape(blocks, RMS_HOP, -1) == 0.0, axis=(1, 2)).astype(np.float32)
+        )
+
     def push(self, stereo: np.ndarray) -> None:
         stereo = np.asarray(stereo, dtype=np.float32)
         if stereo.size == 0:
@@ -91,22 +144,25 @@ class StereoForensicExtractor:
         buffer = np.concatenate((self._carry, stereo), axis=0)
         if len(buffer) < FRAME:
             self._carry = buffer
+            self._rms_stream(stereo)
             return
         count = 1 + (len(buffer) - FRAME) // HOP
         views = np.lib.stride_tricks.sliding_window_view(buffer, FRAME, axis=0)
         frames = np.ascontiguousarray(views[::HOP][:count].transpose(0, 2, 1))
         self._carry = buffer[count * HOP:]
+        self._rms_stream(stereo)
 
         left = frames[:, :, 0]
         right = frames[:, :, 1]
-        mix = frames.mean(axis=2)
 
-        rms = np.sqrt(np.mean(mix * mix, axis=1) + 1e-12)
+        # 能量必须按左右声道功率求和，不能先平均波形：反相节目会让
+        # (L+R)/2 接近 0，把有声音的段落误判成静音或压低响度。
+        rms = np.sqrt(np.mean(frames * frames, axis=(1, 2)) + 1e-12)
         loudness = 20.0 * np.log10(rms + 1e-7)
 
-        windowed = mix * self._window
-        spectra = np.fft.rfft(windowed, axis=1)
-        power = (spectra.real ** 2 + spectra.imag ** 2).astype(np.float32)
+        left_spec = np.fft.rfft(left * self._window, axis=1)
+        right_spec = np.fft.rfft(right * self._window, axis=1)
+        power = (np.abs(left_spec) ** 2 + np.abs(right_spec) ** 2) * 0.5
 
         total = np.maximum(power[:, self._band_mask].sum(axis=1), 1e-12)
         hf = power[:, self._hf_mask].sum(axis=1)
@@ -144,15 +200,16 @@ class StereoForensicExtractor:
 
         magnitude = np.sqrt(power)
         if self._prev_spec is None:
-            previous = spectra
+            previous = left_spec
         else:
-            previous = np.vstack((self._prev_spec[None, :], spectra[:-1]))
-        phase_delta = np.abs(np.angle(spectra * np.conj(previous)))
+            previous = np.vstack((self._prev_spec[None, :], left_spec[:-1]))
+        # 相位连续性只看左声道：左右反相时平均频谱相位不可靠。
+        phase_delta = np.abs(np.angle(left_spec * np.conj(previous)))
         phase_weights = magnitude[:, self._phase_mask]
         weight_sum = phase_weights.sum(axis=1) + 1e-9
         phase_jump = (phase_delta[:, self._phase_mask] * phase_weights).sum(axis=1) / weight_sum
         phase_jump = phase_jump / np.pi
-        self._prev_spec = spectra[-1]
+        self._prev_spec = left_spec[-1]
 
         bands = np.stack(
             [

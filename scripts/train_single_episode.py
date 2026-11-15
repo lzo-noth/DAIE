@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dai_detect.audio import file_sha256
 from dai_detect.boundary_model import (
+    BOUNDARY_FEATURE_SCHEMA,
     BOUNDARY_FEATURES,
     boundary_change_matrix,
     heuristic_boundary_scores,
@@ -56,7 +57,12 @@ from dai_detect.metrics import (
 from dai_detect.refinement import refine_events
 from dai_detect.single_episode import extract_features
 from dai_detect.feed_identity import canonical_feed_key
-from dai_detect.single_features import WINDOW_FEATURES, build_windows, window_labels
+from dai_detect.single_features import (
+    WINDOW_FEATURE_SCHEMA,
+    WINDOW_FEATURES,
+    build_windows,
+    window_labels,
+)
 from dai_detect.temporal_decoder import decode_windows
 
 
@@ -2356,7 +2362,15 @@ def main() -> int:
         for entry in entries
     ]
     data_version = hashlib.sha256(
-        json.dumps(identity_rows, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        json.dumps(
+            {
+                "window_schema": WINDOW_FEATURE_SCHEMA,
+                "boundary_schema": BOUNDARY_FEATURE_SCHEMA,
+                "episodes": identity_rows,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        ).encode("utf-8")
     ).hexdigest()
     model_version = f"ad-{trained_at.replace('-', '').replace(':', '').replace('+', '')}-{data_version[:8]}"
     training_identity = {
@@ -2389,6 +2403,7 @@ def main() -> int:
     payload = {
         "version": 1,
         "kind": "logistic",
+        "feature_schema": WINDOW_FEATURE_SCHEMA,
         "features": list(WINDOW_FEATURES),
         **final_model,
         "threshold": round(threshold, 4),
@@ -2463,6 +2478,7 @@ def main() -> int:
             boundary_payload = {
                 "version": 1,
                 "kind": "onset_offset",
+                "feature_schema": BOUNDARY_FEATURE_SCHEMA,
                 "features": list(BOUNDARY_FEATURES),
                 "onset": final_onset,
                 "offset": final_offset,

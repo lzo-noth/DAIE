@@ -15,13 +15,14 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
-from .single_features import WINDOW_FEATURES, select_features
+from .single_features import WINDOW_FEATURE_SCHEMA, WINDOW_FEATURES, select_features
 
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "ad_segment_model.json"
 
@@ -53,6 +54,14 @@ class AdModel:
             return None
         try:
             features = [str(name) for name in payload["features"]]
+            if payload.get("feature_schema") != WINDOW_FEATURE_SCHEMA:
+                # 旧模型按名字取列，新增特征不会让它报错，只会让它少看证据
+                # 并悄悄退化；这里直接拒绝，避免把旧模型当成当前模型使用。
+                print(
+                    "[ad] 模型缺少当前特征 schema，已忽略；请重新训练",
+                    file=sys.stderr,
+                )
+                return None
             metrics = payload.get("metrics") or {}
             calibration = metrics.get("deployment_calibration") or {}
             return cls(

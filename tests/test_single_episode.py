@@ -13,15 +13,15 @@ import numpy as np
 
 from dai_detect.ad_classifier import AdModel
 from dai_detect.audio import PcmHasher, file_sha256
-from dai_detect.boundary_model import BOUNDARY_FEATURES
+from dai_detect.boundary_model import BOUNDARY_FEATURE_SCHEMA, BOUNDARY_FEATURES
 from dai_detect.cli import main
-from dai_detect.decode_config import resolve_thresholds
+from dai_detect.decode_config import DEFAULT_MAX_GAP_S, resolve_thresholds
 from dai_detect.evaluation import evaluate_events, match_events
 from types import SimpleNamespace
 
 from dai_detect.llm import merge_ad_segments
 from dai_detect.single_episode import SingleConfig, _calibration_problems, analyze_single
-from dai_detect.single_features import WINDOW_FEATURES, window_labels
+from dai_detect.single_features import WINDOW_FEATURE_SCHEMA, WINDOW_FEATURES, window_labels
 from dai_detect.temporal_decoder import decode_windows
 from scripts.blind_test import _independence_check, _load_ground_truth
 from tests import synth
@@ -108,6 +108,7 @@ class SingleEpisodeTest(unittest.TestCase):
     def test_ad_model_round_trip_and_reorders_features(self) -> None:
         payload = {
             "features": ["musicness", "loud_dev"],
+            "feature_schema": WINDOW_FEATURE_SCHEMA,
             "mean": [0.0, 0.0],
             "scale": [1.0, 1.0],
             "weights": [2.0, 1.0],
@@ -159,6 +160,37 @@ class SingleEpisodeTest(unittest.TestCase):
         self.assertAlmostEqual(enter, 0.45)
         self.assertAlmostEqual(exit_value, 0.3)
 
+    def test_default_decoder_config_matches_training(self) -> None:
+        """训练不传 max_gap_s 就走默认值，推理必须产生同样的时间轴。"""
+        self.assertEqual(SingleConfig().max_gap_s, DEFAULT_MAX_GAP_S)
+        times = np.arange(200, dtype=np.float64) * 0.5 + 0.5
+        probabilities = np.full(200, 0.05)
+        for begin, end in ((20, 44), (52, 76), (90, 114)):
+            probabilities[begin:end] = 0.9
+
+        training = decode_windows(
+            times, probabilities, hop_s=0.5, span_s=1.0, min_ad_s=10.0
+        )
+        config = SingleConfig()
+        inference = decode_windows(
+            times,
+            probabilities,
+            hop_s=config.hop_s,
+            span_s=config.span_s,
+            min_ad_s=config.min_ad_s,
+            max_gap_s=config.max_gap_s,
+        )
+        self.assertEqual(
+            [(event.start, event.end) for event in training],
+            [(event.start, event.end) for event in inference],
+        )
+        # 4 s 与 7 s 的内部停顿都属于同一个广告位；2 s 会把它切成三段。
+        self.assertEqual(len(training), 1, training)
+        narrow = decode_windows(
+            times, probabilities, hop_s=0.5, span_s=1.0, min_ad_s=10.0, max_gap_s=2.0
+        )
+        self.assertEqual(len(narrow), 3, narrow)
+
     def test_require_models_rejects_heuristic_fallback(self) -> None:
         path = self._episode("require.wav", 20.0, 40.0, 60.0)
         with self.assertRaises(ValueError):
@@ -174,6 +206,7 @@ class SingleEpisodeTest(unittest.TestCase):
         segment = {
             "version": 1,
             "kind": "logistic",
+            "feature_schema": WINDOW_FEATURE_SCHEMA,
             "features": list(WINDOW_FEATURES),
             "mean": [0.0] * len(WINDOW_FEATURES),
             "scale": [1.0] * len(WINDOW_FEATURES),
@@ -185,6 +218,7 @@ class SingleEpisodeTest(unittest.TestCase):
         boundary = {
             "version": 1,
             "kind": "onset_offset",
+            "feature_schema": BOUNDARY_FEATURE_SCHEMA,
             "features": list(BOUNDARY_FEATURES),
             "onset": head,
             "offset": head,
@@ -216,6 +250,7 @@ class SingleEpisodeTest(unittest.TestCase):
         segment = {
             "version": 1,
             "kind": "logistic",
+            "feature_schema": WINDOW_FEATURE_SCHEMA,
             "features": list(WINDOW_FEATURES),
             "mean": [0.0] * len(WINDOW_FEATURES),
             "scale": [1.0] * len(WINDOW_FEATURES),
@@ -227,6 +262,7 @@ class SingleEpisodeTest(unittest.TestCase):
         boundary = {
             "version": 1,
             "kind": "onset_offset",
+            "feature_schema": BOUNDARY_FEATURE_SCHEMA,
             "features": list(BOUNDARY_FEATURES),
             "onset": head,
             "offset": head,
@@ -309,6 +345,7 @@ class SingleEpisodeTest(unittest.TestCase):
         segment = {
             "version": 1,
             "kind": "logistic",
+            "feature_schema": WINDOW_FEATURE_SCHEMA,
             "features": list(WINDOW_FEATURES),
             "mean": [0.0] * len(WINDOW_FEATURES),
             "scale": [1.0] * len(WINDOW_FEATURES),
@@ -321,6 +358,7 @@ class SingleEpisodeTest(unittest.TestCase):
         boundary = {
             "version": 1,
             "kind": "onset_offset",
+            "feature_schema": BOUNDARY_FEATURE_SCHEMA,
             "features": list(BOUNDARY_FEATURES),
             "onset": head,
             "offset": head,

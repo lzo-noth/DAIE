@@ -14,9 +14,18 @@ from __future__ import annotations
 
 import numpy as np
 
+from .forensic import (
+    DEEP_SILENCE_DBFS,
+    DIGITAL_SILENCE_DBFS,
+    silence_run_s,
+)
+
 WINDOW_HOP_S = 0.5
 WINDOW_SPAN_S = 1.0
 CONTEXT_SPANS_S = (2.0, 4.0)
+# 特征集合变更必须换 schema：旧模型按名字取列，新增特征不会让它报错，
+# 只会让它少看一部分证据并悄悄退化。加载端据此拒绝旧模型。
+WINDOW_FEATURE_SCHEMA = "window_v2"
 
 _BAND_NAMES = [f"band_{index:02d}" for index in range(16)]
 _CONTEXT_NAMES = [
@@ -81,6 +90,14 @@ WINDOW_FEATURES: list[str] = [
     "d_entropy_prev",
     "d_entropy_next",
     *_CONTEXT_NAMES,
+    # 拼接证据：广告位常被数字静音/深静音夹住，而节目内停顿通常更短。
+    "silence_digital_run_log",
+    "silence_deep_run_log",
+    "silence_frac_deep",
+    "silence_frac_dynamic",
+    "silence_level_step_db",
+    "silence_run_count",
+    "digital_zero_fraction",
 ]
 
 
@@ -130,6 +147,16 @@ def build_windows(
     clip = np.asarray(forensic["clip_ratio"], dtype=np.float64)
     phase = np.asarray(forensic["phase_jump"], dtype=np.float64)
     bands = np.asarray(forensic["bands"], dtype=np.float64)
+    rms_db = np.asarray(forensic.get("rms_db", np.zeros(0)), dtype=np.float64)
+    zero_fraction = np.asarray(
+        forensic.get("zero_fraction", np.zeros(0)), dtype=np.float64
+    )
+    digital_runs = silence_run_s(rms_db, DIGITAL_SILENCE_DBFS)
+    deep_runs = silence_run_s(rms_db, DEEP_SILENCE_DBFS)
+    # 动态静音门限跟随本集噪声底；固定 -70 dBFS 在噪声高的节目里几乎不触发。
+    dynamic_threshold = float(
+        np.clip(_percentile(rms_db, 10) - 12.0, DIGITAL_SILENCE_DBFS, -50.0)
+    )
 
     if duration <= 0 or len(loud) == 0 or len(f_loud) == 0 or len(flat) == 0:
         return {
@@ -173,6 +200,15 @@ def build_windows(
         m1 = int(np.clip(round(end / grid_m), m0 + 1, mono_frame_count))
         f0 = int(np.clip(round(start / grid_f), 0, max(forensic_frame_count - 1, 0)))
         f1 = int(np.clip(round(end / grid_f), f0 + 1, forensic_frame_count))
+        if rms_db.size:
+            r0 = int(np.clip(round(start / grid_f), 0, rms_db.size - 1))
+            r1 = int(np.clip(round(end / grid_f), r0 + 1, rms_db.size))
+            window_rms = rms_db[r0:r1]
+            window_zero = zero_fraction[r0:r1] if zero_fraction.size else np.zeros(0)
+        else:
+            r0 = r1 = 0
+            window_rms = np.zeros(0, dtype=np.float64)
+            window_zero = np.zeros(0, dtype=np.float64)
 
         window_loud = loud[m0:m1]
         window_flat = flat[m0:m1]
@@ -190,6 +226,23 @@ def build_windows(
         floor_db = _percentile(window_loud, 10)
         flat_median = float(np.median(window_flat))
         musicness = float(np.clip((flat_base - flat_median) / flat_base, 0.0, 1.0))
+
+        if window_rms.size:
+            digital_run = float(digital_runs[r0:r1].max())
+            deep_run = float(deep_runs[r0:r1].max())
+            frac_deep = float(np.mean(window_rms <= DEEP_SILENCE_DBFS))
+            frac_dynamic = float(np.mean(window_rms <= dynamic_threshold))
+            deep_active = (deep_runs[r0:r1] > 0).astype(np.int8)
+            run_count = int(
+                np.count_nonzero(np.diff(np.concatenate(([0], deep_active))) == 1)
+            )
+            zero_frac = float(np.mean(window_zero)) if window_zero.size else 0.0
+            edge = max(1, int(round(0.1 / grid_f)))
+            level_step = float(np.mean(window_rms[-edge:]) - np.mean(window_rms[:edge]))
+        else:
+            digital_run = deep_run = frac_deep = frac_dynamic = level_step = 0.0
+            run_count = 0
+            zero_frac = 0.0
 
         context_values: list[float] = []
         center = start + span / 2.0
@@ -256,6 +309,13 @@ def build_windows(
             *[0.0] * (len(_BAND_NAMES) - band_count),
             *[0.0] * 10,  # local deltas, filled below
             *context_values,
+            float(np.log1p(digital_run)),
+            float(np.log1p(deep_run)),
+            frac_deep,
+            frac_dynamic,
+            level_step,
+            float(run_count),
+            zero_frac,
         ]
         matrix[index] = np.nan_to_num(np.asarray(row, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
 
