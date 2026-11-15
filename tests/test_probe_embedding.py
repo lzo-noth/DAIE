@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from dai_detect.acoustic_embedding import EMBEDDING_DIM, window_embeddings
-from scripts.probe_embedding import _recall_at_specificity, _window_folds
+from scripts.probe_embedding import _recall_at_specificity, _view_rows, _window_folds
 
 
 class WindowEmbeddingTest(unittest.TestCase):
@@ -32,6 +32,37 @@ class WindowEmbeddingTest(unittest.TestCase):
         )
         self.assertEqual(out.shape, (1, EMBEDDING_DIM))
         self.assertFalse(out.any())
+
+
+class ViewScopeTest(unittest.TestCase):
+    def _windows(self) -> dict:
+        return {"times": np.arange(0.5, 30.0, 0.5), "span_s": 1.0}
+
+    def _ads(self) -> list[dict]:
+        return [
+            {"start_s": 5.0, "end_s": 15.0, "ad_production_style": "produced"},
+            {"start_s": 20.0, "end_s": 25.0, "ad_production_style": "host_read"},
+        ]
+
+    def _labelled(self, view: str) -> dict:
+        windows = self._windows()
+        indices, labels = _view_rows(windows, self._ads(), view)
+        return {float(windows["times"][index]): int(label) for index, label in zip(indices, labels)}
+
+    def test_produced_view_counts_host_read_as_content(self) -> None:
+        labelled = self._labelled("produced")
+        self.assertEqual(labelled[7.0], 1)
+        self.assertEqual(labelled[22.0], 0)
+
+    def test_host_read_view_counts_produced_as_content(self) -> None:
+        labelled = self._labelled("host_read")
+        self.assertEqual(labelled[7.0], 0)
+        self.assertEqual(labelled[22.0], 1)
+
+    def test_all_view_keeps_both_styles_positive(self) -> None:
+        labelled = self._labelled("all")
+        self.assertEqual(labelled[7.0], 1)
+        self.assertEqual(labelled[22.0], 1)
 
 
 class WindowFoldsTest(unittest.TestCase):

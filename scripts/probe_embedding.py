@@ -45,6 +45,27 @@ from scripts.train_single_episode import (
 SPECIFICITIES = (0.90, 0.95, 0.98, 0.99)
 
 
+VIEWS = ("all", "produced", "host_read")
+
+
+def _style_ads(ads: list[dict], view: str) -> list[dict]:
+    if view == "all":
+        return list(ads)
+    return [
+        ad for ad in ads if str(ad.get("ad_production_style") or "") == view
+    ]
+
+
+def _view_rows(windows: dict, ads: list[dict], view: str) -> tuple[np.ndarray, np.ndarray]:
+    """Kept window rows and labels for one scope.
+
+    Windows ambiguous for one scope may be usable in another, so each scope
+    keeps its own rows instead of sharing a single mask.
+    """
+    indices, labels = window_labels(windows, _style_ads(ads, view))
+    return np.asarray(indices, dtype=np.int64), labels.astype(np.int8)
+
+
 def _extract(job: dict) -> dict:
     """Decode one episode once and return labelled windows for every view."""
     collector = FeatureExtractor()
@@ -58,24 +79,28 @@ def _extract(job: dict) -> dict:
         if embedder is not None:
             embedder.push(mono)
     windows = build_windows(collector.finish(), forensic.finish())
-    indices, labels = window_labels(windows, job.get("ads") or [])
-    times = np.asarray(windows["times"], dtype=np.float64)[indices]
-    base = np.asarray(windows["features"], dtype=np.float32)[indices]
+    all_times = np.asarray(windows["times"], dtype=np.float64)
+    all_base = np.asarray(windows["features"], dtype=np.float32)
     if embedder is None:
-        embedding = np.zeros((len(indices), 0), dtype=np.float32)
+        all_embedding = np.zeros((len(all_times), 0), dtype=np.float32)
     else:
         patches, centres = embedder.finish()
-        embedding = window_embeddings(times, centres, patches)
+        embedding = window_embeddings(all_times, centres, patches)
         scale = embedding.std(axis=0)
         scale = np.where(scale < 1e-6, 1.0, scale)
-        embedding = ((embedding - embedding.mean(axis=0)) / scale).astype(np.float32)
+        all_embedding = ((embedding - embedding.mean(axis=0)) / scale).astype(np.float32)
+    ads = job.get("ads") or []
+    views = {}
+    for view in VIEWS:
+        indices, labels = _view_rows(windows, ads, view)
+        views[view] = {"labels": labels, "base": all_base[indices]}
+        if all_embedding.size:
+            views[view]["embedding"] = all_embedding[indices]
     return {
         "feed": job["feed"],
         "episode": job["episode"],
         "duration_s": float(windows.get("duration_s") or 0.0),
-        "labels": labels.astype(np.int8),
-        "base": base,
-        "embedding": embedding,
+        "views": views,
     }
 
 
@@ -87,7 +112,7 @@ def _run_parallel(jobs: list[dict], workers: int) -> list[dict]:
             results.append(_extract(job))
             print(
                 f"[extract] {index + 1}/{len(jobs)} {job['feed']} / {job['episode']}"
-                f" -> {len(results[-1]['labels'])} 窗口，用时 {time.time() - began:.0f}s",
+                f" -> {len(results[-1]['views']['all']['labels'])} 窗口，用时 {time.time() - began:.0f}s",
                 flush=True,
             )
         return results
@@ -98,7 +123,7 @@ def _run_parallel(jobs: list[dict], workers: int) -> list[dict]:
             results.append(payload)
             print(
                 f"[extract] {index + 1}/{len(jobs)} {payload['feed']} / {payload['episode']}"
-                f" -> {len(payload['labels'])} 窗口",
+                f" -> {len(payload['views']['all']['labels'])} 窗口",
                 flush=True,
             )
         return results
@@ -220,44 +245,52 @@ def main() -> int:
     extracted = _run_parallel(jobs, max(1, min(workers, len(jobs))))
     print(f"[time] 特征提取完成: {time.time() - began:.0f}s", flush=True)
 
-    labels = np.concatenate([item["labels"] for item in extracted]).astype(np.float64)
-    base = np.vstack([item["base"] for item in extracted])
     groups = [item["feed"] for item in extracted]
     hours = sum(item["duration_s"] for item in extracted) / 3600.0
-    bounds: list[tuple[int, int]] = []
-    cursor = 0
-    for item in extracted:
-        bounds.append((cursor, cursor + len(item["labels"])))
-        cursor += len(item["labels"])
-    folds = _window_folds(_group_folds(groups, k=args.folds), bounds)
-    if sum(len(fold) for fold in folds) != len(labels):
-        raise SystemExit("折划分没有覆盖全部窗口行，指标会失真")
-
+    episode_folds = _group_folds(groups, k=args.folds)
     reports = {
         "episodes": len(extracted),
-        "feeds": len({item["feed"] for item in extracted}),
-        "windows": int(len(labels)),
-        "positive_windows": int(labels.sum()),
+        "feeds": len(set(groups)),
         "hours": round(hours, 2),
-        "folds": len(folds),
-        "features": {},
+        "folds": len(episode_folds),
+        "views": {},
     }
-    reports["features"]["baseline"] = _evaluate(
-        "baseline", base, labels, folds, hours, args.negatives_per_positive
-    )
-    if not args.skip_embedding:
-        embedding = np.vstack([item["embedding"] for item in extracted])
-        reports["features"]["yamnet"] = _evaluate(
-            "yamnet", embedding, labels, folds, hours, args.negatives_per_positive
+    for view in VIEWS:
+        labels = np.concatenate(
+            [item["views"][view]["labels"] for item in extracted]
+        ).astype(np.float64)
+        base = np.vstack([item["views"][view]["base"] for item in extracted])
+        bounds: list[tuple[int, int]] = []
+        cursor = 0
+        for item in extracted:
+            count = len(item["views"][view]["labels"])
+            bounds.append((cursor, cursor + count))
+            cursor += count
+        folds = _window_folds(episode_folds, bounds)
+        if sum(len(fold) for fold in folds) != len(labels):
+            raise SystemExit(f"{view} 折划分没有覆盖全部窗口行，指标会失真")
+        entry = {
+            "windows": int(len(labels)),
+            "positive_windows": int(labels.sum()),
+            "features": {},
+        }
+        entry["features"]["baseline"] = _evaluate(
+            f"{view}/baseline", base, labels, folds, hours, args.negatives_per_positive
         )
-        reports["features"]["baseline+yamnet"] = _evaluate(
-            "baseline+yamnet",
-            np.hstack([base, embedding]),
-            labels,
-            folds,
-            hours,
-            args.negatives_per_positive,
-        )
+        if not args.skip_embedding:
+            embedding = np.vstack([item["views"][view]["embedding"] for item in extracted])
+            entry["features"]["yamnet"] = _evaluate(
+                f"{view}/yamnet", embedding, labels, folds, hours, args.negatives_per_positive
+            )
+            entry["features"]["baseline+yamnet"] = _evaluate(
+                f"{view}/baseline+yamnet",
+                np.hstack([base, embedding]),
+                labels,
+                folds,
+                hours,
+                args.negatives_per_positive,
+            )
+        reports["views"][view] = entry
     reports["feature_names"] = {"baseline": WINDOW_FEATURES}
     reports["elapsed_s"] = round(time.time() - began, 0)
     args.out.parent.mkdir(parents=True, exist_ok=True)
