@@ -34,6 +34,10 @@ on:
         description: "1=训练时跳过边界头（只做窗口诊断，显著更快）"
         required: false
         default: "0"
+      target_scope:
+        description: "盲测真值范围：produced=只算预录广告（与正式训练目标一致）；all=全部已标注广告"
+        required: false
+        default: "produced"
 permissions:
   contents: read
   actions: read
@@ -120,6 +124,7 @@ jobs:
           MIN_EVENTS: ${{ inputs.min_events }}
           MIN_FEEDS: ${{ inputs.min_feeds }}
           REQUIRE_CALIBRATED: ${{ inputs.require_calibrated_models }}
+          TARGET_SCOPE: ${{ inputs.target_scope }}
         run: |
           set -euo pipefail
           args=()
@@ -138,6 +143,7 @@ jobs:
             --boundary-model out/release/boundary_model.json \
             --require-models "${strict[@]}" --require-independent-test \
             --min-events "$MIN_EVENTS" --min-feeds "$MIN_FEEDS" \
+            --target-scope "$TARGET_SCOPE" \
             "${args[@]}" \
             --reports-out-dir out/release/blind_reports \
             --out out/release/blind_summary.json
