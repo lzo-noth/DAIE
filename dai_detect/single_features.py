@@ -375,20 +375,33 @@ def window_labels(
     ads: list[dict],
     positive_coverage: float = 0.75,
     negative_clearance: float = 0.5,
+    ignore: list[dict] | tuple = (),
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return labelled window indices and labels from ground-truth ads.
 
     A window is positive when at least ``positive_coverage`` of it overlaps an
     ad; negative when it touches no ad and is at least ``negative_clearance``
     seconds away from every ad edge. Ambiguous windows are dropped.
+
+    ``ignore`` holds annotated intervals whose product scope is unknown (for
+    example ads with no ``ad_production_style``). Windows overlapping them or
+    sitting within the clearance margin are dropped from both classes: an
+    unlabelled ad must not silently become a negative example.
     """
     span = float(windows["span_s"])
     times = np.asarray(windows["times"], dtype=np.float64)
     indices: list[int] = []
     labels: list[int] = []
     intervals = [(float(ad["start_s"]), float(ad["end_s"])) for ad in ads]
+    ignored = [(float(ad["start_s"]), float(ad["end_s"])) for ad in ignore]
     for index, center in enumerate(times):
         start, end = center - span / 2.0, center + span / 2.0
+        if any(
+            max(0.0, min(end, ignored_end) - max(start, ignored_start)) > 0.0
+            or max(ignored_start - end, start - ignored_end, 0.0) < negative_clearance
+            for ignored_start, ignored_end in ignored
+        ):
+            continue
         best = 0.0
         nearest = float("inf")
         for ad_start, ad_end in intervals:

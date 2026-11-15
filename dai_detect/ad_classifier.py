@@ -42,6 +42,7 @@ class AdModel:
     git_commit: str = ""
     deployment_calibration: dict = field(default_factory=dict)
     training_identity: dict = field(default_factory=dict)
+    target_scope: dict = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Optional[str | Path] = None) -> Optional["AdModel"]:
@@ -80,6 +81,11 @@ class AdModel:
                 training_identity=(
                     payload.get("training_identity")
                     if isinstance(payload.get("training_identity"), dict)
+                    else {}
+                ),
+                target_scope=(
+                    payload.get("target_scope")
+                    if isinstance(payload.get("target_scope"), dict)
                     else {}
                 ),
             )

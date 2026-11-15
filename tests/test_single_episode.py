@@ -105,6 +105,39 @@ class SingleEpisodeTest(unittest.TestCase):
         self.assertGreater(len(indices), 0)
         self.assertEqual(int(labels.sum()), 4, labels)
 
+    def test_window_labels_ignore_unlabeled_regions(self) -> None:
+        """风格未知的广告区间不能变成负样本，也不能变成正样本。"""
+        windows = {
+            "times": np.arange(10, dtype=np.float64) * 0.5 + 0.5,
+            "span_s": 1.0,
+            "features": np.zeros((10, len(WINDOW_FEATURES)), dtype=np.float32),
+            "names": list(WINDOW_FEATURES),
+        }
+        indices, labels = window_labels(
+            windows,
+            [{"start_s": 1.0, "end_s": 2.0}],
+            ignore=[{"start_s": 4.0, "end_s": 5.0}],
+        )
+        kept = dict(zip(windows["times"][indices], labels))
+        self.assertEqual(kept.get(1.5), 1.0)
+        self.assertEqual(kept.get(3.0), 0.0)
+        self.assertNotIn(4.0, kept)
+        self.assertNotIn(4.5, kept)
+
+    def test_target_scope_separates_produced_host_read_and_unknown(self) -> None:
+        from dai_detect.target_scope import split_ads
+
+        ads = [
+            {"start_s": 0.0, "end_s": 20.0, "ad_production_style": "produced"},
+            {"start_s": 30.0, "end_s": 50.0, "ad_production_style": "host_read"},
+            {"start_s": 60.0, "end_s": 80.0, "ad_production_style": "unknown"},
+            {"start_s": 90.0, "end_s": 110.0},
+        ]
+        target, non_target, ignored = split_ads(ads)
+        self.assertEqual([ad["start_s"] for ad in target], [0.0])
+        self.assertEqual([ad["start_s"] for ad in non_target], [30.0])
+        self.assertEqual([ad["start_s"] for ad in ignored], [60.0, 90.0])
+
     def test_ad_model_round_trip_and_reorders_features(self) -> None:
         payload = {
             "features": ["musicness", "loud_dev"],
@@ -575,6 +608,26 @@ class ReleaseLabelTest(unittest.TestCase):
         path.write_text(json.dumps({"ads": []}), encoding="utf-8")
         _, _, _, label_source, _ = _load_ground_truth(path)
         self.assertEqual(label_source, "unverified")
+
+    def test_merge_ad_segments_with_style_keeps_host_read_spans(self) -> None:
+        segments = [
+            {"start_s": 10.0, "end_s": 13.0},
+            {"start_s": 13.0, "end_s": 16.0},
+            {"start_s": 16.5, "end_s": 20.0},
+        ]
+        results = {
+            "0": {"is_ad": True, "ad_type": "third_party_ad", "host_read": False, "confidence": 0.9},
+            "1": {"is_ad": True, "ad_type": "third_party_ad", "host_read": False, "confidence": 0.9},
+            "2": {"is_ad": True, "ad_type": "third_party_ad", "host_read": True, "confidence": 0.9},
+        }
+        merged = merge_ad_segments(segments, results, max_gap_s=1.0, with_style=True)
+        self.assertEqual(
+            merged,
+            [
+                {"start_s": 10.0, "end_s": 16.0, "ad_production_style": "produced"},
+                {"start_s": 16.5, "end_s": 20.0, "ad_production_style": "host_read"},
+            ],
+        )
 
     def test_merge_ad_segments_merges_adjacent_third_party_ads(self) -> None:
         segments = [

@@ -67,6 +67,7 @@ def _load_ground_truth(
                 "end_verified": ad.get("end_verified"),
                 "ambiguous_boundary": ad.get("ambiguous_boundary"),
                 "host_read": bool(ad.get("host_read") or False),
+                "ad_production_style": str(ad.get("ad_production_style") or ""),
             }
         )
     return rows, float(duration) if duration else None, identity, label_source, review
@@ -116,16 +117,25 @@ def _verify_human_labels(
 
 
 def _scope_ground_truth(
-    ads: list[dict], min_ad_s: float
+    ads: list[dict], min_ad_s: float, target_scope: str = "all"
 ) -> tuple[list[dict], list[dict]]:
-    """Drop ground-truth ads shorter than the product's minimum ad length.
+    """Drop ground-truth ads outside the product's ad definition.
 
     The decoder cannot emit an event shorter than ``min_ad_s``, so counting
     such an ad in the denominator would manufacture a guaranteed false
-    negative. Inference and evaluation must share one ad definition.
+    negative. ``target_scope="produced"`` additionally keeps only ads whose
+    ``ad_production_style`` is ``produced``; annotations without a style are
+    excluded rather than assumed to be produced.
     """
-    kept = [ad for ad in ads if ad["end_s"] - ad["start_s"] >= min_ad_s]
-    excluded = [ad for ad in ads if ad["end_s"] - ad["start_s"] < min_ad_s]
+    kept: list[dict] = []
+    excluded: list[dict] = []
+    for ad in ads:
+        style = str(ad.get("ad_production_style") or "").strip()
+        target_ok = target_scope == "all" or style == "produced"
+        if ad["end_s"] - ad["start_s"] >= min_ad_s and target_ok:
+            kept.append(ad)
+        else:
+            excluded.append(ad)
     return kept, excluded
 
 
@@ -264,6 +274,12 @@ def main() -> int:
     parser.add_argument("--threshold", type=float)
     parser.add_argument("--min-ad", type=float, default=10.0)
     parser.add_argument(
+        "--target-scope",
+        choices=("all", "produced"),
+        default="all",
+        help="评测范围：all=全部已标注广告；produced=只算预录广告（与正式训练目标一致）",
+    )
+    parser.add_argument(
         "--allow-audio-mismatch",
         action="store_true",
         help="真值音频身份不匹配时仍评分（默认拒绝，避免评测另一个 DAI 变体）",
@@ -397,7 +413,22 @@ def main() -> int:
             file=sys.stderr,
         )
         return 3
-    ground_truth, excluded_short_ads = _scope_ground_truth(ground_truth, args.min_ad)
+    ground_truth, excluded_short_ads = _scope_ground_truth(
+        ground_truth, args.min_ad, args.target_scope
+    )
+    style_counts: dict[str, int] = {}
+    for ad in ground_truth:
+        style = str(ad.get("ad_production_style") or "missing")
+        style_counts[style] = style_counts.get(style, 0) + 1
+    model_scope = (timeline.get("model") or {}).get("target_scope") or {}
+    if (
+        model_scope.get("ad_production_style") == "produced"
+        and args.target_scope != "produced"
+    ):
+        print(
+            "[scope] 模型按 produced 训练，但评测范围是 all；host_read 广告会被算作漏检",
+            file=sys.stderr,
+        )
     input_is_local = bool(timeline_audio.get("source_sha256"))
     missing, mismatches, identity_warnings = _identity_checks(
         timeline_audio, gt_identity, input_is_local
@@ -503,8 +534,11 @@ def main() -> int:
         "label_problems": label_problems,
         "ground_truth_scope": {
             "min_ad_s": args.min_ad,
-            "excluded_short_ads": len(excluded_short_ads),
-            "excluded_short_ads_s": [
+            "target_scope": args.target_scope,
+            "kept_ads": len(ground_truth),
+            "style_counts": style_counts,
+            "excluded_ads": len(excluded_short_ads),
+            "excluded_ads_s": [
                 round(float(ad["end_s"] - ad["start_s"]), 3)
                 for ad in excluded_short_ads
             ],

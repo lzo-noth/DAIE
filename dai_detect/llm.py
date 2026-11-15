@@ -114,9 +114,39 @@ def merge_ad_segments(
     results: dict[str, dict[str, Any]],
     max_gap_s: float = 1.0,
     min_confidence: float = 0.5,
+    with_style: bool = False,
 ) -> list[dict]:
-    """Merge consecutive third-party ad segments into start/end intervals."""
-    spans: list[list[float]] = []
+    """Merge consecutive third-party ad segments into start/end intervals.
+
+    The classifier explicitly labels ``host_read`` (read by the show host) as
+    distinct from produced creatives. ``with_style=True`` therefore keeps both
+    and tags each merged span instead of silently dropping host-read ads:
+    product training needs them as hard negatives, not as missing rows. Spans
+    are split wherever the host-read flag changes, because one ad break can
+    contain a host-read lead-in followed by a produced spot.
+    """
+    if not with_style:
+        spans: list[list[float]] = []
+        for index, segment in enumerate(segments):
+            result = results.get(str(index))
+            if not result:
+                continue
+            if (
+                result.get("is_ad") is not True
+                or result.get("ad_type") != "third_party_ad"
+                or result.get("host_read")
+                or float(result.get("confidence") or 0.0) < min_confidence
+            ):
+                continue
+            start = float(segment.get("start_s", 0.0))
+            end = float(segment.get("end_s", 0.0))
+            if spans and start - spans[-1][1] <= max_gap_s:
+                spans[-1][1] = max(spans[-1][1], end)
+            else:
+                spans.append([start, end])
+        return [{"start_s": round(start, 3), "end_s": round(end, 3)} for start, end in spans]
+
+    styled: list[dict] = []
     for index, segment in enumerate(segments):
         result = results.get(str(index))
         if not result:
@@ -124,17 +154,30 @@ def merge_ad_segments(
         if (
             result.get("is_ad") is not True
             or result.get("ad_type") != "third_party_ad"
-            or result.get("host_read")
             or float(result.get("confidence") or 0.0) < min_confidence
         ):
             continue
+        style = "host_read" if result.get("host_read") is True else "produced"
         start = float(segment.get("start_s", 0.0))
         end = float(segment.get("end_s", 0.0))
-        if spans and start - spans[-1][1] <= max_gap_s:
-            spans[-1][1] = max(spans[-1][1], end)
+        if (
+            styled
+            and styled[-1]["ad_production_style"] == style
+            and start - styled[-1]["end_s"] <= max_gap_s
+        ):
+            styled[-1]["end_s"] = max(styled[-1]["end_s"], end)
         else:
-            spans.append([start, end])
-    return [{"start_s": round(start, 3), "end_s": round(end, 3)} for start, end in spans]
+            styled.append(
+                {"start_s": start, "end_s": end, "ad_production_style": style}
+            )
+    return [
+        {
+            "start_s": round(span["start_s"], 3),
+            "end_s": round(span["end_s"], 3),
+            "ad_production_style": span["ad_production_style"],
+        }
+        for span in styled
+    ]
 
 
 def build_items(report: dict, max_text: int = 600) -> list[dict[str, str]]:

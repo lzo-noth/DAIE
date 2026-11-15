@@ -80,6 +80,9 @@ def build_worklist(rows: list[dict], labels_source: str) -> list[dict]:
                 "candidate_start_s": float(ad.get("start_s") or 0.0),
                 "candidate_end_s": float(ad.get("end_s") or 0.0),
                 "candidate_type": str(ad.get("type") or ""),
+                "candidate_ad_production_style": str(
+                    ad.get("ad_production_style") or "unknown"
+                ),
                 "start_s": None,
                 "end_s": None,
             }
@@ -105,6 +108,34 @@ def build_worklist(rows: list[dict], labels_source: str) -> list[dict]:
             }
         )
     return worklist
+
+
+def _review_style(ad: dict, row: dict) -> str:
+    """Keep the candidate's production style unless the review overrides it.
+
+    A boundary review only moves the edges; without this inheritance a reviewed
+    ad would fall back to ``unknown`` and disappear from produced-only training.
+    An explicit style in the review always wins, and an unknown candidate stays
+    unknown: review must not invent ``produced``.
+    """
+    explicit = str(ad.get("ad_production_style") or "").strip()
+    if explicit:
+        return explicit
+    inherited = str(ad.get("candidate_ad_production_style") or "").strip()
+    if inherited:
+        return inherited
+    start = float(ad.get("start_s") or 0.0)
+    end = float(ad.get("end_s") or 0.0)
+    best_style = ""
+    best_overlap = 0.0
+    for original in row.get("ads") or []:
+        original_start = float(original.get("start_s") or 0.0)
+        original_end = float(original.get("end_s") or 0.0)
+        overlap = max(0.0, min(end, original_end) - max(start, original_start))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_style = str(original.get("ad_production_style") or "").strip()
+    return best_style or "unknown"
 
 
 def _verify_review(review: dict, row: dict) -> tuple[list[dict], list[str]]:
@@ -176,7 +207,7 @@ def _verify_review(review: dict, row: dict) -> tuple[list[dict], list[str]]:
                 "end_s": round(end, 3),
                 "type": str(ad.get("type") or "third_party_ad"),
                 "ad_content_type": str(ad.get("ad_content_type") or "third_party_ad"),
-                "ad_production_style": str(ad.get("ad_production_style") or "unknown"),
+                "ad_production_style": _review_style(ad, row),
                 "insertion_mechanism": str(ad.get("insertion_mechanism") or "unknown"),
                 "label_method": method,
                 "start_verified": True,

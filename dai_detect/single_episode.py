@@ -253,6 +253,7 @@ def analyze_single(
             "enter_threshold": round(enter, 3),
             "exit_threshold": round(exit_threshold, 3),
             "training_identity": getattr(model, "training_identity", {}) or {},
+            "target_scope": getattr(model, "target_scope", {}) or {},
             "deployment_calibration": {
                 "valid": (getattr(model, "deployment_calibration", {}) or {}).get(
                     "calibration_process_valid"

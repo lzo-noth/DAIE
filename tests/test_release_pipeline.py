@@ -13,7 +13,7 @@ from scripts.apply_review_decisions import derive_ads
 from scripts.blind_test import _identity_checks, _independence_check, _scope_ground_truth, _verify_human_labels
 from dai_detect.feed_identity import canonical_feed_key
 from scripts.merge_release_shards import _merge_jsonl
-from scripts.review_ad_boundaries import apply_review, build_worklist
+from scripts.review_ad_boundaries import _review_style, apply_review, build_worklist
 from scripts.verify_release_coverage import verify
 from scripts.publish_annotation_data import main as publish_main
 
@@ -46,6 +46,16 @@ class HostReadPolicyTest(unittest.TestCase):
         ads = derive_ads(SEGMENTS, _results(), {"ignore_host_read": False}, [])
         self.assertEqual(len(ads), 2)
 
+    def test_rebuild_marks_produced_and_host_read_styles(self) -> None:
+        ads = derive_ads(SEGMENTS, _results(), {"ignore_host_read": False}, [])
+        self.assertEqual(
+            [ad["ad_production_style"] for ad in ads], ["host_read", "produced"]
+        )
+
+    def test_rebuild_marks_produced_when_host_read_is_ignored(self) -> None:
+        ads = derive_ads(SEGMENTS, _results(), {"ignore_host_read": True}, [])
+        self.assertEqual([ad["ad_production_style"] for ad in ads], ["produced"])
+
     def test_self_promo_and_brand_mentions_are_not_ads(self) -> None:
         results = _results(
             **{
@@ -55,6 +65,44 @@ class HostReadPolicyTest(unittest.TestCase):
         )
         ads = derive_ads(SEGMENTS, results, {"ignore_host_read": True}, [])
         self.assertEqual(ads, [])
+
+
+class ReviewStyleTest(unittest.TestCase):
+    def _row(self) -> dict:
+        return {
+            "ads": [
+                {
+                    "start_s": 100.0,
+                    "end_s": 130.0,
+                    "ad_production_style": "produced",
+                }
+            ]
+        }
+
+    def test_review_inherits_candidate_style(self) -> None:
+        self.assertEqual(
+            _review_style({"start_s": 101.0, "end_s": 129.0}, self._row()),
+            "produced",
+        )
+
+    def test_explicit_review_style_wins(self) -> None:
+        self.assertEqual(
+            _review_style(
+                {
+                    "start_s": 101.0,
+                    "end_s": 129.0,
+                    "ad_production_style": "host_read",
+                },
+                self._row(),
+            ),
+            "host_read",
+        )
+
+    def test_non_overlapping_review_does_not_invent_style(self) -> None:
+        self.assertEqual(
+            _review_style({"start_s": 500.0, "end_s": 530.0}, self._row()),
+            "unknown",
+        )
 
 
 class ShortAdScopeTest(unittest.TestCase):

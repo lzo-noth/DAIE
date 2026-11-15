@@ -571,7 +571,11 @@ def main() -> int:
                 continue
             consecutive_llm_failures = 0
             ads = merge_ad_segments(
-                segments, results, max_gap_s=args.max_gap, min_confidence=args.min_confidence
+                segments,
+                results,
+                max_gap_s=args.max_gap,
+                min_confidence=args.min_confidence,
+                with_style=True,
             )
             ads = _clamp_ads(ads, duration)
             print(
@@ -611,9 +615,10 @@ def main() -> int:
                 **ad,
                 "type": "third_party_ad",
                 "ad_content_type": "third_party_ad",
-                # 纯文本判定无法证明广告是 DAI 动态插入还是原生剪辑进母版；
-                # 也不该把"第三方广告"直接说成"已确认的动态插入"。
-                "ad_production_style": "unknown",
+                # 分类器逐段给出的 host_read 是这里唯一的风格证据：true 记为
+                # host_read（非目标），false 记为 produced（预录创意）。缺失时
+                # 保持 unknown，绝不擅自升级为正样本。
+                "ad_production_style": str(ad.get("ad_production_style") or "unknown"),
                 "insertion_mechanism": "unknown",
             }
             for ad in ads

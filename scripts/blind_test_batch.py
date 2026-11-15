@@ -326,6 +326,8 @@ def _run_row(row: dict, args: argparse.Namespace, base: Path) -> dict:
             str(args.max_fp_per_hour),
             "--min-ad",
             str(args.min_ad),
+            "--target-scope",
+            str(args.target_scope),
         ]
         if args.model:
             command += ["--model", str(args.model)]
@@ -395,6 +397,12 @@ def main() -> int:
         type=float,
         default=10.0,
         help="检测与评测共同的最短广告秒数；短于该值的真值广告不计入分母",
+    )
+    parser.add_argument(
+        "--target-scope",
+        choices=("all", "produced"),
+        default="all",
+        help="真值评测范围；模型按 produced 训练时应使用 produced",
     )
     parser.add_argument("--bootstrap-iterations", type=int, default=2000)
     parser.add_argument("--min-events", type=int, default=10)

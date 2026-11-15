@@ -63,6 +63,7 @@ from dai_detect.single_features import (
     build_windows,
     window_labels,
 )
+from dai_detect.target_scope import split_ads, target_scope_payload
 from dai_detect.temporal_decoder import decode_windows
 
 
@@ -2049,7 +2050,21 @@ def main() -> int:
                     flush=True,
                 )
             ads = [item for item in ads if item["end_s"] - item["start_s"] >= MIN_AD_S]
-            indices, labels = window_labels(windows, ads)
+            # 产品目标是第三方预录广告。主播口播是最接近正文的 hard negative；
+            # 制作风格未知的区间两端都不用，避免污染正负监督与评测分母。
+            ads, non_target, ignored = split_ads(ads)
+            if non_target:
+                print(
+                    f"[data] {name}: {len(non_target)} 段 host_read 作为非目标负样本",
+                    flush=True,
+                )
+            if ignored:
+                print(
+                    f"[data] {name}: 屏蔽 {len(ignored)} 段制作风格未知的广告"
+                    "（不参与正负监督与事件评测）",
+                    flush=True,
+                )
+            indices, labels = window_labels(windows, ads, ignore=ignored)
         else:
             key = (
                 str(entry.get("feed") or ""),
@@ -2366,6 +2381,7 @@ def main() -> int:
             {
                 "window_schema": WINDOW_FEATURE_SCHEMA,
                 "boundary_schema": BOUNDARY_FEATURE_SCHEMA,
+                "target_scope": target_scope_payload(),
                 "episodes": identity_rows,
             },
             sort_keys=True,
@@ -2404,6 +2420,7 @@ def main() -> int:
         "version": 1,
         "kind": "logistic",
         "feature_schema": WINDOW_FEATURE_SCHEMA,
+        "target_scope": target_scope_payload(),
         "features": list(WINDOW_FEATURES),
         **final_model,
         "threshold": round(threshold, 4),
@@ -2479,6 +2496,7 @@ def main() -> int:
                 "version": 1,
                 "kind": "onset_offset",
                 "feature_schema": BOUNDARY_FEATURE_SCHEMA,
+                "target_scope": target_scope_payload(),
                 "features": list(BOUNDARY_FEATURES),
                 "onset": final_onset,
                 "offset": final_offset,

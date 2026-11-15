@@ -74,26 +74,36 @@ def derive_ads(
     ad_types = set(policy.get("ad_types") or ["third_party_ad"])
     ignore_host_read = bool(policy.get("ignore_host_read", True))
 
-    spans: list[list[float]] = []
+    spans: list[dict] = []
     for index, segment in enumerate(segments):
         result = results.get(str(index)) or {}
         if result.get("is_ad") is not True:
             continue
-        if ignore_host_read and result.get("host_read") is True:
+        host_read = result.get("host_read") is True
+        if ignore_host_read and host_read:
             continue
         if str(result.get("ad_type") or "") not in ad_types:
             continue
         if float(result.get("confidence") or 0.0) < min_confidence:
             continue
+        style = "host_read" if host_read else "produced"
         start = float(segment.get("start_s") or 0.0)
         end = float(segment.get("end_s") or 0.0)
-        if spans and start - spans[-1][1] <= max_gap:
-            spans[-1][1] = max(spans[-1][1], end)
+        if (
+            spans
+            and spans[-1]["ad_production_style"] == style
+            and start - spans[-1]["end_s"] <= max_gap
+        ):
+            spans[-1]["end_s"] = max(spans[-1]["end_s"], end)
         else:
-            spans.append([start, end])
+            spans.append(
+                {"start_s": start, "end_s": end, "ad_production_style": style}
+            )
 
     ads = []
-    for start, end in spans:
+    for span in spans:
+        start = span["start_s"]
+        end = span["end_s"]
         if duration > 0:
             start = max(0.0, start)
             end = min(duration, end)
@@ -107,7 +117,9 @@ def derive_ads(
                 "end_s": round(end, 3),
                 "type": "third_party_ad",
                 "ad_content_type": "third_party_ad",
-                "ad_production_style": "unknown",
+                # 与逐段分类器一致：host_read 是非目标，其余第三方广告按
+                # produced 记录（分类器的 host_read 字段就是这两者的判据）。
+                "ad_production_style": span["ad_production_style"],
                 "insertion_mechanism": "unknown",
             }
         )

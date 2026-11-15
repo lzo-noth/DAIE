@@ -5,7 +5,12 @@ import unittest
 import numpy as np
 
 from dai_detect.acoustic_embedding import EMBEDDING_DIM, window_embeddings
-from scripts.probe_embedding import _recall_at_specificity, _view_rows, _window_folds
+from scripts.probe_embedding import (
+    _inner_thresholds,
+    _pool_at_thresholds,
+    _view_rows,
+    _window_folds,
+)
 
 
 class WindowEmbeddingTest(unittest.TestCase):
@@ -64,6 +69,19 @@ class ViewScopeTest(unittest.TestCase):
         self.assertEqual(labelled[7.0], 1)
         self.assertEqual(labelled[22.0], 1)
 
+    def test_unknown_style_ads_are_masked_in_every_view(self) -> None:
+        windows = self._windows()
+        ads = self._ads() + [
+            {"start_s": 27.0, "end_s": 29.5, "ad_production_style": "unknown"}
+        ]
+        for view in ("all", "produced", "host_read"):
+            indices, _ = _view_rows(windows, ads, view)
+            kept = windows["times"][indices]
+            self.assertFalse(
+                any(abs(float(time) - 28.25) <= 1.5 for time in kept),
+                f"{view} 把风格未知的区间当成监督信号",
+            )
+
 
 class WindowFoldsTest(unittest.TestCase):
     def test_episode_folds_expand_to_window_rows(self) -> None:
@@ -74,24 +92,57 @@ class WindowFoldsTest(unittest.TestCase):
         self.assertEqual(sum(len(fold) for fold in folds), 9)
 
 
-class RecallAtSpecificityTest(unittest.TestCase):
-    def test_threshold_is_chosen_per_fold_on_negatives(self) -> None:
+class PoolAtThresholdsTest(unittest.TestCase):
+    def test_thresholds_are_applied_per_fold(self) -> None:
         labels = np.concatenate([np.ones(10), np.zeros(100)])
-        oof = np.concatenate([np.arange(100, 110, dtype=np.float64), np.arange(100, dtype=np.float64)])
-        folds = [list(range(len(labels)))]
-        report = _recall_at_specificity(oof, labels, folds, 0.99, hours=1.0)
+        scores = np.concatenate(
+            [np.arange(100, 110, dtype=np.float64), np.arange(100, dtype=np.float64)]
+        )
+        fold = list(range(len(labels)))
+        report = _pool_at_thresholds(
+            scores, labels, [(fold, {"0.99": 99.0})], "0.99", hours=1.0
+        )
         self.assertEqual(report["recall"], 1.0)
         self.assertAlmostEqual(report["specificity"], 0.99, places=4)
         self.assertAlmostEqual(report["false_positives_per_hour"], 1.0, places=4)
 
-    def test_folds_keep_their_own_score_scale(self) -> None:
-        # 两折分数尺度不同；逐折定阈值后仍然不应产生误报。
-        fold_a = [0, 1, 2, 3]
-        fold_b = [4, 5, 6, 7]
-        labels = np.asarray([1, 0, 1, 0, 1, 0, 1, 0], dtype=np.float64)
-        oof = np.asarray([0.9, 0.1, 0.8, 0.2, 0.09, 0.01, 0.08, 0.02])
-        report = _recall_at_specificity(oof, labels, [fold_a, fold_b], 0.99, hours=1.0)
-        self.assertEqual(report["recall"], 1.0)
+    def test_fold_without_threshold_is_not_scored(self) -> None:
+        labels = np.asarray([1.0, 0.0])
+        scores = np.asarray([0.9, 0.1])
+        report = _pool_at_thresholds(
+            scores, labels, [([0, 1], None)], "0.99", hours=1.0
+        )
+        self.assertIsNone(report["recall"])
+        self.assertIsNone(report["specificity"])
+
+
+class InnerThresholdTest(unittest.TestCase):
+    def _fixture(self):
+        # 4 集、两个 feed；每集 20 个窗口行。
+        rng = np.random.default_rng(3)
+        X = rng.standard_normal((80, 3))
+        labels = np.zeros(80)
+        labels[[2, 3, 22, 23, 42, 43, 62, 63]] = 1.0
+        rows = [np.arange(start, start + 20) for start in range(0, 80, 20)]
+        items = [
+            {"feed": "Feed A" if index < 2 else "Feed B"} for index in range(4)
+        ]
+        return X, labels, rows, items
+
+    def test_thresholds_come_from_inner_folds_only(self) -> None:
+        X, labels, rows, items = self._fixture()
+        thresholds = _inner_thresholds(
+            X, labels, rows, items, [0, 1, 2], ratio=4, inner_folds=2
+        )
+        self.assertIsNotNone(thresholds)
+        self.assertGreaterEqual(thresholds["0.99"], thresholds["0.90"])
+
+    def test_single_feed_training_set_has_no_threshold(self) -> None:
+        X, labels, rows, items = self._fixture()
+        items = [{"feed": "Feed A"} for _ in items]
+        self.assertIsNone(
+            _inner_thresholds(X, labels, rows, items, [0, 1, 2], ratio=4, inner_folds=2)
+        )
 
 
 if __name__ == "__main__":
