@@ -6,8 +6,8 @@ import numpy as np
 
 from dai_detect.acoustic_embedding import EMBEDDING_DIM, window_embeddings
 from scripts.probe_embedding import (
-    _inner_thresholds,
     _pool_at_thresholds,
+    _train_thresholds,
     _view_rows,
     _window_folds,
 )
@@ -116,33 +116,26 @@ class PoolAtThresholdsTest(unittest.TestCase):
         self.assertIsNone(report["specificity"])
 
 
-class InnerThresholdTest(unittest.TestCase):
-    def _fixture(self):
-        # 4 集、两个 feed；每集 20 个窗口行。
-        rng = np.random.default_rng(3)
-        X = rng.standard_normal((80, 3))
-        labels = np.zeros(80)
-        labels[[2, 3, 22, 23, 42, 43, 62, 63]] = 1.0
-        rows = [np.arange(start, start + 20) for start in range(0, 80, 20)]
-        items = [
-            {"feed": "Feed A" if index < 2 else "Feed B"} for index in range(4)
-        ]
-        return X, labels, rows, items
+class TrainThresholdTest(unittest.TestCase):
+    def _model(self) -> dict:
+        return {"mean": [0.0], "scale": [1.0], "weights": [1.0], "intercept": 0.0}
 
-    def test_thresholds_come_from_inner_folds_only(self) -> None:
-        X, labels, rows, items = self._fixture()
-        thresholds = _inner_thresholds(
-            X, labels, rows, items, [0, 1, 2], ratio=4, inner_folds=2
-        )
-        self.assertIsNotNone(thresholds)
+    def test_thresholds_are_quantiles_of_training_negatives(self) -> None:
+        values = np.linspace(-5.0, 5.0, 100).reshape(-1, 1)
+        labels = np.zeros(100)
+        labels[-10:] = 1.0
+        train = np.arange(90)
+        thresholds = _train_thresholds(self._model(), values, labels, train)
+        assert thresholds is not None
+        negatives = values[train][labels[train] == 0].ravel()
+        expected = 1.0 / (1.0 + np.exp(-np.quantile(negatives, 0.99)))
+        self.assertAlmostEqual(thresholds["0.99"], expected, places=4)
         self.assertGreaterEqual(thresholds["0.99"], thresholds["0.90"])
 
-    def test_single_feed_training_set_has_no_threshold(self) -> None:
-        X, labels, rows, items = self._fixture()
-        items = [{"feed": "Feed A"} for _ in items]
-        self.assertIsNone(
-            _inner_thresholds(X, labels, rows, items, [0, 1, 2], ratio=4, inner_folds=2)
-        )
+    def test_no_negative_rows_means_no_threshold(self) -> None:
+        values = np.ones((4, 1))
+        labels = np.ones(4)
+        self.assertIsNone(_train_thresholds(self._model(), values, labels, np.arange(4)))
 
 
 if __name__ == "__main__":

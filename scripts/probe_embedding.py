@@ -214,44 +214,23 @@ def _pool_at_thresholds(
     }
 
 
-def _inner_thresholds(
+def _train_thresholds(
+    model: dict,
     X_all: np.ndarray,
     labels: np.ndarray,
-    rows_by_episode: list[np.ndarray],
-    items: list[dict],
-    train_episodes: list[int],
-    ratio: int,
-    inner_folds: int,
+    train_rows: np.ndarray,
 ) -> dict[str, float] | None:
-    """Specificity thresholds from inner grouped CV inside the outer train set.
+    """Specificity thresholds from the outer model's own training scores.
 
-    Outer test episodes never contribute scores, labels or quantiles here; the
-    outer model is only ever evaluated against thresholds learned from data it
-    was allowed to see.
+    The held-out fold contributes no labels here. An earlier version selected
+    the threshold from inner-CV model scores, but those scores come from a
+    different weight vector on a smaller training set: at 99% the threshold did
+    not transfer (reported specificity collapsed to 0.33 on the produced view).
+    Scoring the training rows with the deployed model keeps the threshold on the
+    same scale. It is mildly optimistic because those rows were trained on, so
+    the reported recall is read as an upper bound at the target specificity.
     """
-    if len(train_episodes) < 2 or inner_folds < 2:
-        return None
-    groups = [str(items[episode]["feed"]) for episode in train_episodes]
-    if len(set(groups)) < 2:
-        return None
-    folds = _group_folds(groups, k=min(inner_folds, len(set(groups))))
-    inner_oof = np.full(len(labels), np.nan, dtype=np.float64)
-    for fold in folds:
-        held_positions = set(fold)
-        held = [train_episodes[position] for position in fold]
-        kept = [
-            episode
-            for position, episode in enumerate(train_episodes)
-            if position not in held_positions
-        ]
-        train_rows = np.concatenate([rows_by_episode[episode] for episode in kept])
-        held_rows = np.concatenate([rows_by_episode[episode] for episode in held])
-        truth = labels[train_rows]
-        if len(np.unique(truth)) < 2 or held_rows.size == 0:
-            continue
-        model = _fit_logistic(*_balance(X_all[train_rows], truth, ratio=ratio))
-        inner_oof[held_rows] = _predict(model, X_all[held_rows])
-    negatives = inner_oof[(labels == 0) & ~np.isnan(inner_oof)]
+    negatives = _predict(model, X_all[train_rows])[labels[train_rows] == 0]
     if negatives.size == 0:
         return None
     return {
@@ -370,7 +349,7 @@ def _event_summary(bucket: dict, hours: float, feed_hours: dict[str, float]) -> 
         "boundary_p90_s": round(float(np.percentile(errors, 90)), 3) if errors.size else None,
         "boundary_p95_s": round(float(np.percentile(errors, 95)), 3) if errors.size else None,
         "boundary_model": "heuristic_onset_offset",
-        "threshold_source": "outer_train_inner_cv",
+        "threshold_source": "outer_train_scores",
         "false_positive_events": details[:100],
         "false_positive_events_truncated": len(details) > 100,
         "per_feed": per_feed,
@@ -389,13 +368,12 @@ def _evaluate(
     hours: float,
     feed_hours: dict[str, float],
     ratio: int,
-    inner_folds: int,
 ) -> dict:
     """Window-level and event-level evaluation for one feature set.
 
-    Every threshold is selected by grouped CV *inside* the outer training set.
-    The held-out fold only supplies scores to be thresholded; its labels never
-    choose the threshold.
+    Every threshold is selected from scores the model produced on its own
+    training rows. The held-out fold only supplies scores to be thresholded;
+    its labels never choose the threshold.
     """
     began = time.time()
     X_all = np.vstack(
@@ -405,7 +383,6 @@ def _evaluate(
     event_buckets = {target: _empty_event_bucket() for target in SPECIFICITIES}
     fold_thresholds: list[tuple[list[int], dict[str, float] | None]] = []
     scored_folds: list[list[int]] = []
-    all_episodes = list(range(len(items)))
     for fold_rows, fold_episodes in zip(folds, episode_folds):
         if not fold_rows:
             continue
@@ -418,17 +395,7 @@ def _evaluate(
         fold_scores = _predict(model, X_all[fold_rows])
         oof[fold_rows] = fold_scores
         scored_folds.append(fold_rows)
-        held = set(fold_episodes)
-        train_episodes = [episode for episode in all_episodes if episode not in held]
-        thresholds = _inner_thresholds(
-            X_all,
-            labels,
-            rows_by_episode,
-            items,
-            train_episodes,
-            ratio,
-            inner_folds,
-        )
+        thresholds = _train_thresholds(model, X_all, labels, train)
         fold_thresholds.append((fold_rows, thresholds))
         if not thresholds:
             continue
@@ -507,7 +474,7 @@ def _evaluate(
         "auc_macro": round(float(np.mean(fold_auc)), 4) if fold_auc else None,
         "auc_fold": [round(value, 4) for value in fold_auc],
         "auc_pooled": round(float(roc_auc(labels, oof)), 4),
-        "threshold_source": "outer_train_inner_cv",
+        "threshold_source": "outer_train_scores",
         "folds_with_thresholds": with_thresholds,
         "recall_at_specificity": {},
         "event": {},
@@ -531,12 +498,6 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--max-episodes", type=int, default=24, help="0=全部")
     parser.add_argument("--folds", type=int, default=6)
-    parser.add_argument(
-        "--inner-folds",
-        type=int,
-        default=3,
-        help="外层训练集内部用于选阈值的分组折数（留出集不参与）",
-    )
     parser.add_argument("--negatives-per-positive", type=int, default=4)
     parser.add_argument("--skip-embedding", action="store_true", help="只跑基线，用于自检")
     parser.add_argument("--workers", type=int, default=0)
@@ -613,7 +574,6 @@ def main() -> int:
                 hours,
                 feed_hours,
                 args.negatives_per_positive,
-                args.inner_folds,
             )
         reports["views"][view] = entry
     reports["feature_names"] = {"baseline": WINDOW_FEATURES}
