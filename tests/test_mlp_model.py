@@ -42,10 +42,10 @@ class WindowContextTest(unittest.TestCase):
 
 @unittest.skipUnless(_has_sklearn(), "scikit-learn 未安装")
 class MlpRoundTripTest(unittest.TestCase):
-    def _data(self) -> tuple[np.ndarray, np.ndarray]:
+    def _data(self, dim: int = 6) -> tuple[np.ndarray, np.ndarray]:
         rng = np.random.default_rng(3)
         X = np.vstack(
-            [rng.normal(0.0, 1.0, (300, 6)), rng.normal(2.5, 1.0, (300, 6))]
+            [rng.normal(0.0, 1.0, (300, dim)), rng.normal(2.5, 1.0, (300, dim))]
         )
         y = np.concatenate([np.zeros(300), np.ones(300)]).astype(int)
         return X, y
@@ -75,7 +75,11 @@ class MlpRoundTripTest(unittest.TestCase):
         self.assertTrue(np.allclose(actual, expected, atol=1e-6))
 
     def test_model_round_trips_through_json(self) -> None:
-        X, y = self._data()
+        # 训练矩阵宽度必须与模型声明的特征一致：带上下文时 predict 会把
+        # 84 维窗口特征扩成 336 维再按名字取列，用小维度训练会让归一化参数
+        # 与输入宽度对不上。
+        context_names = context_feature_names(list(WINDOW_FEATURES))
+        X, y = self._data(len(context_names))
         model = fit_mlp(X, y)
         times = np.arange(0.0, 3.0, 0.5)
         base = np.zeros((len(times), len(WINDOW_FEATURES)), dtype=np.float32)
@@ -83,7 +87,7 @@ class MlpRoundTripTest(unittest.TestCase):
             "feature_schema": WINDOW_FEATURE_SCHEMA,
             "input_schema": CONTEXT_SCHEMA,
             "context_spans": list(CONTEXT_SPANS),
-            "features": context_feature_names(list(WINDOW_FEATURES)),
+            "features": context_names,
             "threshold": 0.5,
             "metrics": {},
             **model,

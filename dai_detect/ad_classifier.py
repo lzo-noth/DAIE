@@ -81,10 +81,30 @@ class AdModel:
                     return None
                 if not layers:
                     return None
+                mean = np.asarray(payload["mean"], dtype=np.float64)
+                scale = np.asarray(payload["scale"], dtype=np.float64)
+                # 归一化参数必须与模型声明的特征一一对应；否则 predict 里
+                # 会在广播阶段报错，错误信息完全看不出是模型产物的问题。
+                first = (
+                    np.asarray(layers[0].get("weights", []), dtype=np.float64)
+                    if isinstance(layers[0], dict)
+                    else np.zeros((0, 0))
+                )
+                if (
+                    mean.shape != (len(features),)
+                    or scale.shape != (len(features),)
+                    or first.ndim != 2
+                    or first.shape[0] != len(features)
+                ):
+                    print(
+                        "[ad] MLP 模型输入维度与特征列表不一致，已忽略；请重新训练",
+                        file=sys.stderr,
+                    )
+                    return None
                 return cls(
                     features=features,
-                    mean=np.asarray(payload["mean"], dtype=np.float64),
-                    scale=np.asarray(payload["scale"], dtype=np.float64),
+                    mean=mean,
+                    scale=scale,
                     weights=np.zeros(0, dtype=np.float64),
                     intercept=0.0,
                     threshold=float(payload.get("threshold", 0.5)),
