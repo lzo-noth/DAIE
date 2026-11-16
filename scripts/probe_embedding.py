@@ -55,6 +55,7 @@ from dai_detect.target_scope import (
     ad_style,
 )
 from dai_detect.temporal_decoder import decode_windows
+from dai_detect.window_context import CONTEXT_SPANS, window_context
 from scripts.train_single_episode import (
     MIN_AD_S,
     _balance,
@@ -255,29 +256,10 @@ def _window_folds(
 
 
 def _window_context(
-    matrix: np.ndarray, times: np.ndarray, spans: tuple[float, ...] = (4.0, 12.0, 30.0)
+    matrix: np.ndarray, times: np.ndarray, spans: tuple[float, ...] = CONTEXT_SPANS
 ) -> np.ndarray:
-    """Append rolling means over ±4 / ±12 / ±30 s to every window.
-
-    A 1 s window carries no information about whether the situation has been
-    ad-like for the last half minute, which is what separates a sponsor read
-    from a one-off music sting. Means are computed per episode so context never
-    crosses episode boundaries.
-    """
-    matrix = matrix.astype(np.float32)
-    cumulative = np.vstack(
-        [
-            np.zeros((1, matrix.shape[1]), dtype=np.float64),
-            np.cumsum(matrix, axis=0, dtype=np.float64),
-        ]
-    )
-    parts = [matrix]
-    for span in spans:
-        lower = np.searchsorted(times, times - span, side="left")
-        upper = np.searchsorted(times, times + span, side="right")
-        counts = np.maximum(upper - lower, 1).astype(np.float64)[:, None]
-        parts.append(((cumulative[upper] - cumulative[lower]) / counts).astype(np.float32))
-    return np.hstack(parts)
+    """Probe alias for the shared per-episode rolling context."""
+    return window_context(matrix, times, spans)
 
 
 def _fit_model(name: str, X: np.ndarray, y: np.ndarray) -> dict:

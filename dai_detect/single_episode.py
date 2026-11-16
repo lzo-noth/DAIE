@@ -177,7 +177,9 @@ def analyze_single(
         )
     if progress and isinstance(model, HeuristicAdModel):
         progress("警告: 未找到训练模型，使用启发式兜底（指标不可作为验收依据）")
-    probabilities = model.predict(windows["features"], windows["names"])
+    probabilities = model.predict(
+        windows["features"], windows["names"], windows.get("times")
+    )
 
     threshold = float(getattr(model, "threshold", 0.5))
     enter, exit_threshold = resolve_thresholds(

@@ -23,6 +23,8 @@ from typing import Optional
 import numpy as np
 
 from .single_features import WINDOW_FEATURE_SCHEMA, WINDOW_FEATURES, select_features
+from .window_context import CONTEXT_SCHEMA, context_feature_names, window_context
+from .mlp_model import mlp_probabilities
 
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "ad_segment_model.json"
 
@@ -36,6 +38,8 @@ class AdModel:
     intercept: float
     threshold: float = 0.5
     kind: str = "logistic"
+    layers: list = field(default_factory=list)
+    context_spans: list = field(default_factory=list)
     source: str = ""
     model_version: str = ""
     data_version: str = ""
@@ -65,6 +69,44 @@ class AdModel:
                 return None
             metrics = payload.get("metrics") or {}
             calibration = metrics.get("deployment_calibration") or {}
+            kind = str(payload.get("kind", "logistic"))
+            layers = payload.get("layers") or []
+            context_spans = [float(value) for value in payload.get("context_spans") or []]
+            if kind == "mlp":
+                if payload.get("input_schema") != CONTEXT_SCHEMA:
+                    print(
+                        "[ad] MLP 模型缺少当前上下文 schema，已忽略；请重新训练",
+                        file=sys.stderr,
+                    )
+                    return None
+                if not layers:
+                    return None
+                return cls(
+                    features=features,
+                    mean=np.asarray(payload["mean"], dtype=np.float64),
+                    scale=np.asarray(payload["scale"], dtype=np.float64),
+                    weights=np.zeros(0, dtype=np.float64),
+                    intercept=0.0,
+                    threshold=float(payload.get("threshold", 0.5)),
+                    kind=kind,
+                    layers=layers,
+                    context_spans=context_spans,
+                    source=str(target),
+                    model_version=str(payload.get("model_version", "")),
+                    data_version=str(payload.get("data_version", "")),
+                    git_commit=str(payload.get("git_commit", "")),
+                    deployment_calibration=calibration if isinstance(calibration, dict) else {},
+                    training_identity=(
+                        payload.get("training_identity")
+                        if isinstance(payload.get("training_identity"), dict)
+                        else {}
+                    ),
+                    target_scope=(
+                        payload.get("target_scope")
+                        if isinstance(payload.get("target_scope"), dict)
+                        else {}
+                    ),
+                )
             return cls(
                 features=features,
                 mean=np.asarray(payload["mean"], dtype=np.float64),
@@ -92,8 +134,19 @@ class AdModel:
         except (KeyError, TypeError, ValueError):
             return None
 
-    def predict(self, features: np.ndarray, names: list[str]) -> np.ndarray:
-        matrix = select_features(features, names, self.features)
+    def predict(
+        self, features: np.ndarray, names: list[str], times: Optional[np.ndarray] = None
+    ) -> np.ndarray:
+        matrix = np.asarray(features)
+        columns = list(names)
+        if self.context_spans and times is not None:
+            matrix = window_context(matrix, np.asarray(times), tuple(self.context_spans))
+            columns = context_feature_names(columns, tuple(self.context_spans))
+        matrix = select_features(matrix, columns, self.features)
+        if self.kind == "mlp":
+            return mlp_probabilities(
+                {"mean": self.mean, "scale": self.scale, "layers": self.layers}, matrix
+            )
         normalized = (matrix - self.mean) / np.where(np.abs(self.scale) < 1e-9, 1.0, self.scale)
         logits = normalized @ self.weights + self.intercept
         logits = np.clip(logits, -30.0, 30.0)
@@ -115,7 +168,9 @@ class HeuristicAdModel:
     deployment_calibration: dict = {}
     features = list(WINDOW_FEATURES)
 
-    def predict(self, features: np.ndarray, names: list[str]) -> np.ndarray:
+    def predict(
+        self, features: np.ndarray, names: list[str], times: Optional[np.ndarray] = None
+    ) -> np.ndarray:
         matrix = select_features(features, names, self.features)
         positions = {name: index for index, name in enumerate(self.features)}
         loud_dev = matrix[:, positions["loud_dev"]]

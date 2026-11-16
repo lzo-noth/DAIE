@@ -54,6 +54,13 @@ from dai_detect.metrics import (
     threshold_counts,
     threshold_metrics,
 )
+from dai_detect.mlp_model import mlp_probabilities
+from dai_detect.window_context import (
+    CONTEXT_SCHEMA,
+    CONTEXT_SPANS,
+    context_feature_names,
+    window_context,
+)
 from dai_detect.refinement import refine_events
 from dai_detect.single_episode import extract_features
 from dai_detect.feed_identity import canonical_feed_key
@@ -123,6 +130,18 @@ def _extract_episode(job: dict) -> dict:
     """
     mono, forensic = extract_features(job["audio"], proxy=job.get("proxy"))
     windows = build_windows(mono, forensic)
+    if job.get("context_spans"):
+        windows = {
+            **windows,
+            "features": window_context(
+                windows["features"],
+                np.asarray(windows["times"], dtype=np.float64),
+                tuple(job["context_spans"]),
+            ),
+            "names": context_feature_names(
+                list(windows["names"]), tuple(job["context_spans"])
+            ),
+        }
     change = boundary_change_matrix(mono, forensic)
     return {
         "audio_id": str(mono.get("audio_id") or ""),
@@ -135,9 +154,15 @@ def _extract_episode(job: dict) -> dict:
 
 
 def _extract_all(
-    audios: list[str], proxy: Optional[str], skip_boundary: bool
+    audios: list[str],
+    proxy: Optional[str],
+    skip_boundary: bool,
+    context_spans: Optional[list[float]] = None,
 ) -> list[dict]:
-    jobs = [{"audio": audio, "proxy": proxy} for audio in audios]
+    jobs = [
+        {"audio": audio, "proxy": proxy, "context_spans": context_spans}
+        for audio in audios
+    ]
     workers = int(os.environ.get("TRAIN_EXTRACT_WORKERS", "0") or 0)
     if workers <= 0:
         workers = min(4, os.cpu_count() or 1)
@@ -454,11 +479,25 @@ def _fit_logistic(X: np.ndarray, y: np.ndarray, l2: float = 1.0, max_iter: int =
 
 
 def _predict(model: dict, X: np.ndarray) -> np.ndarray:
+    if model.get("kind") == "mlp":
+        return mlp_probabilities(model, X)
     mean = np.asarray(model["mean"])
     scale = np.asarray(model["scale"])
     weights = np.asarray(model["weights"])
     logits = np.clip(((X - mean) / scale) @ weights + model["intercept"], -30.0, 30.0)
     return 1.0 / (1.0 + np.exp(-logits))
+
+
+_WINDOW_CLASSIFIER = "logistic"
+
+
+def _fit_window(X: np.ndarray, y: np.ndarray) -> dict:
+    """Fit the window classifier; boundary heads stay logistic on purpose."""
+    if _WINDOW_CLASSIFIER == "mlp":
+        from dai_detect.mlp_model import fit_mlp
+
+        return fit_mlp(X, y)
+    return _fit_logistic(X, y)
 
 
 def _balance(X: np.ndarray, y: np.ndarray, ratio: int = 4, seed: int = 13) -> tuple[np.ndarray, np.ndarray]:
@@ -706,7 +745,7 @@ def _choose_event_threshold(
         train_rows = _window_rows(inner_train, samples, offsets, len(y_all))
         if len(np.unique(y_all[train_rows])) < 2:
             continue
-        model = _fit_logistic(
+        model = _fit_window(
             *_balance(X_all[train_rows], y_all[train_rows], ratio=4, seed=seed + fold_index)
         )
         classifier_completed += 1
@@ -851,7 +890,7 @@ def _choose_classifier_threshold(
         # (all content or all ads) is still informative for threshold choice.
         if len(np.unique(y_all[train_rows])) < 2:
             continue
-        model = _fit_logistic(*_balance(X_all[train_rows], y_all[train_rows], ratio=4, seed=seed + fold_index))
+        model = _fit_window(*_balance(X_all[train_rows], y_all[train_rows], ratio=4, seed=seed + fold_index))
         probabilities.append(_predict(model, X_all[test_rows]))
         labels.append(y_all[test_rows])
     if not probabilities:
@@ -1056,7 +1095,7 @@ def _choose_boundary_thresholds(
         if len(np.unique(y_all[train_rows])) < 2:
             continue
         classifier_completed += 1
-        classifier = _fit_logistic(
+        classifier = _fit_window(
             *_balance(X_all[train_rows], y_all[train_rows], ratio=4, seed=seed + fold_index)
         )
         inner_set = set(inner_train)
@@ -1863,6 +1902,17 @@ def main() -> int:
     )
     parser.add_argument("--boundary-out", type=Path, default=Path("models/boundary_model.json"))
     parser.add_argument("--proxy", help="HTTP(S) 代理")
+    parser.add_argument(
+        "--classifier",
+        choices=("logistic", "mlp"),
+        default="logistic",
+        help="窗口分类器；边界头始终是逻辑回归",
+    )
+    parser.add_argument(
+        "--context",
+        action="store_true",
+        help="窗口特征拼接 ±4/±12/±30 s 滚动均值（需要 --classifier mlp 才能体现收益）",
+    )
     parser.add_argument("--max-episodes", type=int, default=0, help="最多处理多少集，0 表示全部")
     parser.add_argument("--skip-boundary", action="store_true", help="不训练边界模型")
     parser.add_argument(
@@ -1926,6 +1976,8 @@ def main() -> int:
         help="要求每个广告区间显式标注 type=third_party_inserted",
     )
     args = parser.parse_args()
+    global _WINDOW_CLASSIFIER
+    _WINDOW_CLASSIFIER = args.classifier
 
     global OUTER_FOLDS, INNER_FOLDS
     OUTER_FOLDS = args.outer_folds if args.outer_folds > 0 else 10**6
@@ -1986,7 +2038,10 @@ def main() -> int:
     resolved = [(entry, _resolve_audio(str(entry["audio"]), base)) for entry in entries]
     extract_began = time.time()
     extracted = _extract_all(
-        [audio for _, audio in resolved], args.proxy, args.skip_boundary
+        [audio for _, audio in resolved],
+        args.proxy,
+        args.skip_boundary,
+        list(CONTEXT_SPANS) if args.context else None,
     )
     print(f"[time] 特征提取完成: {time.time() - extract_began:.0f}s", flush=True)
     for (entry, audio), result in zip(resolved, extracted):
@@ -2200,7 +2255,7 @@ def main() -> int:
         for index in held:
             fold_thresholds[index] = fold_threshold
 
-        model = _fit_logistic(*_balance(X_all[train_rows], train_y, ratio=4, seed=fold_index + 1))
+        model = _fit_window(*_balance(X_all[train_rows], train_y, ratio=4, seed=fold_index + 1))
         oof[held_rows] = _predict(model, X_all[held_rows])
         for index in held:
             full_oof[index] = _predict(model, samples[index].windows["features"])
@@ -2353,7 +2408,7 @@ def main() -> int:
             "但不能报告为已完成校准验收",
             flush=True,
         )
-    final_model = _fit_logistic(*_balance(X_all, y_all, ratio=4, seed=101))
+    final_model = _fit_window(*_balance(X_all, y_all, ratio=4, seed=101))
     event_metrics = _event_metrics(
         samples,
         all_indices,
@@ -2380,6 +2435,7 @@ def main() -> int:
         json.dumps(
             {
                 "window_schema": WINDOW_FEATURE_SCHEMA,
+                "context_schema": CONTEXT_SCHEMA if args.context else "",
                 "boundary_schema": BOUNDARY_FEATURE_SCHEMA,
                 "target_scope": target_scope_payload(),
                 "episodes": identity_rows,
@@ -2418,10 +2474,16 @@ def main() -> int:
 
     payload = {
         "version": 1,
-        "kind": "logistic",
+        "kind": args.classifier,
         "feature_schema": WINDOW_FEATURE_SCHEMA,
+        "input_schema": CONTEXT_SCHEMA if args.context else "",
+        "context_spans": list(CONTEXT_SPANS) if args.context else [],
         "target_scope": target_scope_payload(),
-        "features": list(WINDOW_FEATURES),
+        "features": (
+            context_feature_names(list(WINDOW_FEATURES))
+            if args.context
+            else list(WINDOW_FEATURES)
+        ),
         **final_model,
         "threshold": round(threshold, 4),
         "model_version": model_version,
