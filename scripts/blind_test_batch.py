@@ -347,6 +347,10 @@ def _run_row(row: dict, args: argparse.Namespace, base: Path) -> dict:
             command.append("--allow-training-overlap")
         if args.allow_audio_mismatch:
             command.append("--allow-audio-mismatch")
+        if args.allow_nonhuman_ground_truth:
+            # 批量开关只在汇总层放行不够：子进程的 human 标签门禁会直接退出 3，
+            # 整批变成"没有成功的盲测行"。诊断跑必须把放行传进去。
+            command.append("--allow-unverified-ground-truth")
         process = subprocess.run(command, capture_output=True, text=True)
         # 2 表示"该集未达验收阈值"，但指标已完整写出，必须计入批量统计；
         # 3 才是身份/独立性拒绝评分。

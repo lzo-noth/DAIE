@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from scripts import blind_test_batch
@@ -103,6 +104,47 @@ class ReviewStyleTest(unittest.TestCase):
             _review_style({"start_s": 500.0, "end_s": 530.0}, self._row()),
             "unknown",
         )
+
+
+class BatchCommandTest(unittest.TestCase):
+    def _args(self, allow_nonhuman: bool) -> SimpleNamespace:
+        return SimpleNamespace(
+            max_fp_per_hour=15.0,
+            min_ad=10.0,
+            target_scope="produced",
+            model=None,
+            boundary_model=None,
+            require_models=False,
+            require_calibrated_models=False,
+            require_independent_test=False,
+            allow_training_overlap=False,
+            allow_audio_mismatch=False,
+            allow_nonhuman_ground_truth=allow_nonhuman,
+        )
+
+    def _command(self, allow_nonhuman: bool) -> list[str]:
+        captured: list[str] = []
+
+        class Stop(Exception):
+            pass
+
+        def fake_run(command, capture_output, text):
+            captured.extend(command)
+            raise Stop()
+
+        row = {"ground_truth": "gt.json", "audio": "audio.mp3", "feed": "Feed"}
+        with mock.patch.object(blind_test_batch.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(Stop):
+                blind_test_batch._run_row(row, self._args(allow_nonhuman), Path(tempfile.mkdtemp()))
+        return captured
+
+    def test_diagnostic_batch_forwards_ground_truth_waiver(self) -> None:
+        command = self._command(True)
+        self.assertIn("--allow-unverified-ground-truth", command)
+        self.assertEqual(command[command.index("--target-scope") + 1], "produced")
+
+    def test_strict_batch_keeps_the_gate(self) -> None:
+        self.assertNotIn("--allow-unverified-ground-truth", self._command(False))
 
 
 class ShortAdScopeTest(unittest.TestCase):
