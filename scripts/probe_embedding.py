@@ -230,7 +230,7 @@ def _train_thresholds(
     same scale. It is mildly optimistic because those rows were trained on, so
     the reported recall is read as an upper bound at the target specificity.
     """
-    negatives = _predict(model, X_all[train_rows])[labels[train_rows] == 0]
+    negatives = _score(model, X_all[train_rows])[labels[train_rows] == 0]
     if negatives.size == 0:
         return None
     return {
@@ -254,11 +254,69 @@ def _window_folds(
     ]
 
 
+def _window_context(
+    matrix: np.ndarray, times: np.ndarray, spans: tuple[float, ...] = (4.0, 12.0, 30.0)
+) -> np.ndarray:
+    """Append rolling means over ±4 / ±12 / ±30 s to every window.
+
+    A 1 s window carries no information about whether the situation has been
+    ad-like for the last half minute, which is what separates a sponsor read
+    from a one-off music sting. Means are computed per episode so context never
+    crosses episode boundaries.
+    """
+    matrix = matrix.astype(np.float32)
+    cumulative = np.vstack(
+        [
+            np.zeros((1, matrix.shape[1]), dtype=np.float64),
+            np.cumsum(matrix, axis=0, dtype=np.float64),
+        ]
+    )
+    parts = [matrix]
+    for span in spans:
+        lower = np.searchsorted(times, times - span, side="left")
+        upper = np.searchsorted(times, times + span, side="right")
+        counts = np.maximum(upper - lower, 1).astype(np.float64)[:, None]
+        parts.append(((cumulative[upper] - cumulative[lower]) / counts).astype(np.float32))
+    return np.hstack(parts)
+
+
+def _fit_model(name: str, X: np.ndarray, y: np.ndarray) -> dict:
+    if name == "hist":
+        try:
+            from sklearn.ensemble import HistGradientBoostingClassifier
+        except ImportError as error:  # pragma: no cover - CI installs sklearn
+            raise RuntimeError(
+                "hist 分类器需要 scikit-learn；本地请 pip install scikit-learn"
+            ) from error
+
+        estimator = HistGradientBoostingClassifier(
+            max_iter=160,
+            learning_rate=0.08,
+            max_leaf_nodes=31,
+            min_samples_leaf=40,
+            l2_regularization=1.0,
+            random_state=0,
+        )
+        estimator.fit(X, y)
+        return {"kind": "hist", "model": estimator}
+    return {"kind": "logistic", "model": _fit_logistic(X, y)}
+
+
+def _score(model: dict, X: np.ndarray) -> np.ndarray:
+    if "kind" not in model:
+        return _predict(model, X)
+    if model["kind"] == "hist":
+        return model["model"].predict_proba(X)[:, 1]
+    return _predict(model["model"], X)
+
+
 def _episode_matrix(item: dict, kind: str) -> np.ndarray:
     if kind == "yamnet":
         return item["embedding"].astype(np.float32)
     if kind == "baseline+yamnet":
         return np.hstack([item["base"], item["embedding"].astype(np.float32)])
+    if kind == "baseline+context":
+        return _window_context(item["base"], item["times"])
     return item["base"]
 
 
@@ -368,6 +426,7 @@ def _evaluate(
     hours: float,
     feed_hours: dict[str, float],
     ratio: int,
+    classifier: str = "logistic",
 ) -> dict:
     """Window-level and event-level evaluation for one feature set.
 
@@ -391,8 +450,8 @@ def _evaluate(
         train = np.flatnonzero(~test)
         if len(np.unique(labels[train])) < 2:
             continue
-        model = _fit_logistic(*_balance(X_all[train], labels[train], ratio=ratio))
-        fold_scores = _predict(model, X_all[fold_rows])
+        model = _fit_model(classifier, *_balance(X_all[train], labels[train], ratio=ratio))
+        fold_scores = _score(model, X_all[fold_rows])
         oof[fold_rows] = fold_scores
         scored_folds.append(fold_rows)
         thresholds = _train_thresholds(model, X_all, labels, train)
@@ -400,7 +459,7 @@ def _evaluate(
         if not thresholds:
             continue
         probabilities = {
-            episode: _predict(model, _episode_matrix(items[episode], kind))
+            episode: _score(model, _episode_matrix(items[episode], kind))
             for episode in fold_episodes
         }
         for target in SPECIFICITIES:
@@ -500,7 +559,22 @@ def main() -> int:
     parser.add_argument("--folds", type=int, default=6)
     parser.add_argument("--negatives-per-positive", type=int, default=4)
     parser.add_argument("--skip-embedding", action="store_true", help="只跑基线，用于自检")
+    parser.add_argument(
+        "--context",
+        action="store_true",
+        help="基线窗口拼接 ±4/±12/±30 s 滚动均值（84→336 维）",
+    )
+    parser.add_argument(
+        "--classifiers",
+        default="logistic",
+        help="逗号分隔：logistic,hist；hist 为梯度提升树",
+    )
     parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument(
+        "--views",
+        default=",".join(VIEWS),
+        help="逗号分隔的评测口径：all,produced,host_read",
+    )
     args = parser.parse_args()
 
     base_dir = args.annotations.parent
@@ -542,7 +616,17 @@ def main() -> int:
         "views": {},
     }
     kinds = ("baseline",) if args.skip_embedding else KINDS
-    for view in VIEWS:
+    if args.context:
+        contextual = tuple(
+            "baseline+context" if kind == "baseline" else kind for kind in kinds
+        )
+        kinds = tuple(dict.fromkeys((*kinds, *contextual)))
+    classifiers = [item.strip() for item in args.classifiers.split(",") if item.strip()]
+    views = [item.strip() for item in args.views.split(",") if item.strip()]
+    unknown_views = [view for view in views if view not in VIEWS]
+    if unknown_views:
+        raise SystemExit(f"未知口径: {unknown_views}")
+    for view in views:
         labels = np.concatenate(
             [item["views"][view]["labels"] for item in extracted]
         ).astype(np.float64)
@@ -562,19 +646,21 @@ def main() -> int:
             "features": {},
         }
         for kind in kinds:
-            entry["features"][kind] = _evaluate(
-                f"{view}/{kind}",
-                kind,
-                extracted,
-                view,
-                rows_by_episode,
-                labels,
-                folds,
-                episode_folds,
-                hours,
-                feed_hours,
-                args.negatives_per_positive,
-            )
+            for classifier in classifiers:
+                entry["features"][f"{kind}:{classifier}"] = _evaluate(
+                    f"{view}/{kind}:{classifier}",
+                    kind,
+                    extracted,
+                    view,
+                    rows_by_episode,
+                    labels,
+                    folds,
+                    episode_folds,
+                    hours,
+                    feed_hours,
+                    args.negatives_per_positive,
+                    classifier,
+                )
         reports["views"][view] = entry
     reports["feature_names"] = {"baseline": WINDOW_FEATURES}
     reports["elapsed_s"] = round(time.time() - began, 0)

@@ -14,6 +14,18 @@ on:
         description: "1=只跑手工特征基线，用于通道自检"
         required: false
         default: "0"
+      context:
+        description: "1=拼接 ±4/±12/±30 s 滚动均值（84→336 维）"
+        required: false
+        default: "0"
+      classifiers:
+        description: "分类器列表：logistic 或 logistic,hist"
+        required: false
+        default: "logistic"
+      views:
+        description: "评测口径：all,produced 或 all,produced,host_read"
+        required: false
+        default: "all,produced"
 permissions:
   contents: read
   actions: read
@@ -31,7 +43,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
-          python -m pip install --quiet "numpy" "onnxruntime>=1.18"
+          python -m pip install --quiet "numpy" "onnxruntime>=1.18" "scikit-learn>=1.3"
       - name: Verify AudioSet model loads
         if: inputs.skip_embedding != '1'
         env:
@@ -64,18 +76,31 @@ jobs:
           mkdir -p out/release
           gh run download "$ANNOTATION_RUN" -n "$name" -D out/release --repo "$GITHUB_REPOSITORY"
           test -s out/release/annotations.jsonl
+      - name: Split ad blocks into sponsor events
+        run: |
+          set -euo pipefail
+          # 探针必须与训练、盲测使用同一个事件粒度，否则事件级指标不可比。
+          python scripts/split_ad_events.py --data-dir out/release
       - name: Probe hand-crafted features vs AudioSet embeddings
         env:
           MAX_EPISODES: ${{ inputs.max_episodes }}
           SKIP_EMBEDDING: ${{ inputs.skip_embedding }}
+          CONTEXT: ${{ inputs.context }}
+          CLASSIFIERS: ${{ inputs.classifiers }}
+          VIEWS: ${{ inputs.views }}
           YAMNET_MODEL_PATH: out/probe/yamnet.onnx
         run: |
           set -euo pipefail
           args=(--annotations out/release/annotations.jsonl
                 --out out/probe/probe_result.json
-                --max-episodes "$MAX_EPISODES")
+                --max-episodes "$MAX_EPISODES"
+                --classifiers "$CLASSIFIERS"
+                --views "$VIEWS")
           if [ "$SKIP_EMBEDDING" = "1" ]; then
             args+=(--skip-embedding)
+          fi
+          if [ "$CONTEXT" = "1" ]; then
+            args+=(--context)
           fi
           python scripts/probe_embedding.py "${args[@]}"
       - uses: actions/upload-artifact@v4

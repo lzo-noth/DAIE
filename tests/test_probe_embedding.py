@@ -6,9 +6,12 @@ import numpy as np
 
 from dai_detect.acoustic_embedding import EMBEDDING_DIM, window_embeddings
 from scripts.probe_embedding import (
+    _fit_model,
     _pool_at_thresholds,
+    _score,
     _train_thresholds,
     _view_rows,
+    _window_context,
     _window_folds,
 )
 
@@ -37,6 +40,39 @@ class WindowEmbeddingTest(unittest.TestCase):
         )
         self.assertEqual(out.shape, (1, EMBEDDING_DIM))
         self.assertFalse(out.any())
+
+
+class WindowContextTest(unittest.TestCase):
+    def test_rolling_mean_uses_only_the_requested_span(self) -> None:
+        times = np.asarray([0.0, 1.0, 2.0, 3.0, 4.0])
+        matrix = np.asarray([[0.0], [0.0], [9.0], [0.0], [0.0]], dtype=np.float32)
+        out = _window_context(matrix, times, spans=(1.0,))
+        self.assertEqual(out.shape, (5, 2))
+        self.assertAlmostEqual(float(out[2, 0]), 9.0, places=5)
+        self.assertAlmostEqual(float(out[2, 1]), 3.0, places=5)
+
+    def test_context_columns_are_appended_for_every_span(self) -> None:
+        times = np.arange(0.0, 20.0, 0.5)
+        matrix = np.ones((len(times), 3), dtype=np.float32)
+        out = _window_context(matrix, times, spans=(4.0, 12.0, 30.0))
+        self.assertEqual(out.shape, (len(times), 12))
+        self.assertTrue(np.allclose(out, 1.0))
+
+
+class ClassifierChoiceTest(unittest.TestCase):
+    def test_hist_and_logistic_both_score_separable_data(self) -> None:
+        try:
+            import sklearn  # noqa: F401
+        except ImportError:
+            self.skipTest("scikit-learn 未安装；CI 会安装")
+        rng = np.random.default_rng(0)
+        X = np.vstack([rng.normal(0.0, 1.0, (200, 4)), rng.normal(3.0, 1.0, (200, 4))])
+        y = np.concatenate([np.zeros(200), np.ones(200)])
+        for name in ("logistic", "hist"):
+            model = _fit_model(name, X, y)
+            scores = _score(model, X)
+            self.assertEqual(scores.shape, (400,))
+            self.assertGreater(float(scores[200:].mean()), float(scores[:200].mean()))
 
 
 class ViewScopeTest(unittest.TestCase):
