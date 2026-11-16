@@ -78,6 +78,12 @@ jobs:
           set -euo pipefail
           test -s out/release/annotations.jsonl
           test -s out/release/blind_generated.jsonl
+      - name: Split ad blocks into sponsor events
+        run: |
+          set -euo pipefail
+          # 训练与盲测必须共用“一条赞助商创意 = 一个事件”的粒度；标注产物里
+          # 仍可能是块级区间，这里用转写判定切分，不改音频与推理路径。
+          python scripts/split_ad_events.py --data-dir out/release
       - name: Reuse models from previous run
         if: inputs.models_run_id != ''
         env:

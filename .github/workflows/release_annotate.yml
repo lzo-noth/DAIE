@@ -351,6 +351,12 @@ jobs:
           else
             echo "no review decisions, keeping raw LLM labels"
           fi
+      - name: Split ad blocks into sponsor events
+        run: |
+          set -euo pipefail
+          # 一个广告位常连放 2–4 家赞助商；训练、边界头和盲测都按“一条创意一个
+          # 事件”评测，否则事件级指标会被块/单条的粒度差吞掉。
+          python scripts/split_ad_events.py --data-dir out/release
       - name: Publish annotation data to repo
         run: |
           set -euo pipefail
