@@ -544,7 +544,7 @@ def main() -> int:
     parser.add_argument(
         "--context",
         action="store_true",
-        help="基线窗口拼接 ±4/±12/±30 s 滚动均值（84→336 维）",
+        help="基线窗口拼接 ±4/±12/±30 s 滚动均值（窗口特征数 ×4）",
     )
     parser.add_argument(
         "--classifiers",

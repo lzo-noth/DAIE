@@ -115,6 +115,34 @@ class HardCaseTest(unittest.TestCase):
         )
         self.assertGreaterEqual(max(0.0, min(best["end"], 27.0) - max(best["start"], 15.0)), 4.0)
 
+    def test_voice_distance_flags_a_different_speaker(self) -> None:
+        sr = SR48
+        tone_a = (0.1 * np.sin(2 * np.pi * 440.0 * np.arange(sr) / sr)).astype(np.float32)
+        tone_b = (0.1 * np.sin(2 * np.pi * 1800.0 * np.arange(sr) / sr)).astype(np.float32)
+        frames = np.concatenate(
+            [
+                np.stack([tone_a] * 2, axis=1) for _ in range(10)
+            ]
+            + [np.stack([tone_b] * 2, axis=1) for _ in range(10)]
+            + [np.stack([tone_a] * 2, axis=1) for _ in range(10)]
+        )
+        path = self.directory / "voice.wav"
+        synth.write_stereo_wav(path, frames, sr=sr)
+        mono, forensic = extract_features(str(path))
+        windows = build_windows(mono, forensic)
+        columns = {name: index for index, name in enumerate(windows["names"])}
+        matrix = windows["features"]
+        times = windows["times"]
+
+        def value(name: str, at: float) -> float:
+            row = int(np.argmin(np.abs(times - at)))
+            return float(matrix[row, columns[name]])
+
+        # 中间段是另一个音色：相对本集基准的距离应显著高于同音色段落。
+        self.assertLess(value("mfcc_voice_dist", 5.0), 1.0)
+        self.assertGreater(value("mfcc_voice_dist", 15.0), 3.0)
+        self.assertLess(value("mfcc_voice_dist", 25.0), 1.0)
+
     def test_content_music_bed_is_not_an_ad(self) -> None:
         speech = synth.speech(60.0, 1300, amplitude=0.10, sr=SR48)
         bed = synth.ad(60.0, seed=55, amplitude=0.03, sr=SR48)

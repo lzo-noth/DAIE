@@ -25,7 +25,7 @@ WINDOW_SPAN_S = 1.0
 CONTEXT_SPANS_S = (2.0, 4.0)
 # 特征集合变更必须换 schema：旧模型按名字取列，新增特征不会让它报错，
 # 只会让它少看一部分证据并悄悄退化。加载端据此拒绝旧模型。
-WINDOW_FEATURE_SCHEMA = "window_v2"
+WINDOW_FEATURE_SCHEMA = "window_v3"
 
 _BAND_NAMES = [f"band_{index:02d}" for index in range(16)]
 _CONTEXT_NAMES = [
@@ -98,6 +98,11 @@ WINDOW_FEATURES: list[str] = [
     "silence_level_step_db",
     "silence_run_count",
     "digital_zero_fraction",
+    # 说话人证据：广告多为非主播的声音，节目开场/串场是主播配乐。
+    # 用本集自身的 MFCC 分布做基准（已排除 c0 响度），衡量“这句话有多不像本集的主播”。
+    "mfcc_voice_dist",
+    "mfcc_voice_local_dist",
+    "mfcc_voice_local_gap",
 ]
 
 
@@ -186,6 +191,7 @@ def build_windows(
     count = max(1, count)
 
     matrix = np.zeros((count, len(WINDOW_FEATURES)), dtype=np.float32)
+    mfcc_windows = np.zeros((count, 8), dtype=np.float64)
     times = np.zeros(count, dtype=np.float64)
     mono_frame_count = len(loud)
     forensic_frame_count = len(f_loud)
@@ -221,6 +227,7 @@ def build_windows(
         window_bands = bands[f0:f1]
 
         mfcc_mean = window_mfcc.mean(axis=0)
+        mfcc_windows[index] = mfcc_mean
         band_median = np.median(window_bands, axis=0)
         loud_mean = float(window_loud.mean())
         floor_db = _percentile(window_loud, 10)
@@ -316,6 +323,7 @@ def build_windows(
             level_step,
             float(run_count),
             zero_frac,
+            *[0.0] * 3,  # 说话人距离特征，循环结束后统一填充
         ]
         matrix[index] = np.nan_to_num(np.asarray(row, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -351,6 +359,8 @@ def build_windows(
             deltas = -deltas
         matrix[:, columns[target]] = deltas
 
+    _add_voice_features(matrix, mfcc_windows, hop_s, columns)
+
     return {
         "times": times,
         "features": matrix,
@@ -368,6 +378,44 @@ def build_windows(
             "noise_floor_db": floor_base,
         },
     }
+
+
+def _add_voice_features(
+    matrix: np.ndarray,
+    mfcc_windows: np.ndarray,
+    hop_s: float,
+    columns: dict[str, int],
+    local_span_s: float = 45.0,
+) -> None:
+    """Fill the speaker-timbre distance features.
+
+    Coefficients c1..c7 describe vocal-tract timbre rather than level, so a
+    window read by a different announcer stands out against the episode's own
+    distribution. Distances are measured in robust standard deviations of this
+    episode, which keeps the scale comparable across shows.
+    """
+    if len(mfcc_windows) == 0:
+        return
+    voice = mfcc_windows[:, 1:]
+    center = np.median(voice, axis=0)
+    spread = np.median(np.abs(voice - center), axis=0) * 1.4826
+    spread = np.where(spread < 1e-6, 1.0, spread)
+    normalized = (voice - center) / spread
+    global_dist = np.sqrt(np.mean(normalized**2, axis=1))
+
+    half = max(1, int(round(local_span_s / hop_s)))
+    local_dist = np.zeros(len(voice), dtype=np.float64)
+    for index in range(len(voice)):
+        low = max(0, index - half)
+        high = min(len(voice), index + half + 1)
+        local_center = np.median(voice[low:high], axis=0)
+        local_dist[index] = np.sqrt(
+            np.mean(((voice[index] - local_center) / spread) ** 2)
+        )
+
+    matrix[:, columns["mfcc_voice_dist"]] = global_dist
+    matrix[:, columns["mfcc_voice_local_dist"]] = local_dist
+    matrix[:, columns["mfcc_voice_local_gap"]] = local_dist - global_dist
 
 
 def window_labels(

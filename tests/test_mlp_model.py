@@ -76,7 +76,7 @@ class MlpRoundTripTest(unittest.TestCase):
 
     def test_model_round_trips_through_json(self) -> None:
         # 训练矩阵宽度必须与模型声明的特征一致：带上下文时 predict 会把
-        # 84 维窗口特征扩成 336 维再按名字取列，用小维度训练会让归一化参数
+        # 窗口特征扩成 4 倍维度再按名字取列，用小维度训练会让归一化参数
         # 与输入宽度对不上。
         context_names = context_feature_names(list(WINDOW_FEATURES))
         X, y = self._data(len(context_names))
