@@ -25,8 +25,16 @@ def is_target_ad(ad: dict) -> bool:
     return ad_style(ad) == TARGET_PRODUCTION_STYLE
 
 
-def split_ads(ads: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
-    """Return ``(target, non_target, ignored)`` under the produced-only policy."""
+def split_ads(
+    ads: list[dict], host_read_as: str = "negative"
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Return ``(target, non_target, ignored)`` under the produced-only policy.
+
+    ``host_read_as="ignore"`` masks host-read ads instead of using them as hard
+    negatives. Content cues ("this message comes from", "use code") appear in
+    host reads too, so a cue-using model trained with host reads as negatives
+    learns to distrust exactly the regions it should be finding.
+    """
     target: list[dict] = []
     non_target: list[dict] = []
     ignored: list[dict] = []
@@ -35,16 +43,24 @@ def split_ads(ads: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
         if style == TARGET_PRODUCTION_STYLE:
             target.append(ad)
         elif style in NON_TARGET_PRODUCTION_STYLES:
-            non_target.append(ad)
+            if host_read_as == "ignore":
+                ignored.append(ad)
+            else:
+                non_target.append(ad)
         else:
             ignored.append(ad)
     return target, non_target, ignored
 
 
-def target_scope_payload() -> dict:
+def target_scope_payload(host_read_as: str = "negative") -> dict:
     """Model-facing description so a loaded model states what it detects."""
     return {
         "ad_production_style": TARGET_PRODUCTION_STYLE,
-        "non_target_styles": sorted(NON_TARGET_PRODUCTION_STYLES),
-        "ignored_styles": sorted(IGNORED_PRODUCTION_STYLES),
+        "non_target_styles": (
+            [] if host_read_as == "ignore" else sorted(NON_TARGET_PRODUCTION_STYLES)
+        ),
+        "ignored_styles": sorted(
+            IGNORED_PRODUCTION_STYLES
+            | (NON_TARGET_PRODUCTION_STYLES if host_read_as == "ignore" else frozenset())
+        ),
     }

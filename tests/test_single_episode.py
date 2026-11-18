@@ -138,6 +138,12 @@ class SingleEpisodeTest(unittest.TestCase):
         self.assertEqual([ad["start_s"] for ad in non_target], [30.0])
         self.assertEqual([ad["start_s"] for ad in ignored], [60.0, 90.0])
 
+        # 使用内容线索时，口播广告同样含广告话术，必须能从负样本里摘出来。
+        target, non_target, ignored = split_ads(ads, host_read_as="ignore")
+        self.assertEqual([ad["start_s"] for ad in target], [0.0])
+        self.assertEqual(non_target, [])
+        self.assertEqual([ad["start_s"] for ad in ignored], [30.0, 60.0, 90.0])
+
     def test_ad_model_round_trip_and_reorders_features(self) -> None:
         payload = {
             "features": ["musicness", "loud_dev"],

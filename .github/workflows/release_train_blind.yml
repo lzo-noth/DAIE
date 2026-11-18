@@ -46,6 +46,10 @@ on:
         description: "1=窗口特征拼接 ±4/±12/±30 s 滚动均值（配合 mlp 使用）"
         required: false
         default: "0"
+      host_read:
+        description: "host_read 处理：negative=hard negative（默认）；ignore=屏蔽（配合内容线索使用）"
+        required: false
+        default: "negative"
 permissions:
   contents: read
   actions: read
@@ -124,10 +128,12 @@ jobs:
           SKIP_BOUNDARY: ${{ inputs.skip_boundary }}
           CLASSIFIER: ${{ inputs.classifier }}
           CONTEXT: ${{ inputs.context }}
+          HOST_READ: ${{ inputs.host_read }}
         run: |
           set -euo pipefail
           args=(--annotations out/release/annotations.jsonl
                 --transcripts out/release/transcripts.jsonl
+                --host-read "$HOST_READ"
                 --model-out out/release/ad_model.json
                 --boundary-out out/release/boundary_model.json
                 --oof-summary out/release/oof_summary.jsonl

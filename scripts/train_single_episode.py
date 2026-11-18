@@ -1952,6 +1952,16 @@ def main() -> int:
         type=Path,
         help="词级转写 JSONL（audio_id + segments）；提供后拼接内容线索特征",
     )
+    parser.add_argument(
+        "--host-read",
+        choices=("negative", "ignore"),
+        default="negative",
+        help=(
+            "host_read 广告的处理方式：negative=当 hard negative（默认）；"
+            "ignore=屏蔽。使用内容线索时建议 ignore：口播广告同样含广告话术，"
+            "当负样本会让模型把线索学成反向证据"
+        ),
+    )
     parser.add_argument("--skip-boundary", action="store_true", help="不训练边界模型")
     parser.add_argument(
         "--allow-unverified-audio",
@@ -2162,7 +2172,7 @@ def main() -> int:
             ads = [item for item in ads if item["end_s"] - item["start_s"] >= MIN_AD_S]
             # 产品目标是第三方预录广告。主播口播是最接近正文的 hard negative；
             # 制作风格未知的区间两端都不用，避免污染正负监督与评测分母。
-            ads, non_target, ignored = split_ads(ads)
+            ads, non_target, ignored = split_ads(ads, args.host_read)
             if non_target:
                 print(
                     f"[data] {name}: {len(non_target)} 段 host_read 作为非目标负样本",
@@ -2492,7 +2502,7 @@ def main() -> int:
                 "window_schema": WINDOW_FEATURE_SCHEMA,
                 "context_schema": CONTEXT_SCHEMA if args.context else "",
                 "boundary_schema": BOUNDARY_FEATURE_SCHEMA,
-                "target_scope": target_scope_payload(),
+                "target_scope": target_scope_payload(args.host_read),
                 "episodes": identity_rows,
             },
             sort_keys=True,
@@ -2536,7 +2546,7 @@ def main() -> int:
         "context_spans": list(CONTEXT_SPANS) if args.context else [],
         "speech_cues": bool(args.transcripts),
         "cue_schema": CUE_SCHEMA if args.transcripts else "",
-        "target_scope": target_scope_payload(),
+        "target_scope": target_scope_payload(args.host_read),
         "features": (
             context_feature_names(base_names)
             if args.context
@@ -2616,7 +2626,7 @@ def main() -> int:
                 "version": 1,
                 "kind": "onset_offset",
                 "feature_schema": BOUNDARY_FEATURE_SCHEMA,
-                "target_scope": target_scope_payload(),
+                "target_scope": target_scope_payload(args.host_read),
                 "features": list(BOUNDARY_FEATURES),
                 "onset": final_onset,
                 "offset": final_offset,
