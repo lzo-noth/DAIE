@@ -12,7 +12,7 @@ boundary refinement -> timeline JSON.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -51,6 +51,9 @@ class SingleConfig:
     # 词级转写（运行时由离线 ASR 产生）。模型声明 speech_cues 时必须提供，
     # 否则内容线索会全为 0，等于让模型少看证据却照样输出结果。
     transcript_segments: Optional[list] = None
+    # 没有现成转写时允许调用离线 ASR（faster-whisper）生成词级时间。
+    auto_transcribe: bool = False
+    asr_model: Optional[str] = None
     require_models: bool = False
     require_calibrated_models: bool = False
 
@@ -77,6 +80,13 @@ def extract_features(
     mono_payload = collector.finish()
     mono_payload["audio_id_kind"] = "downmix_48k_to_16k"
     return mono_payload, forensic.finish()
+
+
+def _config_payload(cfg: "SingleConfig") -> dict:
+    """Serialise the run config without embedding the word timings."""
+    payload = asdict(cfg)
+    payload.pop("transcript_segments", None)
+    return payload
 
 
 def _calibration_problems(
@@ -140,10 +150,19 @@ def analyze_single(
     model = load_ad_model(cfg.model_path)
     boundary_model = load_boundary_model(cfg.boundary_model_path)
     if getattr(model, "speech_cues", False):
+        if cfg.transcript_segments is None and cfg.auto_transcribe:
+            from .asr import DEFAULT_ASR_MODEL, transcribe_words
+
+            if progress:
+                progress("转写: 离线 ASR 生成内容线索所需的词级时间")
+            cfg = replace(
+                cfg,
+                transcript_segments=transcribe_words(src, model=cfg.asr_model or DEFAULT_ASR_MODEL),
+            )
         if cfg.transcript_segments is None:
             raise ValueError(
                 "模型需要内容线索（speech_cues），但未提供词级转写；"
-                "请先用离线 ASR 生成 transcript_segments"
+                "请用 --asr 启用离线 ASR，或用 --transcripts 直接提供"
             )
     elif cfg.transcript_segments is not None:
         raise ValueError("模型未使用内容线索，但传入了词级转写，拒绝混用不同特征口径")
@@ -258,7 +277,7 @@ def analyze_single(
             "id_kind": str(mono.get("audio_id_kind", "")),
             "source_sha256": source_sha256(src),
         },
-        "config": asdict(cfg),
+        "config": _config_payload(cfg),
         "model": {
             "classifier": kind,
             "source": getattr(model, "source", ""),

@@ -4,6 +4,7 @@ import unittest
 
 import numpy as np
 
+from dai_detect import asr
 from dai_detect.speech_cues import CUE_FEATURES, attach_speech_cues, cue_matrix
 
 
@@ -66,6 +67,12 @@ class SpeechCueTest(unittest.TestCase):
         self.assertEqual(merged["features"].shape[1], len(merged["names"]))
         self.assertEqual(merged["names"][:3], ["a", "b", "c"])
         self.assertEqual(merged["names"][3:], CUE_FEATURES)
+
+    @unittest.skipIf(asr.available(), "faster-whisper 已安装时不会走缺依赖分支")
+    def test_missing_asr_engine_explains_the_alternative(self) -> None:
+        with self.assertRaises(RuntimeError) as context:
+            asr.transcribe_words("unused.wav")
+        self.assertIn("faster-whisper", str(context.exception))
 
 
 if __name__ == "__main__":

@@ -358,6 +358,16 @@ def main() -> int:
         type=Path,
         help="词级转写 JSONL；模型声明 speech_cues 时必需（模拟运行时离线 ASR）",
     )
+    parser.add_argument(
+        "--asr",
+        action="store_true",
+        help="没有 --transcripts 时调用离线 ASR 生成词级时间（需要 faster-whisper）",
+    )
+    parser.add_argument(
+        "--asr-model",
+        default="",
+        help="离线 ASR 模型名或本地模型目录（默认 tiny）",
+    )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -380,6 +390,8 @@ def main() -> int:
             if args.transcripts and model_expects_cues
             else None
         ),
+        auto_transcribe=bool(args.asr) and not args.transcripts,
+        asr_model=args.asr_model or None,
         require_models=args.require_models,
         require_calibrated_models=args.require_calibrated_models,
     )
