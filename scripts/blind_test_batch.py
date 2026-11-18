@@ -333,6 +333,8 @@ def _run_row(row: dict, args: argparse.Namespace, base: Path) -> dict:
             command += ["--model", str(args.model)]
         if args.boundary_model:
             command += ["--boundary-model", str(args.boundary_model)]
+        if getattr(args, "transcripts", None):
+            command += ["--transcripts", str(args.transcripts)]
         if args.require_models:
             command.append("--require-models")
         if args.require_calibrated_models:
@@ -388,6 +390,11 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, required=True, help="批量盲测清单 JSONL")
     parser.add_argument("--model", type=Path)
     parser.add_argument("--boundary-model", type=Path)
+    parser.add_argument(
+        "--transcripts",
+        type=Path,
+        help="词级转写 JSONL；模型声明 speech_cues 时必需",
+    )
     parser.add_argument("--out", type=Path, help="汇总报告 JSON")
     parser.add_argument("--reports-out-dir", type=Path, help="逐集盲测报告目录")
     parser.add_argument("--require-models", action="store_true")

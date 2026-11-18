@@ -127,6 +127,7 @@ jobs:
         run: |
           set -euo pipefail
           args=(--annotations out/release/annotations.jsonl
+                --transcripts out/release/transcripts.jsonl
                 --model-out out/release/ad_model.json
                 --boundary-out out/release/boundary_model.json
                 --oof-summary out/release/oof_summary.jsonl
@@ -167,6 +168,7 @@ jobs:
             --manifest out/release/blind_generated.jsonl \
             --model out/release/ad_model.json \
             --boundary-model out/release/boundary_model.json \
+            --transcripts out/release/blind_transcripts.jsonl \
             --require-models "${strict[@]}" --require-independent-test \
             --min-events "$MIN_EVENTS" --min-feeds "$MIN_FEEDS" \
             --target-scope "$TARGET_SCOPE" \

@@ -263,6 +263,28 @@ def _independence_check(
     )
 
 
+def _load_transcript_segments(
+    path: Path, audio_path: Path, feed: str
+) -> list[dict] | None:
+    """Pick the transcript row for this audio (sha256 first, then unique feed)."""
+    from dai_detect.audio import source_sha256
+
+    rows = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    digest = source_sha256(str(audio_path))
+    for row in rows:
+        if str(row.get("source_sha256") or "") == digest:
+            return row.get("segments")
+    if feed:
+        matches = [row for row in rows if str(row.get("feed") or "") == feed]
+        if len(matches) == 1:
+            return matches[0].get("segments")
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--audio", required=True, help="唯一输入：一集完整音频")
@@ -331,8 +353,21 @@ def main() -> int:
         help="盲测允许的最大每小时误报数；<=0 表示不检查",
     )
     parser.add_argument("--proxy")
+    parser.add_argument(
+        "--transcripts",
+        type=Path,
+        help="词级转写 JSONL；模型声明 speech_cues 时必需（模拟运行时离线 ASR）",
+    )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
+
+    model_expects_cues = False
+    if args.model and Path(args.model).exists():
+        try:
+            payload = json.loads(Path(args.model).read_text(encoding="utf-8"))
+            model_expects_cues = bool(payload.get("speech_cues"))
+        except (OSError, ValueError):
+            model_expects_cues = False
 
     cfg = SingleConfig(
         min_ad_s=args.min_ad,
@@ -340,6 +375,11 @@ def main() -> int:
         model_path=str(args.model) if args.model else None,
         boundary_model_path=str(args.boundary_model) if args.boundary_model else None,
         proxy=args.proxy,
+        transcript_segments=(
+            _load_transcript_segments(args.transcripts, args.audio, args.feed)
+            if args.transcripts and model_expects_cues
+            else None
+        ),
         require_models=args.require_models,
         require_calibrated_models=args.require_calibrated_models,
     )

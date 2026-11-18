@@ -25,7 +25,7 @@ WINDOW_SPAN_S = 1.0
 CONTEXT_SPANS_S = (2.0, 4.0)
 # 特征集合变更必须换 schema：旧模型按名字取列，新增特征不会让它报错，
 # 只会让它少看一部分证据并悄悄退化。加载端据此拒绝旧模型。
-WINDOW_FEATURE_SCHEMA = "window_v3"
+WINDOW_FEATURE_SCHEMA = "window_v4"
 
 _BAND_NAMES = [f"band_{index:02d}" for index in range(16)]
 _CONTEXT_NAMES = [

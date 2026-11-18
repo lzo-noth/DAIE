@@ -25,6 +25,7 @@ from .features import FeatureExtractor
 from .forensic import StereoForensicExtractor
 from .refinement import refine_events
 from .single_features import build_windows
+from .speech_cues import attach_speech_cues
 from .temporal_decoder import decode_windows
 
 TIMELINE_VERSION = 1
@@ -47,6 +48,9 @@ class SingleConfig:
     model_path: Optional[str] = None
     boundary_model_path: Optional[str] = None
     proxy: Optional[str] = None
+    # 词级转写（运行时由离线 ASR 产生）。模型声明 speech_cues 时必须提供，
+    # 否则内容线索会全为 0，等于让模型少看证据却照样输出结果。
+    transcript_segments: Optional[list] = None
     require_models: bool = False
     require_calibrated_models: bool = False
 
@@ -135,6 +139,16 @@ def analyze_single(
     windows = build_windows(mono, forensic, hop_s=cfg.hop_s, span_s=cfg.span_s)
     model = load_ad_model(cfg.model_path)
     boundary_model = load_boundary_model(cfg.boundary_model_path)
+    if getattr(model, "speech_cues", False):
+        if cfg.transcript_segments is None:
+            raise ValueError(
+                "模型需要内容线索（speech_cues），但未提供词级转写；"
+                "请先用离线 ASR 生成 transcript_segments"
+            )
+    elif cfg.transcript_segments is not None:
+        raise ValueError("模型未使用内容线索，但传入了词级转写，拒绝混用不同特征口径")
+    if cfg.transcript_segments is not None:
+        windows = attach_speech_cues(windows, cfg.transcript_segments)
     if cfg.require_models:
         if isinstance(model, HeuristicAdModel):
             raise ValueError("要求训练模型，但广告分类器回退到了启发式实现")

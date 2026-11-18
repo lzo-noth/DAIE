@@ -40,6 +40,7 @@ class AdModel:
     kind: str = "logistic"
     layers: list = field(default_factory=list)
     context_spans: list = field(default_factory=list)
+    speech_cues: bool = False
     source: str = ""
     model_version: str = ""
     data_version: str = ""
@@ -111,6 +112,7 @@ class AdModel:
                     kind=kind,
                     layers=layers,
                     context_spans=context_spans,
+                    speech_cues=bool(payload.get("speech_cues")),
                     source=str(target),
                     model_version=str(payload.get("model_version", "")),
                     data_version=str(payload.get("data_version", "")),
@@ -135,6 +137,7 @@ class AdModel:
                 intercept=float(payload["intercept"]),
                 threshold=float(payload.get("threshold", 0.5)),
                 kind=str(payload.get("kind", "logistic")),
+                speech_cues=bool(payload.get("speech_cues")),
                 source=str(target),
                 model_version=str(payload.get("model_version", "")),
                 data_version=str(payload.get("data_version", "")),

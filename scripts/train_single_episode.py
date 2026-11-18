@@ -63,6 +63,7 @@ from dai_detect.window_context import (
 )
 from dai_detect.refinement import refine_events
 from dai_detect.single_episode import extract_features
+from dai_detect.speech_cues import CUE_FEATURES, CUE_SCHEMA, attach_speech_cues
 from dai_detect.feed_identity import canonical_feed_key
 from dai_detect.single_features import (
     WINDOW_FEATURE_SCHEMA,
@@ -110,6 +111,29 @@ def _load_annotations(path: Path) -> list[dict]:
     return rows
 
 
+def _load_transcripts(path: Path) -> dict[str, list[dict]]:
+    mapping: dict[str, list[dict]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        payload = json.loads(line)
+        segments = payload.get("segments")
+        if not segments:
+            continue
+        for key in (
+            str(payload.get("audio_id") or ""),
+            str(payload.get("source_sha256") or ""),
+        ):
+            if key:
+                mapping[key] = segments
+    return mapping
+
+
+def _transcript_key(entry: dict) -> str:
+    return str(entry.get("audio_id") or entry.get("source_sha256") or "")
+
+
 def _resolve_audio(value: str, base: Path) -> str:
     if value.startswith(("http://", "https://")):
         return value
@@ -130,6 +154,9 @@ def _extract_episode(job: dict) -> dict:
     """
     mono, forensic = extract_features(job["audio"], proxy=job.get("proxy"))
     windows = build_windows(mono, forensic)
+    if job.get("segments") is not None:
+        # 内容线索（词级时间）单独拼接，声学特征保持原样，避免两套口径分叉。
+        windows = attach_speech_cues(windows, job["segments"])
     if job.get("context_spans"):
         windows = {
             **windows,
@@ -158,10 +185,16 @@ def _extract_all(
     proxy: Optional[str],
     skip_boundary: bool,
     context_spans: Optional[list[float]] = None,
+    segments: Optional[list[Optional[list[dict]]]] = None,
 ) -> list[dict]:
     jobs = [
-        {"audio": audio, "proxy": proxy, "context_spans": context_spans}
-        for audio in audios
+        {
+            "audio": audio,
+            "proxy": proxy,
+            "context_spans": context_spans,
+            "segments": segments[index] if segments else None,
+        }
+        for index, audio in enumerate(audios)
     ]
     workers = int(os.environ.get("TRAIN_EXTRACT_WORKERS", "0") or 0)
     if workers <= 0:
@@ -1914,6 +1947,11 @@ def main() -> int:
         help="窗口特征拼接 ±4/±12/±30 s 滚动均值（需要 --classifier mlp 才能体现收益）",
     )
     parser.add_argument("--max-episodes", type=int, default=0, help="最多处理多少集，0 表示全部")
+    parser.add_argument(
+        "--transcripts",
+        type=Path,
+        help="词级转写 JSONL（audio_id + segments）；提供后拼接内容线索特征",
+    )
     parser.add_argument("--skip-boundary", action="store_true", help="不训练边界模型")
     parser.add_argument(
         "--allow-unverified-audio",
@@ -2028,6 +2066,22 @@ def main() -> int:
             return 1
 
     samples: list[EpisodeSample] = []
+    transcripts = _load_transcripts(args.transcripts) if args.transcripts else {}
+    if args.transcripts:
+        missing = [entry for entry in entries if _transcript_key(entry) not in transcripts]
+        if missing:
+            print(
+                f"[data] 中止训练：{len(missing)} 集缺少转写（例如 "
+                f"{missing[0].get('feed')} / {missing[0].get('episode')}）；"
+                "内容线索必须训练与推理同源",
+                flush=True,
+            )
+            return 1
+        print(f"[data] 已为 {len(entries)} 集匹配内容线索转写", flush=True)
+    segments_by_entry = [
+        transcripts.get(_transcript_key(entry)) if args.transcripts else None
+        for entry in entries
+    ]
     boundary_onset_X: list[np.ndarray] = []
     boundary_onset_y: list[np.ndarray] = []
     boundary_offset_X: list[np.ndarray] = []
@@ -2042,6 +2096,7 @@ def main() -> int:
         args.proxy,
         args.skip_boundary,
         list(CONTEXT_SPANS) if args.context else None,
+        segments_by_entry,
     )
     print(f"[time] 特征提取完成: {time.time() - extract_began:.0f}s", flush=True)
     for (entry, audio), result in zip(resolved, extracted):
@@ -2472,17 +2527,20 @@ def main() -> int:
         ),
     }
 
+    base_names = list(WINDOW_FEATURES) + (list(CUE_FEATURES) if args.transcripts else [])
     payload = {
         "version": 1,
         "kind": args.classifier,
         "feature_schema": WINDOW_FEATURE_SCHEMA,
         "input_schema": CONTEXT_SCHEMA if args.context else "",
         "context_spans": list(CONTEXT_SPANS) if args.context else [],
+        "speech_cues": bool(args.transcripts),
+        "cue_schema": CUE_SCHEMA if args.transcripts else "",
         "target_scope": target_scope_payload(),
         "features": (
-            context_feature_names(list(WINDOW_FEATURES))
+            context_feature_names(base_names)
             if args.context
-            else list(WINDOW_FEATURES)
+            else base_names
         ),
         **final_model,
         "threshold": round(threshold, 4),
