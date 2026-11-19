@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+import numpy as np
+
 DEFAULT_ASR_MODEL = "tiny"
 DEFAULT_LANGUAGE = "en"
 
@@ -26,6 +28,27 @@ def available() -> bool:
     except ImportError:
         return False
     return True
+
+
+def _mono_16k(src: str, proxy: Optional[str] = None) -> np.ndarray:
+    """Decode with ffmpeg into the 16 kHz mono float32 array ASR expects.
+
+    Passing audio samples instead of a path keeps ASR off PyAV's container
+    reader, which varies by version (older/newer av rejected the
+    ``metadata_errors`` keyword in the wild). The decode path is the same one
+    the acoustic features already use.
+    """
+    from .audio import DownmixResampler, iter_pcm_stereo
+
+    downmix = DownmixResampler()
+    chunks: list[np.ndarray] = []
+    for block in iter_pcm_stereo(src, block_s=2.0, proxy=proxy):
+        mono = downmix.push(block.mean(axis=1))
+        if len(mono):
+            chunks.append(np.asarray(mono, dtype=np.float32))
+    if not chunks:
+        return np.zeros(0, dtype=np.float32)
+    return np.concatenate(chunks)
 
 
 def transcribe_words(
@@ -51,7 +74,8 @@ def transcribe_words(
         ) from error
 
     engine = WhisperModel(model, device=device, compute_type=compute_type)
-    segments, _ = engine.transcribe(src, language=language, vad_filter=True)
+    audio = _mono_16k(src, proxy=proxy)
+    segments, _ = engine.transcribe(audio, language=language, vad_filter=True)
     rows = []
     for segment in segments:
         text = str(getattr(segment, "text", "") or "").strip()

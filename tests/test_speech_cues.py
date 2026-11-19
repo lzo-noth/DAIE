@@ -74,6 +74,22 @@ class SpeechCueTest(unittest.TestCase):
             asr.transcribe_words("unused.wav")
         self.assertIn("faster-whisper", str(context.exception))
 
+    def test_asr_decode_produces_sixteen_kilohertz_mono(self) -> None:
+        import tempfile
+
+        from tests import synth
+
+        sr = 48000
+        tone = (0.1 * np.sin(2 * np.pi * 440.0 * np.arange(sr) / sr)).astype(np.float32)
+        frames = np.stack([tone, tone], axis=1)
+        with tempfile.TemporaryDirectory() as folder:
+            path = f"{folder}/tone.wav"
+            synth.write_stereo_wav(path, frames, sr=sr)
+            audio = asr._mono_16k(path)
+        self.assertEqual(audio.dtype, np.float32)
+        self.assertAlmostEqual(len(audio) / 16000.0, 1.0, delta=0.1)
+        self.assertLess(float(np.max(np.abs(audio))), 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
