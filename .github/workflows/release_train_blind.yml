@@ -50,6 +50,10 @@ on:
         description: "host_read 处理：negative=hard negative（默认）；ignore=屏蔽（配合内容线索使用）"
         required: false
         default: "negative"
+      use_asr:
+        description: "1=盲测不用现成转写，改由离线 ASR 生成词级时间（端到端验证）"
+        required: false
+        default: "0"
 permissions:
   contents: read
   actions: read
@@ -68,6 +72,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
           python -m pip install --quiet numpy "scikit-learn>=1.3"
+      - name: Install offline ASR
+        if: inputs.use_asr == '1'
+        run: |
+          set -euo pipefail
+          # 端到端验证：运行时只用这一个固定的离线模型，不联网、不调 LLM。
+          python -m pip install --quiet faster-whisper
+          python -c "from faster_whisper import WhisperModel; WhisperModel('tiny', device='cpu', compute_type='int8'); print('asr ready')"
       - name: Download annotation artifact
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -158,11 +169,19 @@ jobs:
           MIN_FEEDS: ${{ inputs.min_feeds }}
           REQUIRE_CALIBRATED: ${{ inputs.require_calibrated_models }}
           TARGET_SCOPE: ${{ inputs.target_scope }}
+          USE_ASR: ${{ inputs.use_asr }}
         run: |
           set -euo pipefail
           args=()
           if [ "$ALLOW_WEAK" = "true" ]; then
             args+=(--allow-nonhuman-ground-truth)
+          fi
+          cues=()
+          if [ "${USE_ASR:-0}" = "1" ]; then
+            # 端到端验证：词级时间由离线 ASR 从音频现算，不用流水线转写。
+            cues+=(--asr)
+          else
+            cues+=(--transcripts out/release/blind_transcripts.jsonl)
           fi
           strict=()
           if [ "$REQUIRE_CALIBRATED" = "true" ]; then
@@ -174,7 +193,7 @@ jobs:
             --manifest out/release/blind_generated.jsonl \
             --model out/release/ad_model.json \
             --boundary-model out/release/boundary_model.json \
-            --transcripts out/release/blind_transcripts.jsonl \
+            "${cues[@]}" \
             --require-models "${strict[@]}" --require-independent-test \
             --min-events "$MIN_EVENTS" --min-feeds "$MIN_FEEDS" \
             --target-scope "$TARGET_SCOPE" \

@@ -335,6 +335,10 @@ def _run_row(row: dict, args: argparse.Namespace, base: Path) -> dict:
             command += ["--boundary-model", str(args.boundary_model)]
         if getattr(args, "transcripts", None):
             command += ["--transcripts", str(args.transcripts)]
+        if getattr(args, "asr", False):
+            command.append("--asr")
+            if getattr(args, "asr_model", ""):
+                command += ["--asr-model", str(args.asr_model)]
         if args.require_models:
             command.append("--require-models")
         if args.require_calibrated_models:
@@ -395,6 +399,12 @@ def main() -> int:
         type=Path,
         help="词级转写 JSONL；模型声明 speech_cues 时必需",
     )
+    parser.add_argument(
+        "--asr",
+        action="store_true",
+        help="不用现成转写，改由离线 ASR 从音频生成词级时间（端到端验证）",
+    )
+    parser.add_argument("--asr-model", default="", help="离线 ASR 模型名或本地目录")
     parser.add_argument("--out", type=Path, help="汇总报告 JSON")
     parser.add_argument("--reports-out-dir", type=Path, help="逐集盲测报告目录")
     parser.add_argument("--require-models", action="store_true")
