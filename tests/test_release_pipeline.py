@@ -153,9 +153,11 @@ class ShortAdScopeTest(unittest.TestCase):
             {"start_s": 10.0, "end_s": 20.0},
             {"start_s": 30.0, "end_s": 32.7},
         ]
-        kept, excluded = _scope_ground_truth(ads, 10.0)
+        kept, excluded, ignored = _scope_ground_truth(ads, 10.0)
         self.assertEqual(len(kept), 1)
         self.assertEqual(len(excluded), 1)
+        # 被排除的短广告同时缺少制作风格标注，评测时按屏蔽区间处理。
+        self.assertEqual(len(ignored), 1)
 
 
 class HumanLabelGateTest(unittest.TestCase):

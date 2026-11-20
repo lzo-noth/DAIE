@@ -97,6 +97,7 @@ class EpisodeSample:
     change_grid_s: float
     boundary_features: np.ndarray
     cue_starts: list = field(default_factory=list)
+    ignored: list = field(default_factory=list)
 
 
 def _load_annotations(path: Path) -> list[dict]:
@@ -1188,6 +1189,7 @@ def _choose_boundary_thresholds(
                     "times": np.arange(len(features)) * sample.change_grid_s,
                     "gt": ground_truth,
                     "duration_s": float(sample.duration_s),
+                    "ignored": sample.ignored,
                 }
             )
             contributed = True
@@ -1235,7 +1237,7 @@ def _choose_boundary_thresholds(
                 )
             else:
                 refined = []
-            metrics = evaluate_events(refined, item["gt"])
+            metrics = evaluate_events(refined, item["gt"], ignored=item.get("ignored") or [])
             matched += len(metrics["matches"])
             false_positives += int(metrics["false_positives"])
             for match in metrics["matches"]:
@@ -1737,11 +1739,13 @@ def _event_metrics(
             {"start_s": float(ad["start_s"]), "end_s": float(ad["end_s"])}
             for ad in sample.ads
         ]
-        episode = evaluate_events(refined, truth, duration_s=sample.duration_s)
+        episode = evaluate_events(
+            refined, truth, duration_s=sample.duration_s, ignored=sample.ignored
+        )
         matched += int(episode["matched"])
         false_positives += int(episode["false_positives"])
         false_negatives += int(episode["false_negatives"])
-        predicted_total += int(episode["predicted_events"])
+        predicted_total += int(episode.get("evaluated_predictions", episode["predicted_events"]))
         ground_truth_total += int(episode["ground_truth_events"])
         for match in episode["matches"]:
             boundary_errors.extend(
@@ -2232,6 +2236,7 @@ def main() -> int:
                 change_grid_s=float(change["times"][1] - change["times"][0]) if len(change["times"]) > 1 else 0.01,
                 boundary_features=change["features"].astype(np.float16),
                 cue_starts=list(result.get("cue_starts") or []),
+                ignored=list(ignored) if ads is not None else [],
             )
         )
         audio_index += 1

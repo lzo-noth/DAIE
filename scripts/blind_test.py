@@ -118,17 +118,21 @@ def _verify_human_labels(
 
 def _scope_ground_truth(
     ads: list[dict], min_ad_s: float, target_scope: str = "all"
-) -> tuple[list[dict], list[dict]]:
-    """Drop ground-truth ads outside the product's ad definition.
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Return ``(kept, excluded, ignored)`` under the product's ad definition.
 
     The decoder cannot emit an event shorter than ``min_ad_s``, so counting
     such an ad in the denominator would manufacture a guaranteed false
     negative. ``target_scope="produced"`` additionally keeps only ads whose
     ``ad_production_style`` is ``produced``; annotations without a style are
     excluded rather than assumed to be produced.
+
+    ``ignored`` holds spans whose style is unknown: a prediction there cannot
+    be judged, so it must not count as a false positive.
     """
     kept: list[dict] = []
     excluded: list[dict] = []
+    ignored: list[dict] = []
     for ad in ads:
         style = str(ad.get("ad_production_style") or "").strip()
         target_ok = target_scope == "all" or style == "produced"
@@ -136,7 +140,9 @@ def _scope_ground_truth(
             kept.append(ad)
         else:
             excluded.append(ad)
-    return kept, excluded
+            if style not in ("produced", "host_read"):
+                ignored.append(ad)
+    return kept, excluded, ignored
 
 
 def _identity_checks(
@@ -465,7 +471,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 3
-    ground_truth, excluded_short_ads = _scope_ground_truth(
+    ground_truth, excluded_short_ads, ignored_ads = _scope_ground_truth(
         ground_truth, args.min_ad, args.target_scope
     )
     style_counts: dict[str, int] = {}
@@ -511,6 +517,7 @@ def main() -> int:
         timeline["ads"],
         ground_truth,
         duration_s=timeline["duration_s"] or gt_duration,
+        ignored=ignored_ads,
     )
     acceptance = {
         **ACCEPTANCE,

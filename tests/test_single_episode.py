@@ -175,6 +175,18 @@ class SingleEpisodeTest(unittest.TestCase):
         self.assertEqual(metrics["event_recall"], 1.0)
         self.assertAlmostEqual(metrics["boundary_p95_s"], 0.295, places=3)
 
+    def test_predictions_inside_ignored_spans_are_not_false_positives(self) -> None:
+        # unknown 区间既不进真值也不能被判成误报：预测落在里面时对错无从判断。
+        metrics = evaluate_events(
+            [{"start_s": 0.0, "end_s": 20.0}, {"start_s": 100.0, "end_s": 120.0}],
+            [{"start_s": 0.0, "end_s": 20.0}],
+            duration_s=3600.0,
+            ignored=[{"start_s": 100.0, "end_s": 130.0}],
+        )
+        self.assertEqual(metrics["ignored_predictions"], 1)
+        self.assertEqual(metrics["false_positives"], 0)
+        self.assertEqual(metrics["event_precision"], 1.0)
+
     def test_max_matching_beats_greedy_iou(self) -> None:
         # Greedy picks P1-G1 (IoU 0.83) and leaves P2 unmatched.
         # Maximum matching instead uses P1-G2 (0.47) and P2-G1 (0.80).
