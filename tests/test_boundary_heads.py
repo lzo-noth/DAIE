@@ -15,7 +15,7 @@ from dai_detect.boundary_model import (
     _SIGNED_INDEX,
     heuristic_head_scores,
 )
-from dai_detect.refinement import refine_event
+from dai_detect.refinement import refine_event, refine_events
 from dai_detect.temporal_decoder import DecodedEvent
 from scripts.train_single_episode import _sample_boundary_heads
 
@@ -77,6 +77,78 @@ class BoundaryHeadTest(unittest.TestCase):
         self.assertLessEqual(abs(refined["end"] - 40.0), 0.2)
         self.assertGreater(refined["evidence"]["onset_score"], 0.9)
         self.assertGreater(refined["evidence"]["offset_score"], 0.9)
+
+    def test_overlong_block_splits_at_a_strong_internal_change(self) -> None:
+        times = np.arange(10000, dtype=np.float64) * 0.01
+        onset = np.full_like(times, 0.05)
+        offset = np.full_like(times, 0.05)
+        onset[0:60] = 1.0
+        offset[8940:9000] = 1.0
+        onset[4460:4540] = 1.0
+        offset[4460:4540] = 1.0
+        event = DecodedEvent(
+            start=0.0, end=90.0, probability=0.9, peak=0.95, first_index=0, last_index=1
+        )
+        change = {
+            "times": times,
+            "onset_scores": onset,
+            "offset_scores": offset,
+            "scores": np.maximum(onset, offset),
+            "kind": "learned_onset_offset",
+            "onset_threshold": 0.5,
+            "offset_threshold": 0.5,
+        }
+        refined = refine_events([event], change, min_duration=10.0)
+        self.assertEqual(len(refined), 2, refined)
+        self.assertLess(refined[0]["end"], refined[1]["start"] + 1e-6)
+
+    def test_overlong_block_stays_whole_without_a_strong_cut(self) -> None:
+        times = np.arange(10000, dtype=np.float64) * 0.01
+        onset = np.full_like(times, 0.05)
+        offset = np.full_like(times, 0.05)
+        onset[0:60] = 1.0
+        offset[8940:9000] = 1.0
+        onset[4460:4540] = 0.6
+        offset[4460:4540] = 0.6
+        event = DecodedEvent(
+            start=0.0, end=90.0, probability=0.9, peak=0.95, first_index=0, last_index=1
+        )
+        change = {
+            "times": times,
+            "onset_scores": onset,
+            "offset_scores": offset,
+            "scores": np.maximum(onset, offset),
+            "kind": "learned_onset_offset",
+            "onset_threshold": 0.5,
+            "offset_threshold": 0.5,
+        }
+        refined = refine_events([event], change, min_duration=10.0)
+        self.assertEqual(len(refined), 1, refined)
+
+    def test_edge_only_moves_when_clearly_stronger(self) -> None:
+        times = np.arange(6000, dtype=np.float64) * 0.01
+        onset = np.full_like(times, 0.02)
+        offset = np.full_like(times, 0.02)
+        onset[1970:2030] = 0.95
+        onset[2570:2630] = 0.99
+        offset[3900:4300] = 1.0
+        event = DecodedEvent(
+            start=20.0, end=40.0, probability=0.9, peak=0.95, first_index=0, last_index=1
+        )
+        refined = refine_event(
+            event,
+            {
+                "times": times,
+                "onset_scores": onset,
+                "offset_scores": offset,
+                "scores": np.maximum(onset, offset),
+                "kind": "learned_onset_offset",
+                "onset_threshold": 0.5,
+                "offset_threshold": 0.5,
+            },
+        )
+        # 旁边 6 s 处的峰只强 4%，不足以把端点拽走。
+        self.assertLessEqual(abs(refined["start"] - 20.0), 0.2)
 
     def test_onset_offset_model_round_trip(self) -> None:
         head = {

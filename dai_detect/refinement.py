@@ -16,6 +16,16 @@ from .temporal_decoder import DecodedEvent
 
 SMOOTH_EDGE_S = 0.2
 SNAP_SEARCH_S = 0.35
+# 解码器给出的端点常常偏离真值几十秒（盲测 p95 约 38 s）：固定 ±6 s 的搜索
+# 半径够不到，精修等于没做。半径随事件长度自适应，但设上限避免横跨整段内容。
+EDGE_SEARCH_FRACTION = 0.30
+EDGE_SEARCH_MAX_S = 15.0
+# 只有当新端点明显强于当前端点时才移动，避免把本来正确的端点拽到更响的
+# 节目音乐上（盲测里精修"改好 11 次、改坏 8 次"，几乎等于抛硬币）。
+EDGE_IMPROVE_FACTOR = 1.25
+# 单条赞助商创意很少超过 70 s；解码出的长块通常是整段广告位（2–4 家）。
+MAX_SINGLE_EVENT_S = 70.0
+SPLIT_SCORE_FACTOR = 1.5
 
 
 def _smooth(values: np.ndarray, half: int) -> np.ndarray:
@@ -79,6 +89,90 @@ def _plausible_pair(
     return interior <= 1.5 * min(start_score, end_score)
 
 
+def _score_near(times: np.ndarray, scores: np.ndarray, at: float) -> float:
+    """Best raw score within one grid cell of ``at``."""
+    if len(times) == 0 or len(scores) == 0:
+        return 0.0
+    index = int(np.clip(np.searchsorted(times, at), 0, len(times) - 1))
+    low = max(0, index - 1)
+    high = min(len(scores), index + 2)
+    return float(np.max(scores[low:high]))
+
+
+def _edge_search_s(start: float, end: float, search_s: float) -> float:
+    span = max(0.0, end - start)
+    return max(float(search_s), min(EDGE_SEARCH_FRACTION * span, EDGE_SEARCH_MAX_S))
+
+
+def _split_span(
+    times: np.ndarray,
+    onset: np.ndarray,
+    offset: np.ndarray,
+    start: float,
+    end: float,
+    min_duration: float,
+    threshold: float,
+) -> list[tuple[float, float]]:
+    """Cut an over-long decoded block at its strongest internal production change.
+
+    The failed blind runs show the decoder keeping one long block across a whole
+    ad pod while the labels are per sponsor creative. Boundary scores already
+    learn those creative transitions, so a strong internal peak is the right
+    place to cut; without a strong peak the block is left alone.
+    """
+    pieces: list[tuple[float, float]] = [(start, end)]
+    if len(times) == 0 or end - start <= MAX_SINGLE_EVENT_S:
+        return pieces
+    for _ in range(3):
+        result: list[tuple[float, float]] = []
+        changed = False
+        for low, high in pieces:
+            if high - low <= MAX_SINGLE_EVENT_S:
+                result.append((low, high))
+                continue
+            first = int(np.searchsorted(times, low + min_duration, side="left"))
+            last = int(np.searchsorted(times, high - min_duration, side="left"))
+            if last <= first:
+                result.append((low, high))
+                continue
+            combined = np.maximum(onset[first:last], offset[first:last])
+            offset_index = int(np.argmax(combined))
+            if float(combined[offset_index]) < threshold:
+                result.append((low, high))
+                continue
+            cut = float(times[first + offset_index])
+            result.extend([(low, cut), (cut, high)])
+            changed = True
+        pieces = result
+        if not changed:
+            break
+    return pieces
+
+
+def _refine_span(
+    times: np.ndarray,
+    onset_scores: np.ndarray,
+    offset_scores: np.ndarray,
+    start: float,
+    end: float,
+    search_s: float,
+    grid_s: float,
+    onset_threshold: float,
+    offset_threshold: float,
+) -> tuple[float, float, float, float]:
+    """Snap one span's edges to onset/offset peaks; returns the new edges+scores."""
+    radius = _edge_search_s(start, end, search_s)
+    new_start, start_score = _best_edge(times, onset_scores, start, radius, grid_s)
+    new_end, end_score = _best_edge(times, offset_scores, end, radius, grid_s)
+
+    # 只有明显更强的峰才值得移动端点；否则保留解码器给的位置。
+    if start_score < max(onset_threshold, EDGE_IMPROVE_FACTOR * _score_near(times, onset_scores, start)):
+        new_start, start_score = start, 0.0
+    if end_score < max(offset_threshold, EDGE_IMPROVE_FACTOR * _score_near(times, offset_scores, end)):
+        new_end, end_score = end, 0.0
+    return new_start, new_end, start_score, end_score
+
+
 def refine_event(
     event: DecodedEvent,
     change: dict,
@@ -101,12 +195,21 @@ def refine_event(
     if change.get("offset_threshold") is not None:
         offset_threshold = max(0.20, float(change["offset_threshold"]))
 
-    start, start_score = _best_edge(times, onset_scores, event.start, search_s, grid_s)
-    end, end_score = _best_edge(times, offset_scores, event.end, search_s, grid_s)
-    if start_score < onset_threshold:
-        start, start_score = original_start, 0.0
-    if end_score < offset_threshold:
-        end, end_score = original_end, 0.0
+    start, end, start_score, end_score = _refine_span(
+        times,
+        onset_scores,
+        offset_scores,
+        original_start,
+        original_end,
+        search_s,
+        grid_s,
+        onset_threshold,
+        offset_threshold,
+    )
+    if start_score <= 0.0:
+        start = original_start
+    if end_score <= 0.0:
+        end = original_end
 
     start = max(0.0, start)
     usable = _plausible_pair(
@@ -138,13 +241,51 @@ def refine_event(
     }
 
 
+def _split_decoded_events(
+    events: list[DecodedEvent], change: dict, min_duration: float
+) -> list[DecodedEvent]:
+    times = np.asarray(change.get("times", []))
+    onset = np.asarray(change.get("onset_scores", change.get("scores", [])))
+    offset = np.asarray(change.get("offset_scores", change.get("scores", [])))
+    if len(times) == 0:
+        return events
+    onset_threshold = float(change.get("onset_threshold", 0.0) or 0.0)
+    offset_threshold = float(change.get("offset_threshold", 0.0) or 0.0)
+    threshold = SPLIT_SCORE_FACTOR * max(0.20, onset_threshold, offset_threshold)
+    pieces: list[DecodedEvent] = []
+    for event in events:
+        spans = _split_span(
+            times, onset, offset, event.start, event.end, min_duration, threshold
+        )
+        if len(spans) <= 1:
+            pieces.append(event)
+            continue
+        for start, end in spans:
+            pieces.append(
+                DecodedEvent(
+                    start=start,
+                    end=end,
+                    probability=event.probability,
+                    peak=event.peak,
+                    first_index=event.first_index,
+                    last_index=event.last_index,
+                )
+            )
+    return pieces
+
+
 def refine_events(
     events: list[DecodedEvent],
     change: dict,
     search_s: float = 2.5,
     min_duration: float = 4.0,
 ) -> list[dict]:
-    return [
+    split = _split_decoded_events(events, change, min_duration)
+    refined = [
         refine_event(event, change, search_s=search_s, min_duration=min_duration)
-        for event in events
+        for event in split
     ]
+    kept = [item for item in refined if item["duration_s"] >= min_duration]
+    if kept:
+        return kept
+    return refined
