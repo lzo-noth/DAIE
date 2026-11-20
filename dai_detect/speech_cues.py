@@ -190,6 +190,14 @@ def cue_matrix(
     return matrix
 
 
+def marker_times(segments: list[dict]) -> list[float]:
+    """Times of ad-marker words/phrases, used to anchor event starts."""
+    _, words = _words(segments)
+    if not words:
+        return []
+    return sorted(at for at, _ in _marker_hits([token for token, _ in words], words))
+
+
 def attach_speech_cues(windows: dict, segments: list[dict]) -> dict:
     """Append content cues to a window payload, keeping names aligned."""
     times = np.asarray(windows.get("times", []), dtype=np.float64)

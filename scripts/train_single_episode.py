@@ -29,7 +29,7 @@ import os
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -63,7 +63,7 @@ from dai_detect.window_context import (
 )
 from dai_detect.refinement import refine_events
 from dai_detect.single_episode import extract_features
-from dai_detect.speech_cues import CUE_FEATURES, CUE_SCHEMA, attach_speech_cues
+from dai_detect.speech_cues import CUE_FEATURES, CUE_SCHEMA, attach_speech_cues, marker_times
 from dai_detect.feed_identity import canonical_feed_key
 from dai_detect.single_features import (
     WINDOW_FEATURE_SCHEMA,
@@ -96,6 +96,7 @@ class EpisodeSample:
     change_scores: np.ndarray
     change_grid_s: float
     boundary_features: np.ndarray
+    cue_starts: list = field(default_factory=list)
 
 
 def _load_annotations(path: Path) -> list[dict]:
@@ -177,6 +178,9 @@ def _extract_episode(job: dict) -> dict:
         "change_features": change["features"].astype(np.float16),
         "change_times": change["times"],
         "scores": heuristic_boundary_scores(change["features"]),
+        "cue_starts": (
+            marker_times(job["segments"]) if job.get("segments") is not None else []
+        ),
     }
 
 
@@ -1697,6 +1701,7 @@ def _event_metrics(
                     "kind": "learned_onset_offset",
                     "onset_threshold": onset_threshold,
                     "offset_threshold": offset_threshold,
+                    "cue_starts": sample.cue_starts,
                 }
             elif require_boundary and events:
                 # Refinement runs even when ground truth is empty, so an
@@ -1711,6 +1716,7 @@ def _event_metrics(
                     "times": np.arange(len(sample.change_scores)) * sample.change_grid_s,
                     "scores": sample.change_scores,
                     "kind": "heuristic",
+                    "cue_starts": sample.cue_starts,
                 }
             refined = refine_events(
                 events, change, search_s=DEFAULT_SEARCH_S, min_duration=MIN_AD_S
@@ -2225,6 +2231,7 @@ def main() -> int:
                 change_scores=scores,
                 change_grid_s=float(change["times"][1] - change["times"][0]) if len(change["times"]) > 1 else 0.01,
                 boundary_features=change["features"].astype(np.float16),
+                cue_starts=list(result.get("cue_starts") or []),
             )
         )
         audio_index += 1

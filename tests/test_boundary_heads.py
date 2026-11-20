@@ -150,6 +150,53 @@ class BoundaryHeadTest(unittest.TestCase):
         # 旁边 6 s 处的峰只强 4%，不足以把端点拽走。
         self.assertLessEqual(abs(refined["start"] - 20.0), 0.2)
 
+    def test_cue_marker_anchors_the_event_start(self) -> None:
+        times = np.arange(6000, dtype=np.float64) * 0.01
+        onset = np.full_like(times, 0.02)
+        offset = np.full_like(times, 0.02)
+        offset[3900:4300] = 1.0
+        event = DecodedEvent(
+            start=30.0, end=40.0, probability=0.9, peak=0.95, first_index=0, last_index=1
+        )
+        refined = refine_event(
+            event,
+            {
+                "times": times,
+                "onset_scores": onset,
+                "offset_scores": offset,
+                "scores": np.maximum(onset, offset),
+                "kind": "learned_onset_offset",
+                "onset_threshold": 0.5,
+                "offset_threshold": 0.5,
+                "cue_starts": [28.4],
+            },
+        )
+        self.assertLessEqual(abs(refined["start"] - 28.4), 0.05)
+        self.assertEqual(refined["evidence"]["start_source"], "cue")
+
+    def test_cue_marker_outside_the_radius_is_ignored(self) -> None:
+        times = np.arange(6000, dtype=np.float64) * 0.01
+        onset = np.full_like(times, 0.02)
+        offset = np.full_like(times, 0.02)
+        offset[3900:4300] = 1.0
+        event = DecodedEvent(
+            start=30.0, end=40.0, probability=0.9, peak=0.95, first_index=0, last_index=1
+        )
+        refined = refine_event(
+            event,
+            {
+                "times": times,
+                "onset_scores": onset,
+                "offset_scores": offset,
+                "scores": np.maximum(onset, offset),
+                "kind": "learned_onset_offset",
+                "onset_threshold": 0.5,
+                "offset_threshold": 0.5,
+                "cue_starts": [5.0],
+            },
+        )
+        self.assertLessEqual(abs(refined["start"] - 30.0), 0.2)
+
     def test_onset_offset_model_round_trip(self) -> None:
         head = {
             "mean": [0.0] * len(BOUNDARY_FEATURES),

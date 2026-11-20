@@ -26,6 +26,9 @@ EDGE_IMPROVE_FACTOR = 1.25
 # 单条赞助商创意很少超过 70 s；解码出的长块通常是整段广告位（2–4 家）。
 MAX_SINGLE_EVENT_S = 70.0
 SPLIT_SCORE_FACTOR = 1.5
+# 广告起读几乎总带固定话术（"this message comes from…"），盲测里真值起点到最近
+# 标记词的中位距离只有 0.8 s，比任何声学变化点都准。起点优先吸附到标记词。
+CUE_SNAP_S = 12.0
 
 
 def _smooth(values: np.ndarray, half: int) -> np.ndarray:
@@ -173,6 +176,20 @@ def _refine_span(
     return new_start, new_end, start_score, end_score
 
 
+def _cue_start(
+    cue_starts: list[float], original_start: float, end: float, min_duration: float
+) -> float | None:
+    """Nearest marker time around the decoded start, if it keeps the event valid."""
+    if not cue_starts:
+        return None
+    best = min(cue_starts, key=lambda value: abs(value - original_start))
+    if abs(best - original_start) > CUE_SNAP_S:
+        return None
+    if best < 0.0 or end - best < min_duration:
+        return None
+    return float(best)
+
+
 def refine_event(
     event: DecodedEvent,
     change: dict,
@@ -211,13 +228,20 @@ def refine_event(
     if end_score <= 0.0:
         end = original_end
 
+    cue_start = _cue_start(change.get("cue_starts") or [], original_start, end, min_duration)
     start = max(0.0, start)
-    usable = _plausible_pair(
-        times, combined, start, end, start_score, end_score, min_duration
-    )
+    if cue_start is not None:
+        # 标记词本身就是证据，不再要求声学端点分数为正。
+        start = cue_start
+        usable = end - start >= min_duration
+    else:
+        usable = _plausible_pair(
+            times, combined, start, end, start_score, end_score, min_duration
+        )
     if not usable:
         start, end = original_start, original_end
         start_score = end_score = 0.0
+        cue_start = None
 
     boundary_strength = (start_score + end_score) / 2.0
     confidence = min(0.99, max(0.0, 0.7 * event.probability + 0.3 * boundary_strength))
@@ -236,7 +260,10 @@ def refine_event(
             "boundary_kind": change.get("kind", "none"),
             "decoded_start": round(original_start, 2),
             "decoded_end": round(original_end, 2),
-            "refined": bool(start_score > 0 or end_score > 0),
+            "start_source": (
+                "cue" if cue_start is not None else ("boundary" if start_score > 0 else "decoded")
+            ),
+            "refined": bool(start_score > 0 or end_score > 0 or cue_start is not None),
         },
     }
 
