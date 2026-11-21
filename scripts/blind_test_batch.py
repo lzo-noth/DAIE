@@ -160,7 +160,7 @@ def _cluster_bootstrap(reports: list[dict], iterations: int = 2000, seed: int = 
 
 
 def _aggregate(reports: list[dict]) -> dict:
-    tp = fp = fn = predicted = ground_truth = 0
+    tp = fp = fn = predicted = ground_truth = ignored_predictions = 0
     total_duration = 0.0
     excluded_short_ads = 0
     boundary_errors: list[float] = []
@@ -194,6 +194,7 @@ def _aggregate(reports: list[dict]) -> dict:
         fp += false_positives
         fn += false_negatives
         predicted += int(metrics.get("predicted_events") or 0)
+        ignored_predictions += int(metrics.get("ignored_predictions") or 0)
         ground_truth += int(metrics.get("ground_truth_events") or 0)
         duration = float(report.get("duration_s") or 0.0)
         total_duration += duration
@@ -213,7 +214,7 @@ def _aggregate(reports: list[dict]) -> dict:
                 (float(match["start_error"]), float(match["end_error"]))
             )
 
-    precision = tp / predicted if predicted else None
+    precision = tp / (tp + fp) if tp + fp else None
     recall = tp / ground_truth if ground_truth else None
     f1 = (
         2.0 * precision * recall / (precision + recall)
@@ -250,6 +251,7 @@ def _aggregate(reports: list[dict]) -> dict:
         "false_positives": fp,
         "false_negatives": fn,
         "predicted_events": predicted,
+        "ignored_predictions": ignored_predictions,
         "ground_truth_events": ground_truth,
         "event_precision": round(precision, 4) if precision is not None else None,
         "event_recall": round(recall, 4) if recall is not None else None,
