@@ -198,6 +198,22 @@ def marker_times(segments: list[dict]) -> list[float]:
     return sorted(at for at, _ in _marker_hits([token for token, _ in words], words))
 
 
+def phrase_times(segments: list[dict]) -> list[float]:
+    """Times of multi-word sponsor phrases only ("this message comes from"…).
+
+    These mark where a *new sponsor read* begins, which is the creative
+    boundary the labels use; single words like "code" appear mid-read and would
+    over-split.
+    """
+    _, words = _words(segments)
+    if not words:
+        return []
+    return sorted(
+        at for at, weight in _marker_hits([token for token, _ in words], words)
+        if weight >= 2.0
+    )
+
+
 def attach_speech_cues(windows: dict, segments: list[dict]) -> dict:
     """Append content cues to a window payload, keeping names aligned."""
     times = np.asarray(windows.get("times", []), dtype=np.float64)

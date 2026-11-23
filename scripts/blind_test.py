@@ -582,6 +582,8 @@ def main() -> int:
             "false_positives",
             "false_negatives",
             "predicted_events",
+            "evaluated_predictions",
+            "ignored_predictions",
             "ground_truth_events",
             "iou_threshold",
         )},

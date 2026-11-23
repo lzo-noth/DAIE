@@ -53,6 +53,21 @@ class SpeechCueTest(unittest.TestCase):
         # 中性值：既没有任何标记，也不给出“刚说过广告”的假信号。
         self.assertTrue(np.all(matrix[:, columns["cue_since_marker"]] == 30.0))
 
+    def test_phrase_times_keep_only_sponsor_phrases(self) -> None:
+        from dai_detect.speech_cues import phrase_times
+
+        segments = [
+            {"start_s": 0.0, "end_s": 10.0, "text": "We talk about music and code today."},
+            {
+                "start_s": 20.0,
+                "end_s": 30.0,
+                "text": "This message comes from Acme. Visit acme dot com.",
+            },
+        ]
+        times = phrase_times(segments)
+        self.assertTrue(times, times)
+        self.assertTrue(all(19.0 <= value <= 31.0 for value in times), times)
+
     def test_attach_keeps_feature_names_aligned(self) -> None:
         windows = {
             "times": np.arange(0.5, 5.0, 0.5),

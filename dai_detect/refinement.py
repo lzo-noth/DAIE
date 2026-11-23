@@ -274,6 +274,8 @@ def _split_decoded_events(
     times = np.asarray(change.get("times", []))
     onset = np.asarray(change.get("onset_scores", change.get("scores", [])))
     offset = np.asarray(change.get("offset_scores", change.get("scores", [])))
+    cue_starts = change.get("cue_starts") or []
+    phrases = sorted(float(value) for value in (change.get("cue_phrases") or []))
     if len(times) == 0:
         return events
     onset_threshold = float(change.get("onset_threshold", 0.0) or 0.0)
@@ -281,23 +283,45 @@ def _split_decoded_events(
     threshold = SPLIT_SCORE_FACTOR * max(0.20, onset_threshold, offset_threshold)
     pieces: list[DecodedEvent] = []
     for event in events:
-        spans = _split_span(
-            times, onset, offset, event.start, event.end, min_duration, threshold
-        )
-        if len(spans) <= 1:
-            pieces.append(event)
-            continue
-        for start, end in spans:
-            pieces.append(
+        start = event.start
+        end = event.end
+        snapped = _cue_start(cue_starts, start, end, min_duration)
+        if snapped is not None:
+            start = snapped
+        # 先按“新赞助商开场语”切分：盲测里预测普遍比真值长 1.5–2 倍，正是把
+        # 相邻创意并成一块；这些短语就是标注用的创意边界。
+        cuts: list[float] = []
+        for cut in phrases:
+            if cut < start + min_duration or cut > end - min_duration:
+                continue
+            if cuts and cut - cuts[-1] < min_duration:
+                continue
+            cuts.append(cut)
+        bounds = [start] + cuts + [end]
+        spans = list(zip(bounds, bounds[1:]))
+        if len(spans) == 1:
+            spans = _split_span(
+                times, onset, offset, start, end, min_duration, threshold
+            )
+        event_pieces: list[DecodedEvent] = []
+        for low, high in spans:
+            if high - low < min_duration:
+                continue
+            event_pieces.append(
                 DecodedEvent(
-                    start=start,
-                    end=end,
+                    start=low,
+                    end=high,
                     probability=event.probability,
                     peak=event.peak,
                     first_index=event.first_index,
                     last_index=event.last_index,
                 )
             )
+        # 切分结果必须覆盖到原事件终点，否则退回原事件，避免把检出弄丢。
+        if event_pieces and abs(event_pieces[-1].end - end) < 1e-6:
+            pieces.extend(event_pieces)
+        else:
+            pieces.append(event)
     return pieces
 
 

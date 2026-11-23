@@ -197,6 +197,33 @@ class BoundaryHeadTest(unittest.TestCase):
         )
         self.assertLessEqual(abs(refined["start"] - 30.0), 0.2)
 
+    def test_sponsor_phrases_split_a_merged_pod(self) -> None:
+        times = np.arange(9000, dtype=np.float64) * 0.01
+        flat = np.full_like(times, 0.05)
+        event = DecodedEvent(
+            start=720.0, end=800.0, probability=0.9, peak=0.95, first_index=0, last_index=1
+        )
+        refined = refine_events(
+            [event],
+            {
+                "times": times,
+                "onset_scores": flat,
+                "offset_scores": flat,
+                "scores": flat,
+                "kind": "learned_onset_offset",
+                "onset_threshold": 0.5,
+                "offset_threshold": 0.5,
+                "cue_starts": [731.0],
+                "cue_phrases": [731.0, 760.0, 781.0],
+            },
+            min_duration=10.0,
+        )
+        starts = [round(item["start"], 1) for item in refined]
+        ends = [round(item["end"], 1) for item in refined]
+        self.assertEqual(starts, [731.0, 760.0, 781.0], refined)
+        self.assertEqual(ends[-1], 800.0)
+        self.assertEqual(len(refined), 3)
+
     def test_onset_offset_model_round_trip(self) -> None:
         head = {
             "mean": [0.0] * len(BOUNDARY_FEATURES),

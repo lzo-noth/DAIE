@@ -25,7 +25,7 @@ from .features import FeatureExtractor
 from .forensic import StereoForensicExtractor
 from .refinement import refine_events
 from .single_features import build_windows
-from .speech_cues import attach_speech_cues, marker_times
+from .speech_cues import attach_speech_cues, marker_times, phrase_times
 from .temporal_decoder import decode_windows
 
 TIMELINE_VERSION = 1
@@ -234,7 +234,11 @@ def analyze_single(
     if cfg.refine:
         change = score_boundaries(mono, forensic, boundary_model)
         if cfg.transcript_segments is not None:
-            change = {**change, "cue_starts": marker_times(cfg.transcript_segments)}
+            change = {
+                **change,
+                "cue_starts": marker_times(cfg.transcript_segments),
+                "cue_phrases": phrase_times(cfg.transcript_segments),
+            }
         events = refine_events(decoded, change, search_s=cfg.search_s, min_duration=cfg.min_ad_s)
     else:
         events = [

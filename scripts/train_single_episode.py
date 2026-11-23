@@ -63,7 +63,13 @@ from dai_detect.window_context import (
 )
 from dai_detect.refinement import refine_events
 from dai_detect.single_episode import extract_features
-from dai_detect.speech_cues import CUE_FEATURES, CUE_SCHEMA, attach_speech_cues, marker_times
+from dai_detect.speech_cues import (
+    CUE_FEATURES,
+    CUE_SCHEMA,
+    attach_speech_cues,
+    marker_times,
+    phrase_times,
+)
 from dai_detect.feed_identity import canonical_feed_key
 from dai_detect.single_features import (
     WINDOW_FEATURE_SCHEMA,
@@ -97,6 +103,7 @@ class EpisodeSample:
     change_grid_s: float
     boundary_features: np.ndarray
     cue_starts: list = field(default_factory=list)
+    cue_phrases: list = field(default_factory=list)
     ignored: list = field(default_factory=list)
 
 
@@ -181,6 +188,9 @@ def _extract_episode(job: dict) -> dict:
         "scores": heuristic_boundary_scores(change["features"]),
         "cue_starts": (
             marker_times(job["segments"]) if job.get("segments") is not None else []
+        ),
+        "cue_phrases": (
+            phrase_times(job["segments"]) if job.get("segments") is not None else []
         ),
     }
 
@@ -1190,6 +1200,8 @@ def _choose_boundary_thresholds(
                     "gt": ground_truth,
                     "duration_s": float(sample.duration_s),
                     "ignored": sample.ignored,
+                    "cue_starts": sample.cue_starts,
+                    "cue_phrases": sample.cue_phrases,
                 }
             )
             contributed = True
@@ -1230,6 +1242,8 @@ def _choose_boundary_thresholds(
                     "kind": "learned_onset_offset",
                     "onset_threshold": onset_threshold,
                     "offset_threshold": offset_threshold,
+                    "cue_starts": item.get("cue_starts") or [],
+                    "cue_phrases": item.get("cue_phrases") or [],
                 }
                 # 与部署端一致：精修不能把事件缩到比最短广告时长还短。
                 refined = refine_events(
@@ -1704,6 +1718,7 @@ def _event_metrics(
                     "onset_threshold": onset_threshold,
                     "offset_threshold": offset_threshold,
                     "cue_starts": sample.cue_starts,
+                    "cue_phrases": sample.cue_phrases,
                 }
             elif require_boundary and events:
                 # Refinement runs even when ground truth is empty, so an
@@ -1719,6 +1734,7 @@ def _event_metrics(
                     "scores": sample.change_scores,
                     "kind": "heuristic",
                     "cue_starts": sample.cue_starts,
+                    "cue_phrases": sample.cue_phrases,
                 }
             refined = refine_events(
                 events, change, search_s=DEFAULT_SEARCH_S, min_duration=MIN_AD_S
@@ -2236,6 +2252,7 @@ def main() -> int:
                 change_grid_s=float(change["times"][1] - change["times"][0]) if len(change["times"]) > 1 else 0.01,
                 boundary_features=change["features"].astype(np.float16),
                 cue_starts=list(result.get("cue_starts") or []),
+                cue_phrases=list(result.get("cue_phrases") or []),
                 ignored=list(ignored) if ads is not None else [],
             )
         )
