@@ -162,16 +162,28 @@ def _refine_span(
     grid_s: float,
     onset_threshold: float,
     offset_threshold: float,
+    pin_start: bool = False,
+    pin_end: bool = False,
 ) -> tuple[float, float, float, float]:
     """Snap one span's edges to onset/offset peaks; returns the new edges+scores."""
     radius = _edge_search_s(start, end, search_s)
-    new_start, start_score = _best_edge(times, onset_scores, start, radius, grid_s)
-    new_end, end_score = _best_edge(times, offset_scores, end, radius, grid_s)
+    if pin_start:
+        new_start, start_score = start, 0.0
+    else:
+        new_start, start_score = _best_edge(times, onset_scores, start, radius, grid_s)
+    if pin_end:
+        new_end, end_score = end, 0.0
+    else:
+        new_end, end_score = _best_edge(times, offset_scores, end, radius, grid_s)
 
     # 只有明显更强的峰才值得移动端点；否则保留解码器给的位置。
-    if start_score < max(onset_threshold, EDGE_IMPROVE_FACTOR * _score_near(times, onset_scores, start)):
+    if not pin_start and start_score < max(
+        onset_threshold, EDGE_IMPROVE_FACTOR * _score_near(times, onset_scores, start)
+    ):
         new_start, start_score = start, 0.0
-    if end_score < max(offset_threshold, EDGE_IMPROVE_FACTOR * _score_near(times, offset_scores, end)):
+    if not pin_end and end_score < max(
+        offset_threshold, EDGE_IMPROVE_FACTOR * _score_near(times, offset_scores, end)
+    ):
         new_end, end_score = end, 0.0
     return new_start, new_end, start_score, end_score
 
@@ -222,6 +234,8 @@ def refine_event(
         grid_s,
         onset_threshold,
         offset_threshold,
+        pin_start=bool(getattr(event, "fixed_start", False)),
+        pin_end=bool(getattr(event, "fixed_end", False)),
     )
     if start_score <= 0.0:
         start = original_start
@@ -315,6 +329,9 @@ def _split_decoded_events(
                     peak=event.peak,
                     first_index=event.first_index,
                     last_index=event.last_index,
+                    # 因开场语/短语切出来的端点直接采信，不再交给声学峰。
+                    fixed_start=low != event.start or snapped is not None,
+                    fixed_end=abs(high - event.end) > 1e-6,
                 )
             )
         # 切分结果必须覆盖到原事件终点，否则退回原事件，避免把检出弄丢。

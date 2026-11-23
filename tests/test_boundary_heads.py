@@ -224,6 +224,33 @@ class BoundaryHeadTest(unittest.TestCase):
         self.assertEqual(ends[-1], 800.0)
         self.assertEqual(len(refined), 3)
 
+    def test_phrase_cut_end_is_not_pulled_by_an_acoustic_peak(self) -> None:
+        times = np.arange(22000, dtype=np.float64) * 0.01
+        onset = np.full_like(times, 0.02)
+        offset = np.full_like(times, 0.02)
+        # 130 s 处有更强的 offset 峰，但 140 s 是下一家赞助商的开场语。
+        offset[12900:13100] = 1.0
+        onset[13900:14100] = 1.0
+        event = DecodedEvent(
+            start=100.0, end=200.0, probability=0.9, peak=0.95, first_index=0, last_index=1
+        )
+        refined = refine_events(
+            [event],
+            {
+                "times": times,
+                "onset_scores": onset,
+                "offset_scores": offset,
+                "scores": np.maximum(onset, offset),
+                "kind": "learned_onset_offset",
+                "onset_threshold": 0.5,
+                "offset_threshold": 0.5,
+                "cue_phrases": [140.0],
+            },
+            min_duration=10.0,
+        )
+        self.assertEqual(len(refined), 2, refined)
+        self.assertLessEqual(abs(refined[0]["end"] - 140.0), 0.05, refined[0])
+
     def test_onset_offset_model_round_trip(self) -> None:
         head = {
             "mean": [0.0] * len(BOUNDARY_FEATURES),

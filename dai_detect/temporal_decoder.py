@@ -24,6 +24,10 @@ class DecodedEvent:
     peak: float
     first_index: int
     last_index: int
+    # 由赞助商开场语切分/吸附确定的端点不再让声学峰去改：盲测显示被切出来的
+    # 端点一旦交给声学峰，会偏离真值 10 s 以上。
+    fixed_start: bool = False
+    fixed_end: bool = False
 
     @property
     def duration(self) -> float:
