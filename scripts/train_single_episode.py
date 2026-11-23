@@ -77,7 +77,7 @@ from dai_detect.single_features import (
     build_windows,
     window_labels,
 )
-from dai_detect.target_scope import split_ads, target_scope_payload
+from dai_detect.target_scope import ad_style, split_ads, target_scope_payload
 from dai_detect.temporal_decoder import decode_windows
 
 
@@ -105,6 +105,7 @@ class EpisodeSample:
     cue_starts: list = field(default_factory=list)
     cue_phrases: list = field(default_factory=list)
     ignored: list = field(default_factory=list)
+    host_read: list = field(default_factory=list)
 
 
 def _load_annotations(path: Path) -> list[dict]:
@@ -1200,6 +1201,7 @@ def _choose_boundary_thresholds(
                     "gt": ground_truth,
                     "duration_s": float(sample.duration_s),
                     "ignored": sample.ignored,
+                    "host_read": sample.host_read,
                     "cue_starts": sample.cue_starts,
                     "cue_phrases": sample.cue_phrases,
                 }
@@ -1251,7 +1253,12 @@ def _choose_boundary_thresholds(
                 )
             else:
                 refined = []
-            metrics = evaluate_events(refined, item["gt"], ignored=item.get("ignored") or [])
+            metrics = evaluate_events(
+                refined,
+                item["gt"],
+                ignored=item.get("ignored") or [],
+                separate=item.get("host_read") or [],
+            )
             matched += len(metrics["matches"])
             false_positives += int(metrics["false_positives"])
             for match in metrics["matches"]:
@@ -1756,7 +1763,11 @@ def _event_metrics(
             for ad in sample.ads
         ]
         episode = evaluate_events(
-            refined, truth, duration_s=sample.duration_s, ignored=sample.ignored
+            refined,
+            truth,
+            duration_s=sample.duration_s,
+            ignored=sample.ignored,
+            separate=sample.host_read,
         )
         matched += int(episode["matched"])
         false_positives += int(episode["false_positives"])
@@ -2198,6 +2209,11 @@ def main() -> int:
             ads = [item for item in ads if item["end_s"] - item["start_s"] >= MIN_AD_S]
             # 产品目标是第三方预录广告。主播口播是最接近正文的 hard negative；
             # 制作风格未知的区间两端都不用，避免污染正负监督与评测分母。
+            # 评测时 host_read 检出单独计数，未知区间按屏蔽处理。
+            host_read_spans = [item for item in ads if ad_style(item) == "host_read"]
+            unknown_spans = [
+                item for item in ads if ad_style(item) not in ("produced", "host_read")
+            ]
             ads, non_target, ignored = split_ads(ads, args.host_read)
             if non_target:
                 print(
@@ -2253,7 +2269,8 @@ def main() -> int:
                 boundary_features=change["features"].astype(np.float16),
                 cue_starts=list(result.get("cue_starts") or []),
                 cue_phrases=list(result.get("cue_phrases") or []),
-                ignored=list(ignored) if ads is not None else [],
+                ignored=list(unknown_spans) if ads is not None else [],
+                host_read=list(host_read_spans) if ads is not None else [],
             )
         )
         audio_index += 1

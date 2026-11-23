@@ -118,8 +118,8 @@ def _verify_human_labels(
 
 def _scope_ground_truth(
     ads: list[dict], min_ad_s: float, target_scope: str = "all"
-) -> tuple[list[dict], list[dict], list[dict]]:
-    """Return ``(kept, excluded, ignored)`` under the product's ad definition.
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    """Return ``(kept, excluded, ignored, host_read)`` under the product's definition.
 
     The decoder cannot emit an event shorter than ``min_ad_s``, so counting
     such an ad in the denominator would manufacture a guaranteed false
@@ -127,12 +127,14 @@ def _scope_ground_truth(
     ``ad_production_style`` is ``produced``; annotations without a style are
     excluded rather than assumed to be produced.
 
-    ``ignored`` holds spans whose style is unknown: a prediction there cannot
-    be judged, so it must not count as a false positive.
+    ``ignored`` holds spans whose style is unknown (a prediction there cannot be
+    judged), ``host_read`` holds the annotated non-target ad type: detecting it
+    is reported separately instead of as a false positive.
     """
     kept: list[dict] = []
     excluded: list[dict] = []
     ignored: list[dict] = []
+    host_read: list[dict] = []
     for ad in ads:
         style = str(ad.get("ad_production_style") or "").strip()
         target_ok = target_scope == "all" or style == "produced"
@@ -140,9 +142,11 @@ def _scope_ground_truth(
             kept.append(ad)
         else:
             excluded.append(ad)
-            if style not in ("produced", "host_read"):
+            if style == "host_read":
+                host_read.append(ad)
+            elif style != "produced":
                 ignored.append(ad)
-    return kept, excluded, ignored
+    return kept, excluded, ignored, host_read
 
 
 def _identity_checks(
@@ -471,7 +475,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 3
-    ground_truth, excluded_short_ads, ignored_ads = _scope_ground_truth(
+    ground_truth, excluded_short_ads, ignored_ads, host_read_ads = _scope_ground_truth(
         ground_truth, args.min_ad, args.target_scope
     )
     style_counts: dict[str, int] = {}
@@ -518,6 +522,7 @@ def main() -> int:
         ground_truth,
         duration_s=timeline["duration_s"] or gt_duration,
         ignored=ignored_ads,
+        separate=host_read_ads,
     )
     acceptance = {
         **ACCEPTANCE,
@@ -584,6 +589,7 @@ def main() -> int:
             "predicted_events",
             "evaluated_predictions",
             "ignored_predictions",
+            "separate_predictions",
             "ground_truth_events",
             "iou_threshold",
         )},

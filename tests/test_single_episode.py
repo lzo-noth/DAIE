@@ -187,6 +187,19 @@ class SingleEpisodeTest(unittest.TestCase):
         self.assertEqual(metrics["false_positives"], 0)
         self.assertEqual(metrics["event_precision"], 1.0)
 
+    def test_host_read_detections_are_counted_separately(self) -> None:
+        # host_read 也是广告：检出它说明模型找到了广告，只是类型不对，
+        # 不能把它和「纯内容误报」混为一谈。
+        metrics = evaluate_events(
+            [{"start_s": 0.0, "end_s": 20.0}, {"start_s": 100.0, "end_s": 120.0}],
+            [{"start_s": 0.0, "end_s": 20.0}],
+            duration_s=3600.0,
+            separate=[{"start_s": 100.0, "end_s": 130.0}],
+        )
+        self.assertEqual(metrics["separate_predictions"], 1)
+        self.assertEqual(metrics["false_positives"], 0)
+        self.assertEqual(metrics["event_precision"], 1.0)
+
     def test_max_matching_beats_greedy_iou(self) -> None:
         # Greedy picks P1-G1 (IoU 0.83) and leaves P2 unmatched.
         # Maximum matching instead uses P1-G2 (0.47) and P2-G1 (0.80).

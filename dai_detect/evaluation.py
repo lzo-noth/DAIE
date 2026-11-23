@@ -145,25 +145,38 @@ def evaluate_events(
     duration_s: float | None = None,
     iou_threshold: float = 0.3,
     ignored: Iterable[dict] | None = None,
+    separate: Iterable[dict] | None = None,
 ) -> dict:
     predictions = list(predicted)
     truths = list(ground_truth)
     ignored_spans = [_bounds(item) for item in (ignored or [])]
+    # host_read 广告是另一种有明确标注的非目标类型：检出它说明模型找到了广告，
+    # 只是类型不对。单独计数，不混进误报，也不当命中。
+    separate_spans = [_bounds(item) for item in (separate or [])]
     result = match_events(predictions, truths, iou_threshold=iou_threshold)
     matched = len(result["matches"])
+
+    def _overlaps(index: int, spans: list[tuple[float, float]]) -> bool:
+        start, end = _bounds(predictions[index])
+        span = max(1e-9, end - start)
+        for low, high in spans:
+            inter = min(end, high) - max(start, low)
+            if inter > 0 and (inter >= 0.5 * span or low <= start <= high):
+                return True
+        return False
 
     # 标注未确认的区间（unknown/缺失）既不进真值也不该被算作误报：预测落在
     # 里面时无法判断对错，按 SPEC 的屏蔽规则排除出分母。
     ignored_predictions: list[int] = []
+    separate_predictions: list[int] = []
     for index in result["unmatched_predictions"]:
-        start, end = _bounds(predictions[index])
-        span = max(1e-9, end - start)
-        for low, high in ignored_spans:
-            inter = min(end, high) - max(start, low)
-            if inter > 0 and (inter >= 0.5 * span or low <= start <= high):
-                ignored_predictions.append(index)
-                break
-    evaluated_predictions = len(predictions) - len(ignored_predictions)
+        if _overlaps(index, ignored_spans):
+            ignored_predictions.append(index)
+        elif _overlaps(index, separate_spans):
+            separate_predictions.append(index)
+    evaluated_predictions = (
+        len(predictions) - len(ignored_predictions) - len(separate_predictions)
+    )
     precision = matched / evaluated_predictions if evaluated_predictions else None
     recall = matched / len(truths) if truths else None
     f1 = (
@@ -185,7 +198,11 @@ def evaluate_events(
     boundary_end_p95 = float(np.percentile(end_errors, 95)) if end_errors else None
     boundary_max_p95 = float(np.percentile(max_errors, 95)) if max_errors else None
 
-    false_positives = len(result["unmatched_predictions"]) - len(ignored_predictions)
+    false_positives = (
+        len(result["unmatched_predictions"])
+        - len(ignored_predictions)
+        - len(separate_predictions)
+    )
     false_negatives = len(result["unmatched_ground_truth"])
     fp_per_hour = None
     if duration_s and duration_s > 0:
@@ -199,6 +216,7 @@ def evaluate_events(
         "predicted_events": len(predictions),
         "evaluated_predictions": evaluated_predictions,
         "ignored_predictions": len(ignored_predictions),
+        "separate_predictions": len(separate_predictions),
         "matched": matched,
         "false_positives": false_positives,
         "false_negatives": false_negatives,
@@ -219,7 +237,7 @@ def evaluate_events(
         "unmatched_predictions": [
             predictions[index]
             for index in result["unmatched_predictions"]
-            if index not in set(ignored_predictions)
+            if index not in set(ignored_predictions) and index not in set(separate_predictions)
         ],
         "unmatched_ground_truth": [
             {"start_s": _bounds(truths[index])[0], "end_s": _bounds(truths[index])[1]}

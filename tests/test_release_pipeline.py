@@ -150,14 +150,17 @@ class BatchCommandTest(unittest.TestCase):
 class ShortAdScopeTest(unittest.TestCase):
     def test_short_ground_truth_ads_are_excluded(self) -> None:
         ads = [
-            {"start_s": 10.0, "end_s": 20.0},
+            {"start_s": 10.0, "end_s": 20.0, "ad_production_style": "produced"},
             {"start_s": 30.0, "end_s": 32.7},
+            {"start_s": 40.0, "end_s": 70.0, "ad_production_style": "host_read"},
         ]
-        kept, excluded, ignored = _scope_ground_truth(ads, 10.0)
+        kept, excluded, ignored, host_read = _scope_ground_truth(ads, 10.0, "produced")
         self.assertEqual(len(kept), 1)
-        self.assertEqual(len(excluded), 1)
-        # 被排除的短广告同时缺少制作风格标注，评测时按屏蔽区间处理。
+        self.assertEqual(len(excluded), 2)
+        # 被排除的短广告缺少制作风格标注，评测时按屏蔽区间处理。
         self.assertEqual(len(ignored), 1)
+        # 主播口播是另一种明确的非目标类型，检出它单独计数而不是误报。
+        self.assertEqual(len(host_read), 1)
 
 
 class HumanLabelGateTest(unittest.TestCase):

@@ -160,7 +160,7 @@ def _cluster_bootstrap(reports: list[dict], iterations: int = 2000, seed: int = 
 
 
 def _aggregate(reports: list[dict]) -> dict:
-    tp = fp = fn = predicted = ground_truth = ignored_predictions = 0
+    tp = fp = fn = predicted = ground_truth = ignored_predictions = separate_predictions = 0
     total_duration = 0.0
     excluded_short_ads = 0
     boundary_errors: list[float] = []
@@ -195,6 +195,7 @@ def _aggregate(reports: list[dict]) -> dict:
         fn += false_negatives
         predicted += int(metrics.get("predicted_events") or 0)
         ignored_predictions += int(metrics.get("ignored_predictions") or 0)
+        separate_predictions += int(metrics.get("separate_predictions") or 0)
         ground_truth += int(metrics.get("ground_truth_events") or 0)
         duration = float(report.get("duration_s") or 0.0)
         total_duration += duration
@@ -252,6 +253,7 @@ def _aggregate(reports: list[dict]) -> dict:
         "false_negatives": fn,
         "predicted_events": predicted,
         "ignored_predictions": ignored_predictions,
+        "separate_predictions": separate_predictions,
         "ground_truth_events": ground_truth,
         "event_precision": round(precision, 4) if precision is not None else None,
         "event_recall": round(recall, 4) if recall is not None else None,
