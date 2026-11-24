@@ -23,9 +23,13 @@ EDGE_SEARCH_MAX_S = 15.0
 # 只有当新端点明显强于当前端点时才移动，避免把本来正确的端点拽到更响的
 # 节目音乐上（盲测里精修"改好 11 次、改坏 8 次"，几乎等于抛硬币）。
 EDGE_IMPROVE_FACTOR = 1.25
-# 单条赞助商创意很少超过 70 s；解码出的长块通常是整段广告位（2–4 家）。
-MAX_SINGLE_EVENT_S = 70.0
+# 标注里 produced 创意的 p90 约 58 s，而盲测里被并成一整块的广告位在 47–65 s；
+# 上限设 70 s 时这些块根本进不了切分逻辑，两条真值因此被判成一条长事件。
+MAX_SINGLE_EVENT_S = 45.0
 SPLIT_SCORE_FACTOR = 1.5
+# 校准后的边界阈值常在 0.57–0.88，乘 1.5 之后超过 1.0，切分规则等于永不生效。
+# 给切分阈值设上限：只有高置信的内部边界才切开过长块，避免把单条长创意切碎。
+MAX_SPLIT_SCORE = 0.75
 # 广告起读几乎总带固定话术（"this message comes from…"），盲测里真值起点到最近
 # 标记词的中位距离只有 0.8 s，比任何声学变化点都准。起点优先吸附到标记词。
 CUE_SNAP_S = 12.0
@@ -294,7 +298,10 @@ def _split_decoded_events(
         return events
     onset_threshold = float(change.get("onset_threshold", 0.0) or 0.0)
     offset_threshold = float(change.get("offset_threshold", 0.0) or 0.0)
-    threshold = SPLIT_SCORE_FACTOR * max(0.20, onset_threshold, offset_threshold)
+    threshold = min(
+        MAX_SPLIT_SCORE,
+        SPLIT_SCORE_FACTOR * max(0.20, onset_threshold, offset_threshold),
+    )
     pieces: list[DecodedEvent] = []
     for event in events:
         start = event.start

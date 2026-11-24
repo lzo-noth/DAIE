@@ -125,6 +125,55 @@ class BoundaryHeadTest(unittest.TestCase):
         refined = refine_events([event], change, min_duration=10.0)
         self.assertEqual(len(refined), 1, refined)
 
+    def test_calibrated_thresholds_still_allow_a_confident_internal_cut(self) -> None:
+        # 校准后的 onset/offset 阈值高于 0.5 时，1.5× 会超过 1.0，旧规则等于永不
+        # 切分；盲测里 52 s 的广告位就是这样把两条创意并成一条的。
+        times = np.arange(10000, dtype=np.float64) * 0.01
+        onset = np.full_like(times, 0.05)
+        offset = np.full_like(times, 0.05)
+        onset[0:60] = 1.0
+        offset[8940:9000] = 1.0
+        onset[4200:4400] = 0.8
+        offset[4200:4400] = 0.8
+        event = DecodedEvent(
+            start=0.0, end=60.0, probability=0.9, peak=0.95, first_index=0, last_index=1
+        )
+        change = {
+            "times": times,
+            "onset_scores": onset,
+            "offset_scores": offset,
+            "scores": np.maximum(onset, offset),
+            "kind": "learned_onset_offset",
+            "onset_threshold": 0.64,
+            "offset_threshold": 0.57,
+        }
+        refined = refine_events([event], change, min_duration=10.0)
+        self.assertEqual(len(refined), 2, refined)
+        self.assertLess(refined[0]["end"], refined[1]["start"] + 1e-6)
+
+    def test_split_still_requires_a_confident_internal_change(self) -> None:
+        times = np.arange(10000, dtype=np.float64) * 0.01
+        onset = np.full_like(times, 0.05)
+        offset = np.full_like(times, 0.05)
+        onset[0:60] = 1.0
+        offset[8940:9000] = 1.0
+        onset[4200:4400] = 0.7
+        offset[4200:4400] = 0.7
+        event = DecodedEvent(
+            start=0.0, end=60.0, probability=0.9, peak=0.95, first_index=0, last_index=1
+        )
+        change = {
+            "times": times,
+            "onset_scores": onset,
+            "offset_scores": offset,
+            "scores": np.maximum(onset, offset),
+            "kind": "learned_onset_offset",
+            "onset_threshold": 0.64,
+            "offset_threshold": 0.57,
+        }
+        refined = refine_events([event], change, min_duration=10.0)
+        self.assertEqual(len(refined), 1, refined)
+
     def test_edge_only_moves_when_clearly_stronger(self) -> None:
         times = np.arange(6000, dtype=np.float64) * 0.01
         onset = np.full_like(times, 0.02)
