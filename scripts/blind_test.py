@@ -304,6 +304,10 @@ def main() -> int:
     parser.add_argument("--out", type=Path, help="保存检测时间轴 JSON")
     parser.add_argument("--metrics", type=Path, help="保存评测指标 JSON")
     parser.add_argument("--threshold", type=float)
+    # 解码滞回阈值此前只能由模型 threshold 推导（enter=threshold+0.05，
+    # exit=enter-0.15），无法针对某一版模型做扫描；显式给值时覆盖推导结果。
+    parser.add_argument("--enter-threshold", type=float, help="覆盖解码进入阈值")
+    parser.add_argument("--exit-threshold", type=float, help="覆盖解码退出阈值")
     parser.add_argument("--min-ad", type=float, default=10.0)
     parser.add_argument(
         "--target-scope",
@@ -391,7 +395,10 @@ def main() -> int:
 
     cfg = SingleConfig(
         min_ad_s=args.min_ad,
-        enter_threshold=args.threshold,
+        enter_threshold=(
+            args.enter_threshold if args.enter_threshold is not None else args.threshold
+        ),
+        exit_threshold=args.exit_threshold,
         model_path=str(args.model) if args.model else None,
         boundary_model_path=str(args.boundary_model) if args.boundary_model else None,
         proxy=args.proxy,

@@ -337,6 +337,10 @@ def _run_row(row: dict, args: argparse.Namespace, base: Path) -> dict:
             command += ["--model", str(args.model)]
         if args.boundary_model:
             command += ["--boundary-model", str(args.boundary_model)]
+        if getattr(args, "enter_threshold", None) is not None:
+            command += ["--enter-threshold", str(args.enter_threshold)]
+        if getattr(args, "exit_threshold", None) is not None:
+            command += ["--exit-threshold", str(args.exit_threshold)]
         if getattr(args, "transcripts", None):
             command += ["--transcripts", str(args.transcripts)]
         if getattr(args, "asr", False):
@@ -430,6 +434,8 @@ def main() -> int:
         help="真值评测范围；模型按 produced 训练时应使用 produced",
     )
     parser.add_argument("--bootstrap-iterations", type=int, default=2000)
+    parser.add_argument("--enter-threshold", type=float, help="覆盖解码进入阈值（默认由模型 threshold 推导）")
+    parser.add_argument("--exit-threshold", type=float, help="覆盖解码退出阈值（默认 enter-0.15）")
     parser.add_argument("--min-events", type=int, default=10)
     parser.add_argument("--min-feeds", type=int, default=3)
     parser.add_argument(

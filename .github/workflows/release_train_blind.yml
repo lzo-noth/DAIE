@@ -54,6 +54,14 @@ on:
         description: "1=盲测不用现成转写，改由离线 ASR 生成词级时间（端到端验证）"
         required: false
         default: "0"
+      enter_threshold:
+        description: "覆盖解码进入阈值（留空=按模型 threshold 推导）"
+        required: false
+        default: ""
+      exit_threshold:
+        description: "覆盖解码退出阈值（留空=enter-0.15）"
+        required: false
+        default: ""
 permissions:
   contents: read
   actions: read
@@ -170,6 +178,8 @@ jobs:
           REQUIRE_CALIBRATED: ${{ inputs.require_calibrated_models }}
           TARGET_SCOPE: ${{ inputs.target_scope }}
           USE_ASR: ${{ inputs.use_asr }}
+          ENTER_THRESHOLD: ${{ inputs.enter_threshold }}
+          EXIT_THRESHOLD: ${{ inputs.exit_threshold }}
         run: |
           set -euo pipefail
           args=()
@@ -189,6 +199,13 @@ jobs:
           else
             echo "::warning::跳过严格校准门禁，本次盲测结果仅用于诊断"
           fi
+          decoding=()
+          if [ -n "${ENTER_THRESHOLD:-}" ]; then
+            decoding+=(--enter-threshold "$ENTER_THRESHOLD")
+          fi
+          if [ -n "${EXIT_THRESHOLD:-}" ]; then
+            decoding+=(--exit-threshold "$EXIT_THRESHOLD")
+          fi
           python scripts/blind_test_batch.py \
             --manifest out/release/blind_generated.jsonl \
             --model out/release/ad_model.json \
@@ -197,6 +214,7 @@ jobs:
             --require-models "${strict[@]}" --require-independent-test \
             --min-events "$MIN_EVENTS" --min-feeds "$MIN_FEEDS" \
             --target-scope "$TARGET_SCOPE" \
+            "${decoding[@]}" \
             "${args[@]}" \
             --reports-out-dir out/release/blind_reports \
             --out out/release/blind_summary.json
